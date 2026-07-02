@@ -32,7 +32,7 @@ def init_score_accumulator(batch_shape=(), *, jnp):
 def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeights, *, jnp):
     """Accumulate one step of core WBC rollout score terms."""
 
-    terms = _ensure_accumulator(accumulator, root=step_state["root_pos"], jnp=jnp)
+    terms = _require_accumulator(accumulator)
     batch_shape = _shape_tuple(terms["count"].shape)
     root_error = _mean_squared(
         step_state["root_pos"],
@@ -94,7 +94,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
 def finalize_score(accumulator, *, jnp):
     """Return mean score metrics from a streaming score accumulator."""
 
-    terms = _ensure_accumulator(accumulator, root=0.0, jnp=jnp)
+    terms = _empty_or_valid_accumulator(accumulator, jnp=jnp)
     count = jnp.maximum(terms["count"], 1.0)
     score = terms["score_sum"] / count
     root_pos_error = terms["root_pos_error_sum"] / count
@@ -148,13 +148,19 @@ def _mean_feature_axes(value, *, batch_shape: tuple[int, ...], jnp):
     return jnp.mean(value, axis=reduce_axes)
 
 
-def _ensure_accumulator(accumulator, *, root, jnp):
-    if accumulator:
-        missing = [name for name in ACCUMULATOR_KEYS if name not in accumulator]
-        if missing:
-            raise KeyError(f"Missing score accumulator keys: {missing}")
-        return dict(accumulator)
-    return init_score_accumulator(_leading_shape(root, jnp=jnp), jnp=jnp)
+def _require_accumulator(accumulator):
+    if not accumulator:
+        raise KeyError("score_step requires init_score_accumulator output")
+    missing = [name for name in ACCUMULATOR_KEYS if name not in accumulator]
+    if missing:
+        raise KeyError(f"Missing score accumulator keys: {missing}")
+    return dict(accumulator)
+
+
+def _empty_or_valid_accumulator(accumulator, *, jnp):
+    if not accumulator:
+        return init_score_accumulator((), jnp=jnp)
+    return _require_accumulator(accumulator)
 
 
 def _leading_shape(value, *, jnp) -> tuple[int, ...]:

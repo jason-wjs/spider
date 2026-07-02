@@ -93,7 +93,14 @@ class MjxScoringTest(unittest.TestCase):
             }
         )
 
-        accumulator = score_step({}, step_state, reference_state, weights, jnp=_NumpyJnp)
+        accumulator = init_score_accumulator((), jnp=_NumpyJnp)
+        accumulator = score_step(
+            accumulator,
+            step_state,
+            reference_state,
+            weights,
+            jnp=_NumpyJnp,
+        )
         metrics = finalize_score(accumulator, jnp=_NumpyJnp)
 
         expected = _expected_terms(step_state, reference_state)
@@ -113,8 +120,9 @@ class MjxScoringTest(unittest.TestCase):
     def test_finalize_score_returns_compute_rollout_scores_term_aliases(self) -> None:
         step_state = _step_state()
         reference_state = _reference_state()
+        accumulator = init_score_accumulator((), jnp=_NumpyJnp)
         accumulator = score_step(
-            {},
+            accumulator,
             step_state,
             reference_state,
             JaxScoreWeights({"root_pos_error": 1.0}),
@@ -238,7 +246,7 @@ class MjxScoringTest(unittest.TestCase):
 
         small = finalize_score(
             score_step(
-                {},
+                init_score_accumulator((), jnp=_NumpyJnp),
                 _step_state(offset=0.0),
                 reference_state,
                 weights,
@@ -248,7 +256,7 @@ class MjxScoringTest(unittest.TestCase):
         )
         large = finalize_score(
             score_step(
-                {},
+                init_score_accumulator((), jnp=_NumpyJnp),
                 _step_state(offset=2.0),
                 reference_state,
                 weights,
@@ -258,6 +266,16 @@ class MjxScoringTest(unittest.TestCase):
         )
 
         self.assertLess(float(large["score"]), float(small["score"]))
+
+    def test_score_step_rejects_empty_accumulator(self) -> None:
+        with self.assertRaisesRegex(KeyError, "init_score_accumulator"):
+            score_step(
+                {},
+                _step_state(),
+                _reference_state(),
+                JaxScoreWeights({"root_pos": 1.0}),
+                jnp=_NumpyJnp,
+            )
 
     def test_finalize_score_handles_empty_accumulator(self) -> None:
         metrics = finalize_score({}, jnp=_NumpyJnp)
