@@ -378,6 +378,40 @@ class MjxObsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Expected history shape"):
             update_obs_history(bad_history, obs, initialized=True, jnp=_NumpyJnp)
 
+    def test_obs_indices_are_static_jax_pytree_node(self) -> None:
+        try:
+            import jax
+        except Exception as exc:
+            self.skipTest(f"JAX is not available: {exc}")
+
+        indices = JaxObsIndices(
+            command_body_indices=(1, 2, 3),
+            limb_indices=(2, 3),
+            anchor_index=1,
+            tracking_anchor_index=2,
+        )
+
+        leaves, treedef = jax.tree_util.tree_flatten(indices)
+
+        self.assertEqual(leaves, [])
+        self.assertIn("JaxObsIndices", str(treedef))
+
+    def test_obs_state_is_jax_pytree_with_array_leaves(self) -> None:
+        try:
+            import jax
+        except Exception as exc:
+            self.skipTest(f"JAX is not available: {exc}")
+
+        state = JaxObsState(
+            history={"actions": np.zeros((1, OBS_HISTORY_LENGTH, ACTION_DIM))},
+            last_action=np.zeros((1, ACTION_DIM)),
+        )
+
+        leaves, treedef = jax.tree_util.tree_flatten(state)
+
+        self.assertEqual(len(leaves), 2)
+        self.assertIn("JaxObsState", str(treedef))
+
 
 if __name__ == "__main__":
     unittest.main()

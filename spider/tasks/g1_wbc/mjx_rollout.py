@@ -26,15 +26,36 @@ PhysicsStepFn = Callable[..., tuple[Mapping[str, object], Mapping[str, object]]]
 def make_rollout_scorer(*, runtime, physics_step_fn: PhysicsStepFn):
     """Bind runtime dependencies into the optimizer's four-argument scorer."""
 
+    jitted_by_model_id: dict[int, Callable[..., object]] = {}
+
     def rollout_fn(samples, reference, actor_params, model_bundle):
-        return score_candidate_controls(
-            samples,
-            reference,
-            actor_params,
-            model_bundle,
-            runtime=runtime,
-            physics_step_fn=physics_step_fn,
-        )
+        jit = getattr(getattr(runtime, "jax", None), "jit", None)
+        if jit is None:
+            return score_candidate_controls(
+                samples,
+                reference,
+                actor_params,
+                model_bundle,
+                runtime=runtime,
+                physics_step_fn=physics_step_fn,
+            )
+        model_key = id(model_bundle)
+        compiled = jitted_by_model_id.get(model_key)
+        if compiled is None:
+
+            def score_for_model(samples, reference, actor_params):
+                return score_candidate_controls(
+                    samples,
+                    reference,
+                    actor_params,
+                    model_bundle,
+                    runtime=runtime,
+                    physics_step_fn=physics_step_fn,
+                )
+
+            compiled = jit(score_for_model)
+            jitted_by_model_id[model_key] = compiled
+        return compiled(samples, reference, actor_params)
 
     return rollout_fn
 

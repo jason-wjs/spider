@@ -14,19 +14,61 @@ from spider.tasks.g1_wbc.constants import (
     OBS_HISTORY_LENGTH,
 )
 
+try:
+    from jax import tree_util as _jax_tree_util
+except Exception:
+    _jax_tree_util = None
 
+
+def _register_pytree_node_class(cls):
+    if _jax_tree_util is None:
+        return cls
+    return _jax_tree_util.register_pytree_node_class(cls)
+
+
+@_register_pytree_node_class
 @dataclass(frozen=True)
 class JaxObsState:
     history: object
     last_action: object
 
+    def tree_flatten(self):
+        return (self.history, self.last_action), None
 
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del aux_data
+        history, last_action = children
+        return cls(history=history, last_action=last_action)
+
+
+@_register_pytree_node_class
 @dataclass(frozen=True)
 class JaxObsIndices:
     command_body_indices: tuple[int, ...] | list[int]
     limb_indices: tuple[int, ...] | list[int]
     anchor_index: int
     tracking_anchor_index: int
+
+    def tree_flatten(self):
+        aux_data = (
+            tuple(int(index) for index in self.command_body_indices),
+            tuple(int(index) for index in self.limb_indices),
+            int(self.anchor_index),
+            int(self.tracking_anchor_index),
+        )
+        return (), aux_data
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del children
+        command_body_indices, limb_indices, anchor_index, tracking_anchor_index = aux_data
+        return cls(
+            command_body_indices=command_body_indices,
+            limb_indices=limb_indices,
+            anchor_index=anchor_index,
+            tracking_anchor_index=tracking_anchor_index,
+        )
 
 
 LIMB_POSE_DIM = len(LIMB_EE_BODY_NAMES) * 9

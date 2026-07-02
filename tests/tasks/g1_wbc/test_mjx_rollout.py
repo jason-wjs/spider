@@ -134,6 +134,22 @@ class _FakeJax:
     nn = _FakeNN()
 
 
+class _RecordingJitJax:
+    random = _FakeRandom()
+    nn = _FakeNN()
+
+    def __init__(self) -> None:
+        self.jit_calls = 0
+
+    def jit(self, fn):
+        self.jit_calls += 1
+
+        def wrapped(*args):
+            return fn(*args)
+
+        return wrapped
+
+
 class _RecordingLax:
     def __init__(self) -> None:
         self.calls: list[dict[str, int]] = []
@@ -513,6 +529,24 @@ class MjxRolloutTest(unittest.TestCase):
 
         self.assertEqual(result.updated_controls.shape, (3, QPOS_DIM - 1))
         self.assertEqual(result.execute_chunk.shape, (2, QPOS_DIM - 1))
+
+    def test_rollout_scorer_jits_once_per_model_bundle(self) -> None:
+        jax = _RecordingJitJax()
+        runtime = type("JitRuntime", (), {"jnp": _NumpyJnp(), "jax": jax})()
+        scorer = make_rollout_scorer(
+            runtime=runtime,
+            physics_step_fn=_physics_step,
+        )
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+        actor_params = _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32))
+        model_bundle = object()
+
+        first = scorer(samples, reference, actor_params, model_bundle)
+        second = scorer(samples, reference, actor_params, model_bundle)
+
+        self.assertEqual(jax.jit_calls, 1)
+        np.testing.assert_allclose(first, second)
 
 
 if __name__ == "__main__":
