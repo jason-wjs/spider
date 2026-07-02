@@ -87,6 +87,21 @@ class AcceptanceTest(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("joint_jerk_mean_missing", result.failures)
 
+    def test_baseline_group_fails_closed_when_metadata_is_malformed(self):
+        rows = [
+            _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
+            _baseline_repeat("jump", 1, -2.08, 0.061, 0.071, 0.081, 0.35, 0.43, 211.0),
+            _baseline_repeat("jump", 2, -2.10, 0.062, 0.072, 0.082, 0.35, 0.44, 212.0),
+        ]
+        rows[0]["num_steps"] = "bad"
+        rows[1]["accepted_windows"] = None
+
+        result = evaluate_baseline_group("jump", rows)
+
+        self.assertFalse(result.passed)
+        self.assertIn("num_steps", result.failures)
+        self.assertIn("accepted_windows", result.failures)
+
     def test_baseline_group_does_not_hard_fail_on_wall_time_outlier(self):
         rows = [
             _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
@@ -149,6 +164,7 @@ class AcceptanceTest(unittest.TestCase):
 
         self.assertFalse(result.passed)
         self.assertIn("fallback", result.failures)
+        self.assertNotIn("baseline_fallback", result.failures)
 
     def test_mjx_group_requires_success_count_at_least_baseline_success_count(self):
         baseline = evaluate_baseline_group(

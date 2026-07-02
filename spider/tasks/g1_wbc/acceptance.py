@@ -136,7 +136,7 @@ def evaluate_baseline_group(
     repeats: Sequence[Mapping[str, Any]],
 ) -> BaselineGroupResult:
     threshold = _baseline_threshold(motion)
-    failures = _global_repeat_failures(repeats)
+    failures = _global_repeat_failures(repeats, fallback_label="baseline_fallback")
     required_metrics = ("success", "score", *PRIMARY_ERROR_METRICS)
 
     if len(repeats) < 3:
@@ -176,7 +176,7 @@ def evaluate_mjx_group(
     policy: MjxQualityPolicy,
 ) -> GateResult:
     _baseline_threshold(motion)
-    failures = _global_repeat_failures(repeats)
+    failures = _global_repeat_failures(repeats, fallback_label="fallback")
     required_metrics = ("score", *baseline_envelope.keys())
     failures.extend(_missing_metric_failures(repeats, required_metrics))
     baseline_success_count = _baseline_success_count(baseline_envelope)
@@ -185,8 +185,6 @@ def evaluate_mjx_group(
     elif _success_count(repeats) < baseline_success_count:
         failures.append("success_count")
 
-    if any(bool(row.get("mpc_used_baseline_fallback")) for row in repeats):
-        failures.append("fallback")
     if any(bool(row.get("contact_saturated")) for row in repeats):
         failures.append("contact_saturation")
     if any(bool(row.get("max_contact_points_saturated")) for row in repeats):
@@ -281,20 +279,24 @@ def _baseline_threshold(motion: str) -> BaselineThreshold:
         raise ValueError(f"Unsupported motion for baseline gate: {motion}") from exc
 
 
-def _global_repeat_failures(repeats: Sequence[Mapping[str, Any]]) -> list[str]:
+def _global_repeat_failures(
+    repeats: Sequence[Mapping[str, Any]],
+    *,
+    fallback_label: str,
+) -> list[str]:
     failures: list[str] = []
     for row in repeats:
         metrics = _metrics(row)
         if row.get("status") != "ok":
             failures.append("status")
-        if int(row.get("num_steps", metrics.get("num_steps", -1))) != 800:
+        if _safe_int(row.get("num_steps", metrics.get("num_steps"))) != 800:
             failures.append("num_steps")
         if not bool(row.get("mpc_accepted")):
             failures.append("mpc_accepted")
-        if int(row.get("accepted_windows", -1)) != 40:
+        if _safe_int(row.get("accepted_windows")) != 40:
             failures.append("accepted_windows")
         if bool(row.get("mpc_used_baseline_fallback")):
-            failures.append("baseline_fallback")
+            failures.append(fallback_label)
         artifacts = row.get("artifacts", {})
         for key in REQUIRED_ARTIFACT_FIELDS:
             if not isinstance(artifacts, Mapping) or not artifacts.get(key):
@@ -372,6 +374,15 @@ def _has_valid_metric(row: Mapping[str, Any], metric: str) -> bool:
     if isinstance(value, bool):
         return metric == "success"
     return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        if isinstance(value, bool) or value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _metric_present(
