@@ -11,9 +11,11 @@ import torch
 from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
     MUJOCO_BODY_NAMES,
+    MUJOCO_JOINT_NAMES,
     QPOS_DIM,
     QVEL_DIM,
 )
+from spider.tasks.g1_wbc.math_utils import normalize, quat_from_axis_angle, quat_mul
 from spider.tasks.g1_wbc.mjx_optimizer import JaxWindowOptimizerConfig, optimize_window
 from spider.tasks.g1_wbc.mjx_policy import convert_wbc_actor_to_jax
 from spider.tasks.g1_wbc.mjx_runtime import require_mjx_runtime
@@ -37,6 +39,8 @@ def run_g1_wbc_mjx_mpc(
     policy_converter: Callable[..., Any] = convert_wbc_actor_to_jax,
     optimizer: Callable[..., Any] = optimize_window,
     rollout_factory: Callable[..., Any] | None = None,
+    rollout_scorer: Callable[..., Any] | None = None,
+    rollout_reference_factory: Callable[..., Any] | None = None,
 ):
     """Run the MJX full-rollout backend or fail before touching Warp state."""
 
@@ -47,7 +51,9 @@ def run_g1_wbc_mjx_mpc(
     device = torch.device(rollout_config.device)
     _validate_single_gpu_runtime(runtime, device=device)
 
-    if rollout_factory is None or optimizer is optimize_window:
+    if rollout_factory is None or (
+        optimizer is optimize_window and rollout_scorer is None
+    ):
         raise NotImplementedError(
             "MJX runtime is available, but the production MJX physics scan has not "
             "been wired yet. Keep using --mpc-backend mujoco_warp for production."
@@ -63,18 +69,29 @@ def run_g1_wbc_mjx_mpc(
     horizon = int(spider_config.horizon_steps)
     control_steps = int(spider_config.ctrl_steps)
     controls = torch.zeros(horizon, QPOS_DIM - 1, dtype=torch.float32, device=device)
-    refined_qpos = motion.qpos()[: total_steps + 1].to(device).detach().clone()
+    baseline_qpos = motion.qpos()[: total_steps + 1].to(device).detach().clone()
+    refined_qpos = baseline_qpos.clone()
+    joint_low, joint_high = _joint_limits_from_model_bundle(model_bundle, device=device)
     infos: list[dict[str, Any]] = []
     best_scores: list[float] = []
     sim_step = 0
     accepted_windows = 0
     steady_start = time.perf_counter()
     while sim_step < total_steps:
+        window_reference = _window_reference(
+            rollout_reference_factory,
+            start=sim_step,
+            motion=motion,
+            controls=controls,
+            actor_params=actor_params,
+            model_bundle=model_bundle,
+            runtime=runtime,
+        )
         window_result = optimizer(
             config=_window_config_from_spider(spider_config),
-            state={"rollout_fn": _placeholder_rollout_scores},
+            state={"rollout_fn": rollout_scorer or _placeholder_rollout_scores},
             controls=controls,
-            reference={"start": sim_step},
+            reference=window_reference,
             actor_params=actor_params,
             model_bundle=model_bundle,
             key=(int(seed), len(infos)),
@@ -94,9 +111,12 @@ def run_g1_wbc_mjx_mpc(
         _apply_execute_chunk_to_refined_qpos(
             refined_qpos,
             window_result.execute_chunk,
+            baseline_qpos=baseline_qpos,
             start=sim_step,
             execute_steps=execute_steps,
             device=device,
+            joint_low=joint_low,
+            joint_high=joint_high,
         )
         info = dict(window_result.info)
         info.update(
@@ -220,6 +240,60 @@ def _validate_single_gpu_runtime(runtime, *, device: torch.device) -> None:
             )
 
 
+def _window_reference(
+    rollout_reference_factory: Callable[..., Any] | None,
+    *,
+    start: int,
+    motion: G1Motion,
+    controls: torch.Tensor,
+    actor_params,
+    model_bundle,
+    runtime,
+):
+    if rollout_reference_factory is None:
+        return {"start": int(start)}
+    return rollout_reference_factory(
+        start=int(start),
+        motion=motion,
+        controls=controls,
+        actor_params=actor_params,
+        model_bundle=model_bundle,
+        runtime=runtime,
+    )
+
+
+def _joint_limits_from_model_bundle(
+    model_bundle,
+    *,
+    device: torch.device,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    cpu_model = getattr(model_bundle, "cpu_model", None)
+    joint_name_to_id = getattr(model_bundle, "joint_name_to_id", None)
+    if cpu_model is None and joint_name_to_id is None:
+        return None, None
+    if cpu_model is None or joint_name_to_id is None:
+        raise ValueError("MJX model bundle must expose cpu_model and joint_name_to_id")
+
+    low = []
+    high = []
+    for joint_name in MUJOCO_JOINT_NAMES:
+        joint_id = joint_name_to_id.get(f"robot/{joint_name}")
+        if joint_id is None:
+            joint_id = joint_name_to_id.get(joint_name)
+        if joint_id is None:
+            raise ValueError(f"MJX model bundle is missing joint {joint_name!r}")
+        if int(cpu_model.jnt_limited[int(joint_id)]):
+            low.append(float(cpu_model.jnt_range[int(joint_id), 0]))
+            high.append(float(cpu_model.jnt_range[int(joint_id), 1]))
+        else:
+            low.append(-float("inf"))
+            high.append(float("inf"))
+    return (
+        torch.tensor(low, dtype=torch.float32, device=device),
+        torch.tensor(high, dtype=torch.float32, device=device),
+    )
+
+
 def _validated_controls(value, *, horizon: int, device: torch.device) -> torch.Tensor:
     controls = _to_torch(value, device=device)
     expected = (int(horizon), QPOS_DIM - 1)
@@ -254,9 +328,12 @@ def _apply_execute_chunk_to_refined_qpos(
     refined_qpos: torch.Tensor,
     execute_chunk,
     *,
+    baseline_qpos: torch.Tensor,
     start: int,
     execute_steps: int,
     device: torch.device,
+    joint_low: torch.Tensor | None,
+    joint_high: torch.Tensor | None,
 ) -> None:
     chunk = _validated_execute_chunk(
         execute_chunk,
@@ -264,8 +341,38 @@ def _apply_execute_chunk_to_refined_qpos(
         device=device,
     )
     end = int(start) + int(execute_steps)
-    refined_qpos[int(start) : end, 1:] = chunk[:execute_steps]
-    refined_qpos[end, 1:] = chunk[int(execute_steps)]
+    base = baseline_qpos[int(start) : end + 1].to(device=device)
+    if tuple(base.shape) != (int(execute_steps) + 1, QPOS_DIM):
+        raise ValueError(
+            "baseline_qpos slice has shape "
+            f"{tuple(base.shape)}, expected {(int(execute_steps) + 1, QPOS_DIM)}"
+        )
+    qpos_chunk = _controls_to_qpos_torch(
+        chunk[: int(execute_steps) + 1],
+        base,
+        joint_low=joint_low,
+        joint_high=joint_high,
+    )
+    refined_qpos[int(start) : end] = qpos_chunk[:execute_steps]
+    refined_qpos[end] = qpos_chunk[int(execute_steps)]
+
+
+def _controls_to_qpos_torch(
+    controls: torch.Tensor,
+    base_qpos: torch.Tensor,
+    *,
+    joint_low: torch.Tensor | None,
+    joint_high: torch.Tensor | None,
+) -> torch.Tensor:
+    qpos = base_qpos.clone()
+    qpos[..., :3] = qpos[..., :3] + controls[..., :3]
+    delta_quat = quat_from_axis_angle(controls[..., 3:6])
+    qpos[..., 3:7] = normalize(quat_mul(delta_quat, qpos[..., 3:7]))
+    joints = qpos[..., 7:] + controls[..., 6:]
+    if joint_low is not None and joint_high is not None:
+        joints = torch.clamp(joints, joint_low, joint_high)
+    qpos[..., 7:] = joints
+    return qpos.contiguous()
 
 
 def _shift_controls(

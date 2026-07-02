@@ -1,0 +1,379 @@
+"""Scan-shaped rollout scoring helpers for the G1 WBC MJX backend."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+
+from spider.tasks.g1_wbc.constants import ACTION_DIM, QPOS_DIM
+from spider.tasks.g1_wbc.mjx_obs import (
+    JaxObsIndices,
+    JaxObsState,
+    build_wbc_observation_from_state,
+)
+from spider.tasks.g1_wbc.mjx_policy import jax_actor_forward
+from spider.tasks.g1_wbc.mjx_scoring import (
+    JaxScoreWeights,
+    finalize_score,
+    init_score_accumulator,
+    score_step,
+)
+
+
+PhysicsStepFn = Callable[..., tuple[Mapping[str, object], Mapping[str, object]]]
+
+
+def make_rollout_scorer(*, runtime, physics_step_fn: PhysicsStepFn):
+    """Bind runtime dependencies into the optimizer's four-argument scorer."""
+
+    def rollout_fn(samples, reference, actor_params, model_bundle):
+        return score_candidate_controls(
+            samples,
+            reference,
+            actor_params,
+            model_bundle,
+            runtime=runtime,
+            physics_step_fn=physics_step_fn,
+        )
+
+    return rollout_fn
+
+
+def controls_to_qpos(controls, base_qpos, joint_low, joint_high, *, jnp):
+    """Apply SPIDER residual controls to a base qpos trajectory."""
+
+    controls = jnp.asarray(controls)
+    if len(controls.shape) != 3:
+        raise ValueError(
+            f"Expected controls shape (samples, horizon, width), got {controls.shape}"
+        )
+    if int(controls.shape[-1]) != QPOS_DIM - 1:
+        raise ValueError(
+            f"Expected control width {QPOS_DIM - 1}, got {int(controls.shape[-1])}"
+        )
+
+    samples = int(controls.shape[0])
+    horizon = int(controls.shape[1])
+    base_qpos = _ensure_batch(jnp.asarray(base_qpos), samples, jnp=jnp)
+    if int(base_qpos.shape[-1]) != QPOS_DIM:
+        raise ValueError(f"Expected base qpos width {QPOS_DIM}, got {base_qpos.shape}")
+
+    base = jnp.repeat(jnp.expand_dims(base_qpos, axis=1), horizon, axis=1)
+    root_pos = base[..., :3] + controls[..., :3]
+    delta_quat = _quat_from_axis_angle(controls[..., 3:6], jnp=jnp)
+    root_quat = _normalize(
+        _quat_mul(delta_quat, base[..., 3:7], jnp=jnp),
+        jnp=jnp,
+    )
+    joints = base[..., 7:] + controls[..., 6:]
+    joints = jnp.clip(
+        joints,
+        _joint_limit_array(joint_low, jnp=jnp),
+        _joint_limit_array(joint_high, jnp=jnp),
+    )
+    return jnp.concatenate([root_pos, root_quat, joints], axis=-1)
+
+
+def score_candidate_controls(
+    samples,
+    reference: Mapping[str, object],
+    actor_params,
+    model_bundle,
+    *,
+    runtime,
+    physics_step_fn: PhysicsStepFn,
+):
+    """Score sampled high-level controls with a scan-compatible rollout loop."""
+
+    jnp = runtime.jnp
+    samples = jnp.asarray(samples)
+    _validate_samples(samples)
+    sample_count = int(samples.shape[0])
+    horizon = int(samples.shape[1])
+
+    robot_state = _batched_robot_state(
+        _required(reference, "initial_robot_state"),
+        sample_count,
+        jnp=jnp,
+    )
+    obs_state = _initial_obs_state(reference, sample_count, jnp=jnp)
+    obs_indices = _required(reference, "obs_indices")
+    if not isinstance(obs_indices, JaxObsIndices):
+        raise TypeError("reference['obs_indices'] must be a JaxObsIndices")
+    default_joint_pos = _required(reference, "default_joint_pos")
+    commanded_qpos = controls_to_qpos(
+        samples,
+        robot_state["qpos"],
+        _required(reference, "joint_low"),
+        _required(reference, "joint_high"),
+        jnp=jnp,
+    )
+    prev_control = _ensure_batch(
+        jnp.asarray(
+            reference.get("prev_control", jnp.zeros((sample_count, QPOS_DIM - 1)))
+        ),
+        sample_count,
+        jnp=jnp,
+    )
+    prev_joint_vel = _joint_vel(robot_state)
+    weights = reference.get("score_weights", JaxScoreWeights({}))
+    if not isinstance(weights, JaxScoreWeights):
+        weights = JaxScoreWeights(dict(weights))
+    accumulator = init_score_accumulator((sample_count,), jnp=jnp)
+    obs_initialized = reference.get("obs_initialized", False)
+
+    for step_index in range(horizon):
+        obs_reference = _time_slice_reference(
+            _required(reference, "obs_reference"),
+            step_index,
+            sample_count,
+            jnp=jnp,
+        )
+        obs, next_obs_state = build_wbc_observation_from_state(
+            robot_state=robot_state,
+            reference_state=obs_reference,
+            obs_state=obs_state,
+            indices=obs_indices,
+            default_joint_pos=default_joint_pos,
+            initialized=obs_initialized if step_index == 0 else True,
+            jnp=jnp,
+        )
+        action = jax_actor_forward(actor_params, obs, jnp=jnp)
+        robot_state, physics_score_state = physics_step_fn(
+            model_bundle,
+            robot_state,
+            commanded_qpos[:, step_index],
+            action,
+            step_index,
+            runtime=runtime,
+        )
+        robot_state = _batched_robot_state(robot_state, sample_count, jnp=jnp)
+        step_control = samples[:, step_index]
+        step_state = dict(physics_score_state)
+        step_state.setdefault("control", step_control)
+        step_state.setdefault("prev_control", prev_control)
+        step_state.setdefault("joint_vel", _joint_vel(robot_state))
+        step_state.setdefault("prev_joint_vel", prev_joint_vel)
+        score_reference = _time_slice_reference(
+            _required(reference, "score_reference"),
+            step_index,
+            sample_count,
+            jnp=jnp,
+        )
+        accumulator = score_step(
+            accumulator,
+            step_state,
+            score_reference,
+            weights,
+            jnp=jnp,
+        )
+        obs_state = JaxObsState(history=next_obs_state.history, last_action=action)
+        prev_control = step_control
+        prev_joint_vel = _joint_vel(robot_state)
+
+    return finalize_score(accumulator, jnp=jnp)["score"]
+
+
+def _validate_samples(samples) -> None:
+    if len(samples.shape) != 3:
+        raise ValueError(
+            f"Expected samples shape (samples, horizon, width), got {samples.shape}"
+        )
+    if int(samples.shape[0]) < 1:
+        raise ValueError("At least one rollout sample is required")
+    if int(samples.shape[1]) < 1:
+        raise ValueError("At least one rollout horizon step is required")
+    if int(samples.shape[-1]) != QPOS_DIM - 1:
+        raise ValueError(
+            f"Expected control width {QPOS_DIM - 1}, got {samples.shape[-1]}"
+        )
+
+
+def _batched_robot_state(
+    state: Mapping[str, object],
+    sample_count: int,
+    *,
+    jnp,
+) -> dict[str, object]:
+    base_ang_vel_b = state.get("base_ang_vel_b")
+    if base_ang_vel_b is not None:
+        base_ang_vel_b = _ensure_batch(
+            jnp.asarray(base_ang_vel_b),
+            sample_count,
+            jnp=jnp,
+        )
+    return {
+        "qpos": _ensure_robot_state_batch(
+            "qpos",
+            jnp.asarray(state["qpos"]),
+            sample_count,
+            jnp=jnp,
+        ),
+        "qvel": _ensure_robot_state_batch(
+            "qvel",
+            jnp.asarray(state["qvel"]),
+            sample_count,
+            jnp=jnp,
+        ),
+        "body_pos_w": _ensure_robot_state_batch(
+            "body_pos_w",
+            jnp.asarray(state["body_pos_w"]),
+            sample_count,
+            jnp=jnp,
+        ),
+        "body_quat_w": _ensure_robot_state_batch(
+            "body_quat_w",
+            jnp.asarray(state["body_quat_w"]),
+            sample_count,
+            jnp=jnp,
+        ),
+        "body_ang_vel_w": _ensure_robot_state_batch(
+            "body_ang_vel_w",
+            jnp.asarray(state["body_ang_vel_w"]),
+            sample_count,
+            jnp=jnp,
+        ),
+        "base_ang_vel_b": base_ang_vel_b,
+    }
+
+
+def _initial_obs_state(reference: Mapping[str, object], sample_count: int, *, jnp):
+    obs_state = reference.get("obs_state")
+    if obs_state is None:
+        return JaxObsState(
+            history=None,
+            last_action=jnp.zeros((sample_count, ACTION_DIM)),
+        )
+    if not isinstance(obs_state, JaxObsState):
+        raise TypeError("reference['obs_state'] must be a JaxObsState")
+    return JaxObsState(
+        history=obs_state.history,
+        last_action=_ensure_batch(
+            jnp.asarray(obs_state.last_action),
+            sample_count,
+            jnp=jnp,
+        ),
+    )
+
+
+def _time_slice_reference(
+    values: Mapping[str, object],
+    step_index: int,
+    sample_count: int,
+    *,
+    jnp,
+) -> dict[str, object]:
+    return {
+        name: _ensure_reference_batch(
+            name,
+            jnp.asarray(value)[step_index],
+            sample_count,
+            jnp=jnp,
+        )
+        for name, value in values.items()
+    }
+
+
+def _ensure_robot_state_batch(name: str, value, sample_count: int, *, jnp):
+    if _is_unbatched_robot_state(name, value):
+        return _broadcast_batch(value, sample_count, jnp=jnp)
+    return _ensure_batch(value, sample_count, jnp=jnp)
+
+
+def _ensure_reference_batch(name: str, value, sample_count: int, *, jnp):
+    if _is_unbatched_reference(name, value):
+        return _broadcast_batch(value, sample_count, jnp=jnp)
+    return _ensure_batch(value, sample_count, jnp=jnp)
+
+
+def _ensure_batch(value, sample_count: int, *, jnp):
+    if len(value.shape) > 0 and int(value.shape[0]) == int(sample_count):
+        return value
+    return _broadcast_batch(value, sample_count, jnp=jnp)
+
+
+def _broadcast_batch(value, sample_count: int, *, jnp):
+    return jnp.repeat(jnp.expand_dims(value, axis=0), int(sample_count), axis=0)
+
+
+def _is_unbatched_robot_state(name: str, value) -> bool:
+    shape = tuple(int(dim) for dim in value.shape)
+    if name == "qpos":
+        return shape == (QPOS_DIM,)
+    if name == "qvel":
+        return len(shape) == 1
+    if name in {"body_pos_w", "body_ang_vel_w"}:
+        return len(shape) == 2 and shape[-1] == 3
+    if name == "body_quat_w":
+        return len(shape) == 2 and shape[-1] == 4
+    return False
+
+
+def _is_unbatched_reference(name: str, value) -> bool:
+    shape = tuple(int(dim) for dim in value.shape)
+    if name in {"joint_pos", "joint_vel"}:
+        return shape == (ACTION_DIM,)
+    if name == "root_pos":
+        return shape == (3,)
+    if name in {"body_pos_w", "body_ang_vel_w", "body_pos", "ee_pos"}:
+        return len(shape) == 2 and shape[-1] == 3
+    if name == "body_quat_w":
+        return len(shape) == 2 and shape[-1] == 4
+    if name == "contact":
+        return len(shape) == 1
+    return False
+
+
+def _joint_vel(robot_state: Mapping[str, object]):
+    return robot_state["qvel"][:, 6:]
+
+
+def _joint_limit_array(value, *, jnp):
+    arr = jnp.asarray(value)
+    while len(arr.shape) < 3:
+        arr = jnp.expand_dims(arr, axis=0)
+    return arr
+
+
+def _quat_from_axis_angle(axis_angle, *, jnp):
+    angle = jnp.sqrt(jnp.sum(axis_angle * axis_angle, axis=-1, keepdims=True))
+    half_angle = angle * 0.5
+    safe_angle = jnp.where(angle > 1.0e-8, angle, 1.0)
+    scale = jnp.where(
+        angle > 1.0e-8,
+        jnp.sin(half_angle) / safe_angle,
+        0.5 - (angle * angle) / 48.0,
+    )
+    return jnp.concatenate([jnp.cos(half_angle), axis_angle * scale], axis=-1)
+
+
+def _normalize(value, *, jnp):
+    norm = jnp.sqrt(jnp.sum(value * value, axis=-1, keepdims=True))
+    return value / jnp.maximum(norm, 1.0e-9)
+
+
+def _quat_mul(q1, q2, *, jnp):
+    w1, x1, y1, z1 = (q1[..., i] for i in range(4))
+    w2, x2, y2, z2 = (q2[..., i] for i in range(4))
+    ww = (z1 + x1) * (x2 + y2)
+    yy = (w1 - y1) * (w2 + z2)
+    zz = (w1 + y1) * (w2 - z2)
+    xx = ww + yy + zz
+    qq = 0.5 * (xx + (z1 - x1) * (x2 - y2))
+    w = qq - ww + (z1 - y1) * (y2 - z2)
+    x = qq - xx + (x1 + w1) * (x2 + w2)
+    y = qq - yy + (w1 - x1) * (y2 + z2)
+    z = qq - zz + (z1 + y1) * (w2 - x2)
+    return jnp.stack([w, x, y, z], axis=-1)
+
+
+def _required(values: Mapping[str, object], name: str):
+    if name not in values:
+        raise KeyError(f"Missing rollout reference field {name!r}")
+    return values[name]
+
+
+__all__ = [
+    "controls_to_qpos",
+    "make_rollout_scorer",
+    "score_candidate_controls",
+]

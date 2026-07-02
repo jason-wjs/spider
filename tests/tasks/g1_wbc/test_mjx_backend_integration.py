@@ -6,6 +6,7 @@ import sys
 import textwrap
 import unittest
 
+import numpy as np
 import torch
 
 from spider.config import Config
@@ -245,27 +246,78 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(result.result.refined_qpos.shape, (801, QPOS_DIM))
         self.assertTrue(
             torch.allclose(
-                result.result.refined_qpos[:800, 1],
+                result.result.refined_qpos[:800, 0],
                 torch.full((800,), 0.25),
             )
         )
-        self.assertAlmostEqual(float(result.result.refined_qpos[800, 1]), 0.25)
+        self.assertAlmostEqual(float(result.result.refined_qpos[800, 0]), 0.25)
+        self.assertAlmostEqual(float(result.result.refined_qpos[800, 1]), 0.0)
         self.assertTrue(
             torch.allclose(
-                result.result.command.qpos_trajectory[:800, 0, 1],
+                result.result.command.qpos_trajectory[:800, 0, 0],
                 torch.full((800,), 0.25),
             )
         )
         self.assertAlmostEqual(
-            float(result.result.command.qpos_trajectory[800, 0, 1]),
+            float(result.result.command.qpos_trajectory[800, 0, 0]),
             0.25,
         )
-        self.assertAlmostEqual(float(result.result.rollout.qpos[800, 0, 1]), 0.25)
+        self.assertAlmostEqual(float(result.result.rollout.qpos[800, 0, 0]), 0.25)
         self.assertEqual(result.result.scores.shape, (40,))
         self.assertTrue(torch.allclose(result.result.scores, torch.full((40,), 1.25)))
         self.assertEqual(result.receding.executed_steps, 800)
         self.assertIn("model:wxy_parity", calls)
         self.assertIn("policy", calls)
+
+    def test_default_optimizer_consumes_explicit_rollout_scorer(self) -> None:
+        calls: list[tuple[int, ...]] = []
+
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            calls.append(tuple(int(dim) for dim in samples.shape))
+            return -np.sum(np.asarray(samples, dtype=np.float32) ** 2, axis=(1, 2))
+
+        result = _run_with_fakes(
+            optimizer=None,
+            rollout_factory=_fake_rollout_result,
+            runtime=_FakeOptimizerRuntime(),
+            rollout_scorer=rollout_scorer,
+        )
+
+        self.assertTrue(result.metadata["accepted"])
+        self.assertGreater(len(calls), 0)
+        self.assertEqual(calls[0], (4, 40, QPOS_DIM - 1))
+
+    def test_default_optimizer_uses_explicit_rollout_reference_factory(self) -> None:
+        references: list[dict[str, object]] = []
+
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del actor_params, model_bundle
+            references.append(dict(reference))
+            scale = float(reference["score_scale"])
+            return -scale * np.sum(
+                np.asarray(samples, dtype=np.float32) ** 2,
+                axis=(1, 2),
+            )
+
+        def rollout_reference_factory(**kwargs):
+            return {
+                "window_start": kwargs["start"],
+                "score_scale": 0.5,
+            }
+
+        result = _run_with_fakes(
+            optimizer=None,
+            rollout_factory=_fake_rollout_result,
+            runtime=_FakeOptimizerRuntime(),
+            rollout_scorer=rollout_scorer,
+            rollout_reference_factory=rollout_reference_factory,
+        )
+
+        self.assertTrue(result.metadata["accepted"])
+        self.assertGreater(len(references), 0)
+        self.assertEqual(references[0]["window_start"], 0)
+        self.assertEqual(references[0]["score_scale"], 0.5)
 
     def test_mjx_backend_default_path_still_requires_runtime(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "--mpc-backend mjx"):
@@ -357,7 +409,21 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             )
 
 
-def _run_with_fakes(*, optimizer, rollout_factory, runtime=None):
+def _run_with_fakes(
+    *,
+    optimizer,
+    rollout_factory,
+    runtime=None,
+    rollout_scorer=None,
+    rollout_reference_factory=None,
+):
+    kwargs = {}
+    if optimizer is not None:
+        kwargs["optimizer"] = optimizer
+    if rollout_scorer is not None:
+        kwargs["rollout_scorer"] = rollout_scorer
+    if rollout_reference_factory is not None:
+        kwargs["rollout_reference_factory"] = rollout_reference_factory
     return run_g1_wbc_mjx_mpc(
         spider_config=_spider_config(),
         motion=_motion(),
@@ -373,9 +439,62 @@ def _run_with_fakes(*, optimizer, rollout_factory, runtime=None):
             profile=SimpleNamespace(name=kwargs["profile_name"])
         ),
         policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
-        optimizer=optimizer,
         rollout_factory=rollout_factory,
+        **kwargs,
     )
+
+
+class _FakeOptimizerJnp:
+    @staticmethod
+    def asarray(value):
+        return np.asarray(value, dtype=np.float32)
+
+    @staticmethod
+    def concatenate(values, axis=0):
+        return np.concatenate(values, axis=axis)
+
+    @staticmethod
+    def full(shape, value):
+        return np.full(shape, value, dtype=np.float32)
+
+    @staticmethod
+    def sum(value, axis=None):
+        return np.sum(value, axis=axis)
+
+    @staticmethod
+    def argmax(value):
+        return np.argmax(value)
+
+    @staticmethod
+    def mean(value):
+        return np.mean(value)
+
+
+class _FakeOptimizerRandom:
+    @staticmethod
+    def normal(key, shape):
+        seed = int(np.asarray(key, dtype=np.uint32).sum())
+        rng = np.random.default_rng(seed)
+        return rng.normal(size=shape).astype(np.float32)
+
+
+class _FakeOptimizerNN:
+    @staticmethod
+    def softmax(value):
+        value = np.asarray(value, dtype=np.float32)
+        shifted = value - np.max(value)
+        exp = np.exp(shifted)
+        return exp / np.sum(exp)
+
+
+class _FakeOptimizerJax:
+    random = _FakeOptimizerRandom()
+    nn = _FakeOptimizerNN()
+
+
+class _FakeOptimizerRuntime:
+    jnp = _FakeOptimizerJnp()
+    jax = _FakeOptimizerJax()
 
 
 def _fake_optimizer(**kwargs):
