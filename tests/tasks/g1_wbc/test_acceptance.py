@@ -18,7 +18,7 @@ def _baseline_repeat(motion, seed, score, root, body, ee, contact, control, acc)
         "mpc_accepted": True,
         "accepted_windows": 40,
         "mpc_used_baseline_fallback": False,
-        "wall_time_sec": 100.0 + seed,
+        "wall_time_sec": 100.0 + seed if isinstance(seed, int) else 100.0,
         "metrics": {
             "success": True,
             "score": score,
@@ -87,6 +87,20 @@ class AcceptanceTest(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("joint_jerk_mean_missing", result.failures)
 
+    def test_baseline_group_fails_when_primary_metric_is_non_finite(self):
+        rows = [
+            _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
+            _baseline_repeat("jump", 1, -2.08, 0.061, 0.071, 0.081, 0.35, 0.43, 211.0),
+            _baseline_repeat("jump", 2, -2.10, 0.062, 0.072, 0.082, 0.35, 0.44, 212.0),
+        ]
+        rows[1]["metrics"]["joint_jerk_mean"] = float("nan")
+
+        result = evaluate_baseline_group("jump", rows)
+
+        self.assertFalse(result.passed)
+        self.assertIn("finite_metrics", result.failures)
+        self.assertIn("joint_jerk_mean_missing", result.failures)
+
     def test_baseline_group_fails_closed_when_metadata_is_malformed(self):
         rows = [
             _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
@@ -130,6 +144,19 @@ class AcceptanceTest(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("num_steps", result.failures)
         self.assertIn("accepted_windows", result.failures)
+
+    def test_baseline_group_fails_closed_on_malformed_seed(self):
+        rows = [
+            _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
+            _baseline_repeat("jump", "bad", -2.08, 0.061, 0.071, 0.081, 0.35, 0.43, 211.0),
+            _baseline_repeat("jump", 2, -2.10, 0.062, 0.072, 0.082, 0.35, 0.44, 212.0),
+        ]
+
+        result = evaluate_baseline_group("jump", rows)
+
+        self.assertFalse(result.passed)
+        self.assertIn("seed", result.failures)
+        self.assertIsNone(result.promoted_seed)
 
     def test_baseline_group_does_not_hard_fail_on_wall_time_outlier(self):
         rows = [

@@ -289,6 +289,8 @@ def _global_repeat_failures(
         metrics = _metrics(row)
         if not isinstance(row.get("metrics", {}), Mapping):
             failures.append("metrics")
+        if _safe_int(row.get("seed")) is None:
+            failures.append("seed")
         if row.get("status") != "ok":
             failures.append("status")
         if _safe_int(row.get("num_steps", metrics.get("num_steps"))) != 800:
@@ -364,7 +366,9 @@ def _metric_values(repeats: Sequence[Mapping[str, Any]], metric: str) -> list[fl
         value = metrics[metric]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
-        values.append(float(value))
+        value_float = float(value)
+        if math.isfinite(value_float):
+            values.append(value_float)
     return values
 
 
@@ -423,8 +427,7 @@ def _promoted_seed(repeats: Sequence[Mapping[str, Any]]) -> int | None:
     if not repeats:
         return None
     best = max(repeats, key=lambda row: float(_metrics(row).get("score", float("-inf"))))
-    seed = best.get("seed")
-    return int(seed) if seed is not None else None
+    return _safe_int(best.get("seed"))
 
 
 def _unique(failures: Sequence[str]) -> tuple[str, ...]:
