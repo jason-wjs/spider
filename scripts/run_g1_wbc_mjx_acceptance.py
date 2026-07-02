@@ -272,7 +272,11 @@ def _build_report(
             MjxQualityPolicy.for_motion(motion),
         )
         mjx_failures = _unique(
-            (*mjx_gate.failures, *_mjx_timing_evidence_failures(mjx_group))
+            (
+                *mjx_gate.failures,
+                *_mjx_timing_evidence_failures(mjx_group),
+                *_mjx_runtime_evidence_failures(mjx_group),
+            )
         )
         replay_failures = _row_evidence_failures(
             replay_group,
@@ -421,6 +425,8 @@ def _has_invalid_benchmark_failure(
         "mjx_compile_init_wall_time",
         "mjx_jit_warmup_enabled",
         "mjx_jit_warmup_wall_time",
+        "mjx_runtime_visible_devices",
+        "mjx_single_visible_gpu",
         "mjx_steady_state_wall_time",
         "mpc_accepted",
         "mpc_command_npz",
@@ -516,6 +522,7 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "compile_init_wall_time_sec": mpc.get("compile_init_wall_time_sec"),
         "jit_warmup_enabled": mpc.get("jit_warmup_enabled"),
         "jit_warmup_wall_time_sec": mpc.get("jit_warmup_wall_time_sec"),
+        "runtime_visible_devices": mpc.get("runtime_visible_devices"),
         "steady_state_wall_time_sec": mpc.get("steady_state_wall_time_sec"),
     }
 
@@ -529,6 +536,19 @@ def _mjx_timing_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]
             failures.append("mjx_jit_warmup_enabled")
         if not _valid_timing(_timing_value(row, "jit_warmup_wall_time_sec")):
             failures.append("mjx_jit_warmup_wall_time")
+    return _unique(failures)
+
+
+def _mjx_runtime_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        devices = row.get("runtime_visible_devices")
+        if not isinstance(devices, (list, tuple)) or not devices:
+            failures.append("mjx_runtime_visible_devices")
+            continue
+        visible = tuple(str(value) for value in devices if str(value))
+        if len(visible) != 1:
+            failures.append("mjx_single_visible_gpu")
     return _unique(failures)
 
 
