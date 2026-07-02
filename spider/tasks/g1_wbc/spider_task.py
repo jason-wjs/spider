@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,6 +26,7 @@ from spider.tasks.g1_wbc.constants import (
 from spider.tasks.g1_wbc.math_utils import normalize, quat_from_axis_angle, quat_mul
 from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion
 from spider.tasks.g1_wbc.policy import WbcActor
+from spider.tasks.g1_wbc.result_types import G1WbcMpcRun, G1WbcSpiderResult
 from spider.tasks.g1_wbc.rollout import (
     RolloutResult,
     WbcRolloutConfig,
@@ -121,24 +121,6 @@ _WBC_ROLLOUT_FN = make_rollout_fn(
     load_env_params,
     copy_sample_state,
 )
-
-
-@dataclass
-class G1WbcSpiderResult:
-    command: G1CommandBatch
-    rollout: RolloutResult
-    refined_qpos: torch.Tensor
-    controls: torch.Tensor
-    infos: list[dict[str, Any]]
-    scores: torch.Tensor
-    num_windows: int = 0
-
-
-@dataclass
-class G1WbcMpcRun:
-    receding: RecedingHorizonResult
-    result: G1WbcSpiderResult
-    metadata: dict[str, Any]
 
 
 def load_reward_weights(path: str | Path, mode: G1WbcObjective) -> dict[str, float]:

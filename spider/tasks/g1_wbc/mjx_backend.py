@@ -7,11 +7,17 @@ from typing import Any, Callable
 
 import torch
 
-from spider.tasks.g1_wbc.constants import QPOS_DIM
+from spider.tasks.g1_wbc.constants import (
+    ACTION_DIM,
+    MUJOCO_BODY_NAMES,
+    QPOS_DIM,
+    QVEL_DIM,
+)
 from spider.tasks.g1_wbc.mjx_optimizer import JaxWindowOptimizerConfig, optimize_window
 from spider.tasks.g1_wbc.mjx_policy import convert_wbc_actor_to_jax
 from spider.tasks.g1_wbc.mjx_runtime import require_mjx_runtime
 from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion
+from spider.tasks.g1_wbc.result_types import G1WbcMpcRun, G1WbcSpiderResult
 
 
 def run_g1_wbc_mjx_mpc(
@@ -110,8 +116,6 @@ def run_g1_wbc_mjx_mpc(
     command = _command_from_refined_qpos(motion, refined_qpos, rollout)
     _validate_command_shape(command, total_steps=total_steps)
     from spider.optimizers.receding import RecedingHorizonResult
-    from spider.tasks.g1_wbc.spider_task import G1WbcMpcRun, G1WbcSpiderResult
-
     receding = RecedingHorizonResult(
         controls=controls.detach().clone(),
         infos=infos,
@@ -193,9 +197,10 @@ def _validated_execute_chunk(
             "Expected execute_chunk shape "
             f"(steps, {QPOS_DIM - 1}), got {tuple(execute_chunk.shape)}"
         )
-    if int(execute_chunk.shape[0]) < int(execute_steps):
+    required_steps = int(execute_steps) + 1
+    if int(execute_chunk.shape[0]) < required_steps:
         raise ValueError(
-            f"execute_chunk has {execute_chunk.shape[0]} steps, need {execute_steps}"
+            f"execute_chunk has {execute_chunk.shape[0]} steps, need {required_steps}"
         )
     return execute_chunk
 
@@ -215,32 +220,81 @@ def _apply_execute_chunk_to_refined_qpos(
     )
     end = int(start) + int(execute_steps)
     refined_qpos[int(start) : end, 1:] = chunk[:execute_steps]
+    refined_qpos[end, 1:] = chunk[int(execute_steps)]
 
 
 def _validate_rollout_shape(rollout, *, total_steps: int, refined_qpos: torch.Tensor) -> None:
-    expected_qpos = (int(total_steps) + 1, 1, QPOS_DIM)
-    if tuple(rollout.qpos.shape) != expected_qpos:
-        raise ValueError(
-            f"Expected rollout qpos shape {expected_qpos}, got {tuple(rollout.qpos.shape)}"
+    frames = int(total_steps) + 1
+    bodies = len(MUJOCO_BODY_NAMES)
+    _require_shape("refined_qpos", refined_qpos, (frames, QPOS_DIM))
+    _require_shape("rollout.qpos", rollout.qpos, (frames, 1, QPOS_DIM))
+    _require_shape("rollout.qvel", rollout.qvel, (frames, 1, QVEL_DIM))
+    _require_shape("rollout.body_pos_w", rollout.body_pos_w, (frames, 1, bodies, 3))
+    _require_shape("rollout.body_quat_w", rollout.body_quat_w, (frames, 1, bodies, 4))
+    _require_shape(
+        "rollout.body_lin_vel_w",
+        rollout.body_lin_vel_w,
+        (frames, 1, bodies, 3),
+    )
+    _require_shape(
+        "rollout.body_ang_vel_w",
+        rollout.body_ang_vel_w,
+        (frames, 1, bodies, 3),
+    )
+    _require_shape("rollout.actions", rollout.actions, (int(total_steps), 1, ACTION_DIM))
+    _require_shape("rollout.controls", rollout.controls, (int(total_steps), 1, ACTION_DIM))
+    _require_shape("rollout.contact_indicator", rollout.contact_indicator, (frames, 1, 2))
+    _require_shape("rollout.contact_force", rollout.contact_force, (frames, 1, 2))
+    _require_shape("rollout.ref_indices", rollout.ref_indices, (frames, 1))
+    if rollout.floor_contact_indicator is not None:
+        _require_shape(
+            "rollout.floor_contact_indicator",
+            rollout.floor_contact_indicator,
+            (frames, 1, 3),
         )
-    if tuple(refined_qpos.shape) != (int(total_steps) + 1, QPOS_DIM):
-        expected_refined = (int(total_steps) + 1, QPOS_DIM)
-        raise ValueError(
-            f"Expected refined_qpos shape {expected_refined}, got {tuple(refined_qpos.shape)}"
+    if rollout.floor_contact_force is not None:
+        _require_shape(
+            "rollout.floor_contact_force",
+            rollout.floor_contact_force,
+            (frames, 1, 3),
         )
-    for name in ("body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w"):
-        value = getattr(rollout, name)
-        if int(value.shape[0]) != int(total_steps) + 1 or int(value.shape[1]) != 1:
-            raise ValueError(f"Rollout {name} has inconsistent shape {tuple(value.shape)}")
 
 
 def _validate_command_shape(command: G1CommandBatch, *, total_steps: int) -> None:
-    expected_frames = int(total_steps) + 1
-    if tuple(command.qpos_trajectory.shape) != (expected_frames, 1, QPOS_DIM):
-        raise ValueError(
-            "Expected command qpos trajectory shape "
-            f"{(expected_frames, 1, QPOS_DIM)}, got {tuple(command.qpos_trajectory.shape)}"
-        )
+    frames = int(total_steps) + 1
+    bodies = len(MUJOCO_BODY_NAMES)
+    _require_shape("command.joint_pos", command.joint_pos, (frames, 1, ACTION_DIM))
+    _require_shape("command.joint_vel", command.joint_vel, (frames, 1, ACTION_DIM))
+    _require_shape("command.body_pos_w", command.body_pos_w, (frames, 1, bodies, 3))
+    _require_shape("command.body_quat_w", command.body_quat_w, (frames, 1, bodies, 4))
+    _require_shape(
+        "command.body_lin_vel_w",
+        command.body_lin_vel_w,
+        (frames, 1, bodies, 3),
+    )
+    _require_shape(
+        "command.body_ang_vel_w",
+        command.body_ang_vel_w,
+        (frames, 1, bodies, 3),
+    )
+    _require_shape(
+        "command.qpos_trajectory",
+        command.qpos_trajectory,
+        (frames, 1, QPOS_DIM),
+    )
+    _require_shape(
+        "command.qvel_trajectory",
+        command.qvel_trajectory,
+        (frames, 1, QVEL_DIM),
+    )
+
+
+def _require_shape(name: str, value, expected: tuple[int, ...]) -> None:
+    if value is None or not hasattr(value, "shape"):
+        raise ValueError(f"Expected {name} shape {expected}, got {value!r}")
+    actual = tuple(value.shape)
+    if actual != expected:
+        raise ValueError(f"Expected {name} shape {expected}, got {actual}")
 
 
 def _to_torch(value, *, device: torch.device) -> torch.Tensor:
@@ -250,7 +304,9 @@ def _to_torch(value, *, device: torch.device) -> torch.Tensor:
 
 
 def _scalar_info(info: dict[str, Any], name: str) -> float:
-    value = info.get(name, 0.0)
+    if name not in info:
+        raise ValueError(f"Missing optimizer info field {name}")
+    value = info[name]
     if isinstance(value, torch.Tensor):
         return float(value.detach().cpu().reshape(()).item())
     if hasattr(value, "item"):
