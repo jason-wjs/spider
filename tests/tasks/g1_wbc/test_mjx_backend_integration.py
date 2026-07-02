@@ -5,11 +5,13 @@ import subprocess
 import sys
 import textwrap
 import unittest
+from unittest import mock
 
 import numpy as np
 import torch
 
 from spider.config import Config
+from spider.tasks.g1_wbc import mjx_backend as mjx_backend_module
 from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
     MUJOCO_BODY_NAMES,
@@ -485,6 +487,42 @@ class MjxBackendIntegrationTest(unittest.TestCase):
 
         self.assertTrue(result.metadata["accepted"])
 
+    def test_default_mjx_optimizer_keeps_full_horizon_controls_off_torch_per_window(
+        self,
+    ) -> None:
+        converted_shapes: list[tuple[int, ...]] = []
+        original_to_torch = mjx_backend_module._to_torch
+
+        def recording_to_torch(value, *, device):
+            tensor = original_to_torch(value, device=device)
+            converted_shapes.append(tuple(tensor.shape))
+            return tensor
+
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            return np.arange(int(samples.shape[0]), dtype=np.float32)
+
+        def rollout_reference_factory(**kwargs):
+            del kwargs
+            return {}
+
+        with mock.patch.object(
+            mjx_backend_module,
+            "_to_torch",
+            side_effect=recording_to_torch,
+        ):
+            result = _run_with_fakes(
+                optimizer=None,
+                rollout_factory=_fake_rollout_result,
+                runtime=_FakeOptimizerRuntime(),
+                rollout_scorer=rollout_scorer,
+                rollout_reference_factory=rollout_reference_factory,
+            )
+
+        self.assertTrue(result.metadata["accepted"])
+        self.assertEqual(converted_shapes.count((40, QPOS_DIM - 1)), 1)
+        self.assertEqual(converted_shapes.count((21, QPOS_DIM - 1)), 40)
+
     def test_mjx_backend_rejects_multiple_visible_devices(self) -> None:
         runtime = SimpleNamespace(
             jnp=SimpleNamespace(),
@@ -543,6 +581,10 @@ class _FakeOptimizerJnp:
         return np.asarray(value, dtype=np.float32)
 
     @staticmethod
+    def zeros(shape):
+        return np.zeros(shape, dtype=np.float32)
+
+    @staticmethod
     def concatenate(values, axis=0):
         return np.concatenate(values, axis=axis)
 
@@ -588,6 +630,46 @@ class _FakeOptimizerJax:
 class _FakeOptimizerRuntime:
     jnp = _FakeOptimizerJnp()
     jax = _FakeOptimizerJax()
+
+
+class _DlpackOnlyArray:
+    def __init__(self, tensor: torch.Tensor) -> None:
+        self.tensor = tensor
+        self.dlpack_calls = 0
+        self.array_calls = 0
+
+    @property
+    def shape(self):
+        return self.tensor.shape
+
+    def __dlpack_device__(self):
+        return self.tensor.__dlpack_device__()
+
+    def __dlpack__(self, stream=None):
+        del stream
+        self.dlpack_calls += 1
+        return torch.utils.dlpack.to_dlpack(self.tensor)
+
+    def __array__(self, dtype=None):
+        del dtype
+        self.array_calls += 1
+        raise AssertionError("DLPack arrays must not fall back to NumPy conversion")
+
+
+class MjxBackendConversionTest(unittest.TestCase):
+    def test_validated_execute_chunk_uses_dlpack_without_numpy_fallback(self) -> None:
+        source = _DlpackOnlyArray(torch.ones(21, QPOS_DIM - 1, dtype=torch.float32))
+
+        chunk = mjx_backend_module._validated_execute_chunk(
+            source,
+            execute_steps=20,
+            device=torch.device("cpu"),
+        )
+
+        self.assertEqual(source.dlpack_calls, 1)
+        self.assertEqual(source.array_calls, 0)
+        self.assertEqual(tuple(chunk.shape), (21, QPOS_DIM - 1))
+        self.assertTrue(torch.allclose(chunk, torch.ones_like(chunk)))
 
 
 def _fake_model_bundle(*, profile_name: str = "wxy_parity"):

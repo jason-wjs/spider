@@ -83,7 +83,12 @@ def run_g1_wbc_mjx_mpc(
     total_steps = int(total_steps)
     horizon = int(spider_config.horizon_steps)
     control_steps = int(spider_config.ctrl_steps)
-    controls = torch.zeros(horizon, QPOS_DIM - 1, dtype=torch.float32, device=device)
+    use_jax_controls = optimizer is optimize_window and _supports_jax_controls(runtime)
+    controls = (
+        _initial_jax_controls(horizon, runtime=runtime)
+        if use_jax_controls
+        else torch.zeros(horizon, QPOS_DIM - 1, dtype=torch.float32, device=device)
+    )
     baseline_qpos = motion.qpos()[: total_steps + 1].to(device).detach().clone()
     refined_qpos = baseline_qpos.clone()
     joint_low, joint_high = _joint_limits_from_model_bundle(model_bundle, device=device)
@@ -113,23 +118,30 @@ def run_g1_wbc_mjx_mpc(
             runtime=runtime,
         )
         execute_steps = min(control_steps, total_steps - sim_step)
-        controls = _validated_controls(
-            window_result.updated_controls,
-            horizon=horizon,
-            device=device,
+        controls = (
+            _validated_jax_controls(
+                window_result.updated_controls,
+                horizon=horizon,
+                runtime=runtime,
+            )
+            if use_jax_controls
+            else _validated_controls(
+                window_result.updated_controls,
+                horizon=horizon,
+                device=device,
+            )
         )
-        _validated_execute_chunk(
+        execute_chunk = _validated_execute_chunk(
             window_result.execute_chunk,
             execute_steps=execute_steps,
             device=device,
         )
         _apply_execute_chunk_to_refined_qpos(
             refined_qpos,
-            window_result.execute_chunk,
+            execute_chunk,
             baseline_qpos=baseline_qpos,
             start=sim_step,
             execute_steps=execute_steps,
-            device=device,
             joint_low=joint_low,
             joint_high=joint_high,
         )
@@ -146,11 +158,20 @@ def run_g1_wbc_mjx_mpc(
         best_scores.append(_scalar_info(info, "best_score"))
         accepted_windows += 1
         sim_step += execute_steps
-        controls = _shift_controls(
-            controls,
-            execute_steps=execute_steps,
-            horizon=horizon,
-            device=device,
+        controls = (
+            _shift_jax_controls(
+                controls,
+                execute_steps=execute_steps,
+                horizon=horizon,
+                runtime=runtime,
+            )
+            if use_jax_controls
+            else _shift_controls(
+                controls,
+                execute_steps=execute_steps,
+                horizon=horizon,
+                device=device,
+            )
         )
     steady_state_wall_time_sec = time.perf_counter() - steady_start
 
@@ -164,8 +185,9 @@ def run_g1_wbc_mjx_mpc(
     command = _command_from_refined_qpos(motion, refined_qpos, rollout)
     _validate_command_shape(command, total_steps=total_steps)
     from spider.optimizers.receding import RecedingHorizonResult
+    final_controls = _validated_controls(controls, horizon=horizon, device=device)
     receding = RecedingHorizonResult(
-        controls=controls.detach().clone(),
+        controls=final_controls.detach().clone(),
         infos=infos,
         executed_steps=total_steps,
     )
@@ -173,7 +195,7 @@ def run_g1_wbc_mjx_mpc(
         command=command,
         rollout=rollout,
         refined_qpos=refined_qpos,
-        controls=controls.detach().clone(),
+        controls=final_controls.detach().clone(),
         infos=infos,
         scores=torch.tensor(best_scores, dtype=torch.float32, device=device),
         num_windows=len(infos),
@@ -329,6 +351,24 @@ def _window_reference(
     )
 
 
+def _supports_jax_controls(runtime) -> bool:
+    jnp = getattr(runtime, "jnp", None)
+    return all(
+        hasattr(jnp, name)
+        for name in (
+            "asarray",
+            "concatenate",
+            "zeros",
+        )
+    )
+
+
+def _initial_jax_controls(horizon: int, *, runtime):
+    return runtime.jnp.asarray(
+        np.zeros((int(horizon), QPOS_DIM - 1), dtype=np.float32)
+    )
+
+
 def _joint_limits_from_model_bundle(
     model_bundle,
     *,
@@ -371,6 +411,16 @@ def _validated_controls(value, *, horizon: int, device: torch.device) -> torch.T
     return controls
 
 
+def _validated_jax_controls(value, *, horizon: int, runtime):
+    controls = runtime.jnp.asarray(value)
+    expected = (int(horizon), QPOS_DIM - 1)
+    if tuple(int(dim) for dim in controls.shape) != expected:
+        raise ValueError(
+            f"Expected updated_controls shape {expected}, got {tuple(controls.shape)}"
+        )
+    return controls
+
+
 def _validated_execute_chunk(
     value,
     *,
@@ -393,22 +443,16 @@ def _validated_execute_chunk(
 
 def _apply_execute_chunk_to_refined_qpos(
     refined_qpos: torch.Tensor,
-    execute_chunk,
+    chunk: torch.Tensor,
     *,
     baseline_qpos: torch.Tensor,
     start: int,
     execute_steps: int,
-    device: torch.device,
     joint_low: torch.Tensor | None,
     joint_high: torch.Tensor | None,
 ) -> None:
-    chunk = _validated_execute_chunk(
-        execute_chunk,
-        execute_steps=execute_steps,
-        device=device,
-    )
     end = int(start) + int(execute_steps)
-    base = baseline_qpos[int(start) : end + 1].to(device=device)
+    base = baseline_qpos[int(start) : end + 1].to(device=chunk.device)
     if tuple(base.shape) != (int(execute_steps) + 1, QPOS_DIM):
         raise ValueError(
             "baseline_qpos slice has shape "
@@ -462,6 +506,22 @@ def _shift_controls(
     else:
         controls = previous[: int(horizon)]
     return controls.contiguous()
+
+
+def _shift_jax_controls(
+    controls,
+    *,
+    execute_steps: int,
+    horizon: int,
+    runtime,
+):
+    jnp = runtime.jnp
+    previous = controls[int(execute_steps) :]
+    tail_steps = int(horizon) - int(previous.shape[0])
+    if tail_steps > 0:
+        tail = jnp.zeros((tail_steps, QPOS_DIM - 1))
+        return jnp.concatenate([previous, tail], axis=0)
+    return previous[: int(horizon)]
 
 
 def _validate_rollout_shape(rollout, *, total_steps: int, refined_qpos: torch.Tensor) -> None:
@@ -548,6 +608,13 @@ def _require_shape(name: str, value, expected: tuple[int, ...]) -> None:
 def _to_torch(value, *, device: torch.device) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value.to(device=device, dtype=torch.float32).detach().clone()
+    if hasattr(value, "__dlpack__"):
+        try:
+            tensor = torch.utils.dlpack.from_dlpack(value)
+        except (BufferError, RuntimeError, TypeError):
+            pass
+        else:
+            return tensor.to(device=device, dtype=torch.float32).detach().clone()
     array = np.array(value, dtype=np.float32, copy=True)
     return torch.as_tensor(array, dtype=torch.float32, device=device)
 
