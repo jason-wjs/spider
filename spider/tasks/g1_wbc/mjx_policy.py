@@ -21,15 +21,38 @@ def convert_wbc_actor_to_jax(actor: WbcActor, *, jnp) -> JaxActorParams:
     """Convert a Torch WBC actor to array params consumable by JAX code."""
 
     layers: list[tuple[Any, Any]] = []
-    for module in actor.mlp:
-        if not isinstance(module, nn.Linear):
-            continue
-        layers.append(
-            (
-                jnp.asarray(module.weight.detach().cpu().numpy().T),
-                jnp.asarray(module.bias.detach().cpu().numpy()),
+    modules = list(actor.mlp)
+    if not modules or not isinstance(modules[0], nn.Linear):
+        raise ValueError("WBC actor MLP must start with a Linear input layer")
+    if not isinstance(modules[-1], nn.Linear):
+        raise ValueError("WBC actor MLP must end with a Linear output layer")
+
+    expect_linear = True
+    for index, module in enumerate(modules):
+        if expect_linear:
+            if not isinstance(module, nn.Linear):
+                raise ValueError(
+                    f"Unsupported WBC actor module at index {index}: {type(module).__name__}; "
+                    "expected Linear"
+                )
+            layers.append(
+                (
+                    jnp.asarray(module.weight.detach().cpu().numpy().T),
+                    jnp.asarray(module.bias.detach().cpu().numpy()),
+                )
             )
-        )
+            expect_linear = False
+            continue
+
+        if not isinstance(module, nn.ELU):
+            raise ValueError(
+                f"Unsupported WBC actor module at index {index}: {type(module).__name__}; "
+                "expected ELU"
+            )
+        if module.alpha != 1.0:
+            raise ValueError(f"Unsupported WBC actor ELU alpha at index {index}: {module.alpha}")
+        expect_linear = True
+
     return JaxActorParams(
         obs_mean=jnp.asarray(actor.obs_mean.detach().cpu().numpy()),
         obs_std=jnp.asarray(actor.obs_std.detach().cpu().numpy()),

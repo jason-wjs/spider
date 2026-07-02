@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 import torch
+from torch import nn
 
 from spider.tasks.g1_wbc.mjx_policy import convert_wbc_actor_to_jax, jax_actor_forward
 from spider.tasks.g1_wbc.policy import WbcActor
@@ -57,6 +58,25 @@ class MjxPolicyTest(unittest.TestCase):
         self.assertEqual(len(params.layers), 2)
         self.assertEqual(params.layers[0][0].shape, (2, 3))
         self.assertEqual(params.layers[1][0].shape, (3, 1))
+
+    def test_converter_rejects_unsupported_activation(self) -> None:
+        actor = WbcActor(input_dim=2, hidden_dims=(3,), output_dim=1)
+        actor.mlp[1] = nn.ReLU()
+
+        with self.assertRaisesRegex(ValueError, "expected ELU"):
+            convert_wbc_actor_to_jax(actor, jnp=_NumpyJnp)
+
+    def test_converter_rejects_unexpected_non_linear_module(self) -> None:
+        actor = WbcActor(input_dim=2, hidden_dims=(3,), output_dim=1)
+        actor.mlp = nn.Sequential(
+            nn.Linear(2, 3),
+            nn.ELU(),
+            nn.Identity(),
+            nn.Linear(3, 1),
+        )
+
+        with self.assertRaisesRegex(ValueError, "expected Linear"):
+            convert_wbc_actor_to_jax(actor, jnp=_NumpyJnp)
 
 
 if __name__ == "__main__":
