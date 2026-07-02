@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -165,6 +166,46 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "run matrix"):
                 runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_extra_matrix_rows(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            extra = dict(manifest["rows"][0])
+            extra["motion_name"] = "turn"
+            extra["seed"] = 0
+            manifest["rows"].append(extra)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "run matrix"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_run_command_records_wall_time_for_replay_gate(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_dir = root / "run"
+            argv = ["python", "--output-dir", str(output_dir)]
+
+            def fake_run(argv, *, cwd, capture_output, text, check):
+                del argv, cwd, capture_output, text, check
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with mock.patch.object(runner.subprocess, "run", side_effect=fake_run):
+                row = runner.run_command(argv, cwd=root)
+
+        self.assertEqual(row["returncode"], 0)
+        self.assertIsInstance(row["command_wall_time_sec"], float)
+        self.assertGreaterEqual(row["command_wall_time_sec"], 0.0)
 
     def test_main_returns_one_when_any_replay_fails(self) -> None:
         runner = load_runner()

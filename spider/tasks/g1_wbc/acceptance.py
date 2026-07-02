@@ -299,7 +299,7 @@ def _global_repeat_failures(
             failures.append("mpc_accepted")
         if _safe_int(row.get("accepted_windows")) != 40:
             failures.append("accepted_windows")
-        if bool(row.get("mpc_used_baseline_fallback")):
+        if row.get("mpc_used_baseline_fallback") is not False:
             failures.append(fallback_label)
         artifacts = row.get("artifacts", {})
         for key in REQUIRED_ARTIFACT_FIELDS:

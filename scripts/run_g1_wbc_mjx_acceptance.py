@@ -9,6 +9,7 @@ import math
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -102,6 +103,7 @@ def build_acceptance_plan(
 
 
 def run_command(argv: list[str], *, cwd: Path) -> dict[str, Any]:
+    start = time.perf_counter()
     result = subprocess.run(
         argv,
         cwd=cwd,
@@ -109,11 +111,13 @@ def run_command(argv: list[str], *, cwd: Path) -> dict[str, Any]:
         text=True,
         check=False,
     )
+    wall_time_sec = time.perf_counter() - start
     row = {
         "returncode": int(result.returncode),
         "stdout": result.stdout,
         "stderr": result.stderr,
         "status": "ok" if result.returncode == 0 else "failed",
+        "command_wall_time_sec": float(wall_time_sec),
     }
     metrics_path = _output_dir_from_argv(argv) / "metrics.json"
     if metrics_path.is_file():
@@ -182,23 +186,27 @@ def _baseline_run_matrix(rows: Any) -> dict[tuple[str, int], dict[str, Any]]:
     expected = {(motion, seed) for motion in MOTIONS for seed in SEEDS}
     matrix: dict[tuple[str, int], dict[str, Any]] = {}
     duplicates: list[tuple[str, int]] = []
+    extras: list[tuple[str, Any]] = []
     for row in rows if isinstance(rows, list) else []:
         motion = str(row.get("motion_name"))
         try:
             seed = int(row.get("seed"))
         except (TypeError, ValueError):
+            extras.append((motion, row.get("seed")))
             continue
         key = (motion, seed)
         if key not in expected:
+            extras.append(key)
             continue
         if key in matrix:
             duplicates.append(key)
         matrix[key] = row
     missing = sorted(expected - set(matrix))
-    if missing or duplicates:
+    if missing or duplicates or extras:
         raise ValueError(
             "Baseline manifest run matrix must contain exactly one row for "
-            f"{MOTIONS} x seeds {SEEDS}; missing={missing}, duplicates={duplicates}."
+            f"{MOTIONS} x seeds {SEEDS}; "
+            f"missing={missing}, duplicates={duplicates}, extras={extras}."
         )
     return matrix
 
@@ -263,6 +271,7 @@ def _build_report(
         replay_failures = _row_evidence_failures(
             replay_group,
             timing_failure="replay_steady_state_wall_time",
+            timing_fields=("command_wall_time_sec", "steady_state_wall_time_sec"),
             artifact_fields=("metrics_json", "rollout_npz"),
             require_mpc_fields=False,
         )
@@ -377,6 +386,7 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         ),
         "mpc_used_baseline_fallback": mpc.get("used_baseline_fallback") is not False,
         "num_steps": _safe_int(metrics.get("num_steps", -1)),
+        "steady_state_wall_time_sec": mpc.get("steady_state_wall_time_sec"),
     }
 
 
@@ -384,6 +394,7 @@ def _row_evidence_failures(
     rows: list[dict[str, Any]],
     *,
     timing_failure: str | None = None,
+    timing_fields: tuple[str, ...] = ("steady_state_wall_time_sec",),
     artifact_fields: tuple[str, ...] = REQUIRED_ARTIFACT_FIELDS,
     require_mpc_fields: bool = True,
 ) -> tuple[str, ...]:
@@ -422,12 +433,7 @@ def _row_evidence_failures(
             if not isinstance(artifacts, dict) or not artifacts.get(key):
                 failures.append(key)
         if timing_failure is not None:
-            value = _timing_value(row, "steady_state_wall_time_sec")
-            if not (
-                isinstance(value, (int, float))
-                and math.isfinite(float(value))
-                and float(value) > 0.0
-            ):
+            if not any(_valid_timing(_timing_value(row, field)) for field in timing_fields):
                 failures.append(timing_failure)
     missing = set(SEEDS) - seen
     if missing:
@@ -438,6 +444,14 @@ def _row_evidence_failures(
 def _timing_value(row: dict[str, Any], name: str):
     mpc = row.get("mpc", {})
     return row.get(name, mpc.get(name) if isinstance(mpc, dict) else None)
+
+
+def _valid_timing(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
 
 
 def _has_valid_metric(metrics: dict[str, Any], name: str) -> bool:

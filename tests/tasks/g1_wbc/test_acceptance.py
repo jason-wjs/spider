@@ -116,6 +116,19 @@ class AcceptanceTest(unittest.TestCase):
         self.assertIn("num_steps", result.failures)
         self.assertIn("accepted_windows", result.failures)
 
+    def test_baseline_group_fails_closed_when_fallback_field_is_missing(self):
+        rows = [
+            _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
+            _baseline_repeat("jump", 1, -2.08, 0.061, 0.071, 0.081, 0.35, 0.43, 211.0),
+            _baseline_repeat("jump", 2, -2.10, 0.062, 0.072, 0.082, 0.35, 0.44, 212.0),
+        ]
+        del rows[0]["mpc_used_baseline_fallback"]
+
+        result = evaluate_baseline_group("jump", rows)
+
+        self.assertFalse(result.passed)
+        self.assertIn("baseline_fallback", result.failures)
+
     def test_baseline_group_fails_closed_when_metrics_container_is_malformed(self):
         rows = [
             _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
