@@ -288,6 +288,13 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 rollout_factory=_bad_qvel_rollout_result,
             )
 
+    def test_mjx_backend_rejects_noop_rollout_that_ignores_refined_qpos(self) -> None:
+        with self.assertRaisesRegex(ValueError, "rollout.qpos"):
+            _run_with_fakes(
+                optimizer=_fake_optimizer,
+                rollout_factory=_baseline_rollout_result,
+            )
+
     def test_mjx_backend_rejects_missing_best_score(self) -> None:
         with self.assertRaisesRegex(ValueError, "best_score"):
             _run_with_fakes(
@@ -460,6 +467,23 @@ def _bad_qvel_rollout_result(
     )
     result.qvel = torch.zeros(int(total_steps) + 1, 1, 1, device=device)
     return result
+
+
+def _baseline_rollout_result(
+    motion: G1Motion,
+    total_steps: int,
+    *,
+    device: torch.device,
+    refined_qpos: torch.Tensor,
+):
+    del refined_qpos
+    baseline_qpos = motion.qpos()[: int(total_steps) + 1].to(device)
+    return _fake_rollout_result(
+        motion,
+        total_steps,
+        device=device,
+        refined_qpos=baseline_qpos,
+    )
 
 
 if __name__ == "__main__":

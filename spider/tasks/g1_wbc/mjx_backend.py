@@ -295,6 +295,13 @@ def _validate_rollout_shape(rollout, *, total_steps: int, refined_qpos: torch.Te
     bodies = len(MUJOCO_BODY_NAMES)
     _require_shape("refined_qpos", refined_qpos, (frames, QPOS_DIM))
     _require_shape("rollout.qpos", rollout.qpos, (frames, 1, QPOS_DIM))
+    if not torch.allclose(
+        rollout.qpos[:, 0].to(device=refined_qpos.device, dtype=refined_qpos.dtype),
+        refined_qpos,
+        atol=1.0e-5,
+        rtol=1.0e-5,
+    ):
+        raise ValueError("rollout.qpos must match refined_qpos for accepted MJX runs")
     _require_shape("rollout.qvel", rollout.qvel, (frames, 1, QVEL_DIM))
     _require_shape("rollout.body_pos_w", rollout.body_pos_w, (frames, 1, bodies, 3))
     _require_shape("rollout.body_quat_w", rollout.body_quat_w, (frames, 1, bodies, 4))
