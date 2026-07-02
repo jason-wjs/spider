@@ -88,6 +88,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jump-motion", type=Path, default=DEFAULT_JUMP_MOTION)
     parser.add_argument("--walk-motion", type=Path, default=DEFAULT_WALK_MOTION)
+    parser.add_argument("--motion-type", default="isaaclab")
     parser.add_argument(
         "--checkpoint",
         default="bc",
@@ -130,7 +131,7 @@ def build_stage0_commands(args: argparse.Namespace) -> list[Stage0Command]:
                 "--motion",
                 str(motions[motion_name]),
                 "--motion-type",
-                "auto",
+                str(args.motion_type),
                 "--checkpoint",
                 str(args.checkpoint),
                 "--device",
@@ -184,11 +185,22 @@ def run_command(command: Stage0Command) -> dict[str, Any]:
         text=True,
         check=False,
     )
-    return {
+    row: dict[str, Any] = {
         "returncode": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
     }
+    metrics_path = Path(command.output_dir) / "metrics.json"
+    if metrics_path.is_file():
+        payload = json.loads(metrics_path.read_text())
+        metrics = payload.get("metrics", {})
+        mpc = payload.get("mpc", {})
+        row["metrics"] = metrics
+        row["mpc_accepted"] = bool(mpc.get("accepted", True))
+        row["accepted_windows"] = int(mpc.get("accepted_windows", mpc.get("num_windows", -1)))
+        row["mpc_used_baseline_fallback"] = bool(mpc.get("used_baseline_fallback", False))
+        row["num_steps"] = int(metrics.get("num_steps", -1))
+    return row
 
 
 def write_manifest(output_dir: Path, rows: list[dict[str, Any]]) -> Path:
