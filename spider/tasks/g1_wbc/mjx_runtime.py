@@ -112,17 +112,21 @@ def require_mjx_runtime() -> MjxRuntime:
 
     status = probe_mjx_runtime()
     if not status.available:
-        raise RuntimeError(
-            "--mpc-backend mjx requires importable jax and mujoco.mjx. "
-            f"Runtime probe failed: {status.error}"
-        )
+        raise _runtime_unavailable_error(status, phase="probe")
     try:
         jax = importlib.import_module("jax")
         jnp = importlib.import_module("jax.numpy")
         mjx = importlib.import_module("mujoco.mjx")
-    except Exception as exc:
-        raise RuntimeError(
-            "--mpc-backend mjx requires importable jax and mujoco.mjx. "
-            f"Runtime import failed after probe succeeded: {exc}"
-        ) from exc
+    except Exception:
+        raise _runtime_unavailable_error(status, phase="post-probe import") from None
     return MjxRuntime(jax=jax, jnp=jnp, mjx=mjx, status=status)
+
+
+def _runtime_unavailable_error(status: MjxRuntimeStatus, *, phase: str) -> RuntimeError:
+    return RuntimeError(
+        "--mpc-backend mjx requires importable jax, jax.numpy, and mujoco.mjx. "
+        f"Runtime {phase} failed with availability "
+        f"jax={status.jax_available}, "
+        f"jax_numpy={status.jnp_available}, "
+        f"mjx={status.mjx_available}."
+    )

@@ -40,7 +40,8 @@ class MjxRuntimeTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "--mpc-backend mjx") as cm:
                 mjx_runtime.require_mjx_runtime()
 
-        self.assertIn("No module named 'jax'", str(cm.exception))
+        self.assertNotIn("No module named", str(cm.exception))
+        self.assertIn("jax=False", str(cm.exception))
 
     def test_runtime_status_reports_missing_jax_numpy(self) -> None:
         real_import_module = importlib.import_module
@@ -105,7 +106,9 @@ class MjxRuntimeTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "--mpc-backend mjx") as cm:
                     mjx_runtime.require_mjx_runtime()
 
-        self.assertIn("jax.numpy", str(cm.exception))
+        self.assertIsNone(cm.exception.__cause__)
+        self.assertNotIn("No module named", str(cm.exception))
+        self.assertIn("post-probe import", str(cm.exception))
 
 
 if __name__ == "__main__":
