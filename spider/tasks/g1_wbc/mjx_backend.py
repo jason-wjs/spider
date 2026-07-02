@@ -93,7 +93,7 @@ def run_g1_wbc_mjx_mpc(
     refined_qpos = baseline_qpos.clone()
     joint_low, joint_high = _joint_limits_from_model_bundle(model_bundle, device=device)
     infos: list[dict[str, Any]] = []
-    best_scores: list[float] = []
+    best_scores: list[Any] = []
     sim_step = 0
     accepted_windows = 0
     steady_start = time.perf_counter()
@@ -155,7 +155,11 @@ def run_g1_wbc_mjx_mpc(
             }
         )
         infos.append(info)
-        best_scores.append(_scalar_info(info, "best_score"))
+        best_scores.append(
+            _raw_info_scalar(info, "best_score")
+            if use_jax_controls
+            else _scalar_info(info, "best_score")
+        )
         accepted_windows += 1
         sim_step += execute_steps
         controls = (
@@ -197,7 +201,7 @@ def run_g1_wbc_mjx_mpc(
         refined_qpos=refined_qpos,
         controls=final_controls.detach().clone(),
         infos=infos,
-        scores=torch.tensor(best_scores, dtype=torch.float32, device=device),
+        scores=_scores_to_torch(best_scores, device=device),
         num_windows=len(infos),
     )
     return G1WbcMpcRun(
@@ -641,6 +645,25 @@ def _scalar_info(info: dict[str, Any], name: str) -> float:
     if not math.isfinite(scalar):
         raise ValueError(f"Optimizer info field {name} must be finite")
     return scalar
+
+
+def _raw_info_scalar(info: dict[str, Any], name: str):
+    if name not in info:
+        raise ValueError(f"Missing optimizer info field {name}")
+    value = info[name]
+    shape = tuple(int(dim) for dim in getattr(value, "shape", ()))
+    if shape:
+        raise ValueError(f"Optimizer info field {name} must be scalar")
+    return value
+
+
+def _scores_to_torch(values: list[Any], *, device: torch.device) -> torch.Tensor:
+    if not values:
+        return torch.empty(0, dtype=torch.float32, device=device)
+    tensor = _to_torch(values, device=device).reshape(-1)
+    if not torch.isfinite(tensor).all():
+        raise ValueError("Optimizer info field best_score must be finite")
+    return tensor
 
 
 def _command_from_refined_qpos(

@@ -523,6 +523,31 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(converted_shapes.count((40, QPOS_DIM - 1)), 1)
         self.assertEqual(converted_shapes.count((21, QPOS_DIM - 1)), 40)
 
+    def test_default_mjx_optimizer_defers_best_score_scalarization(self) -> None:
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            return np.arange(int(samples.shape[0]), dtype=np.float32)
+
+        def rollout_reference_factory(**kwargs):
+            del kwargs
+            return {}
+
+        with mock.patch.object(
+            mjx_backend_module,
+            "_scalar_info",
+            side_effect=AssertionError("default MJX path should defer score sync"),
+        ):
+            result = _run_with_fakes(
+                optimizer=None,
+                rollout_factory=_fake_rollout_result,
+                runtime=_FakeOptimizerRuntime(),
+                rollout_scorer=rollout_scorer,
+                rollout_reference_factory=rollout_reference_factory,
+            )
+
+        self.assertTrue(result.metadata["accepted"])
+        self.assertEqual(result.result.scores.shape, (40,))
+
     def test_mjx_backend_rejects_multiple_visible_devices(self) -> None:
         runtime = SimpleNamespace(
             jnp=SimpleNamespace(),
