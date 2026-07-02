@@ -1,4 +1,8 @@
 from types import SimpleNamespace
+import os
+from pathlib import Path
+import subprocess
+import sys
 import unittest
 
 import torch
@@ -60,6 +64,29 @@ def _spider_config() -> Config:
 
 
 class MjxBackendIntegrationTest(unittest.TestCase):
+    def test_importing_backend_does_not_load_rollout_module(self) -> None:
+        repo_root = Path(__file__).resolve().parents[3]
+        code = (
+            "import sys; "
+            "import spider.tasks.g1_wbc.mjx_backend; "
+            "print('rollout_loaded', 'spider.tasks.g1_wbc.rollout' in sys.modules)"
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(repo_root)
+
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("rollout_loaded False", completed.stdout)
+        self.assertNotIn("Warp", completed.stdout + completed.stderr)
+
     def test_mjx_backend_contract_with_injected_fakes(self) -> None:
         calls: list[str] = []
 
@@ -85,11 +112,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             runtime=SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
             model_factory=fake_model_factory,
             policy_converter=fake_policy_converter,
-            optimizer=lambda **kwargs: SimpleNamespace(
-                updated_controls=torch.zeros(40, QPOS_DIM - 1),
-                execute_chunk=torch.zeros(21, QPOS_DIM - 1),
-                info={"best_score": torch.tensor(1.25)},
-            ),
+            optimizer=_fake_optimizer,
             rollout_factory=_fake_rollout_result,
         )
 
@@ -101,6 +124,18 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(result.metadata["accepted_windows"], 40)
         self.assertEqual(result.result.rollout.qpos.shape, (801, 1, QPOS_DIM))
         self.assertEqual(result.result.refined_qpos.shape, (801, QPOS_DIM))
+        self.assertTrue(
+            torch.allclose(
+                result.result.refined_qpos[:800, 1],
+                torch.full((800,), 0.25),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                result.result.command.qpos_trajectory[:800, 0, 1],
+                torch.full((800,), 0.25),
+            )
+        )
         self.assertEqual(result.result.scores.shape, (40,))
         self.assertTrue(torch.allclose(result.result.scores, torch.full((40,), 1.25)))
         self.assertEqual(result.receding.executed_steps, 800)
@@ -120,6 +155,18 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 total_steps=800,
                 seed=5,
             )
+
+
+def _fake_optimizer(**kwargs):
+    del kwargs
+    updated = torch.zeros(40, QPOS_DIM - 1)
+    chunk = torch.zeros(21, QPOS_DIM - 1)
+    chunk[:, 0] = 0.25
+    return SimpleNamespace(
+        updated_controls=updated,
+        execute_chunk=chunk,
+        info={"best_score": torch.tensor(1.25)},
+    )
 
 
 def _fake_rollout_result(motion: G1Motion, total_steps: int, *, device: torch.device):

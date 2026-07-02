@@ -7,15 +7,11 @@ from typing import Any, Callable
 
 import torch
 
-from spider.optimizers.receding import RecedingHorizonResult
 from spider.tasks.g1_wbc.constants import QPOS_DIM
-from spider.tasks.g1_wbc.mjx_model import build_mjx_model_bundle
 from spider.tasks.g1_wbc.mjx_optimizer import JaxWindowOptimizerConfig, optimize_window
 from spider.tasks.g1_wbc.mjx_policy import convert_wbc_actor_to_jax
 from spider.tasks.g1_wbc.mjx_runtime import require_mjx_runtime
 from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion
-from spider.tasks.g1_wbc.rollout import WbcRolloutConfig
-from spider.tasks.g1_wbc.spider_task import G1WbcMpcRun, G1WbcSpiderResult
 
 
 def run_g1_wbc_mjx_mpc(
@@ -23,32 +19,36 @@ def run_g1_wbc_mjx_mpc(
     spider_config,
     motion: G1Motion,
     actor,
-    rollout_config: WbcRolloutConfig,
-    execute_rollout_config: WbcRolloutConfig,
+    rollout_config,
+    execute_rollout_config,
     method: str,
     reward_weights: dict[str, float] | None,
     total_steps: int,
     seed: int,
     runtime=None,
-    model_factory: Callable[..., Any] = build_mjx_model_bundle,
+    model_factory: Callable[..., Any] | None = None,
     policy_converter: Callable[..., Any] = convert_wbc_actor_to_jax,
     optimizer: Callable[..., Any] = optimize_window,
     rollout_factory: Callable[..., Any] | None = None,
 ):
     """Run the MJX full-rollout backend or fail before touching Warp state."""
 
+    del execute_rollout_config
     compile_start = time.perf_counter()
     if runtime is None:
         runtime = require_mjx_runtime()
-    model_bundle = model_factory(profile_name="wxy_parity", require_runtime=True)
-    actor_params = policy_converter(actor, jnp=runtime.jnp)
-    compile_init_wall_time_sec = time.perf_counter() - compile_start
 
     if rollout_factory is None or optimizer is optimize_window:
         raise NotImplementedError(
             "MJX runtime is available, but the production MJX physics scan has not "
             "been wired yet. Keep using --mpc-backend mujoco_warp for production."
         )
+
+    if model_factory is None:
+        model_factory = _default_model_factory
+    model_bundle = model_factory(profile_name="wxy_parity", require_runtime=True)
+    actor_params = policy_converter(actor, jnp=runtime.jnp)
+    compile_init_wall_time_sec = time.perf_counter() - compile_start
 
     device = torch.device(rollout_config.device)
     total_steps = int(total_steps)
@@ -83,6 +83,13 @@ def run_g1_wbc_mjx_mpc(
             execute_steps=execute_steps,
             device=device,
         )
+        _apply_execute_chunk_to_refined_qpos(
+            refined_qpos,
+            window_result.execute_chunk,
+            start=sim_step,
+            execute_steps=execute_steps,
+            device=device,
+        )
         info = dict(window_result.info)
         info.update(
             {
@@ -99,7 +106,12 @@ def run_g1_wbc_mjx_mpc(
     steady_state_wall_time_sec = time.perf_counter() - steady_start
 
     rollout = rollout_factory(motion, total_steps, device=device)
+    _validate_rollout_shape(rollout, total_steps=total_steps, refined_qpos=refined_qpos)
     command = _command_from_refined_qpos(motion, refined_qpos, rollout)
+    _validate_command_shape(command, total_steps=total_steps)
+    from spider.optimizers.receding import RecedingHorizonResult
+    from spider.tasks.g1_wbc.spider_task import G1WbcMpcRun, G1WbcSpiderResult
+
     receding = RecedingHorizonResult(
         controls=controls.detach().clone(),
         infos=infos,
@@ -153,6 +165,12 @@ def _placeholder_rollout_scores(samples, reference, actor_params, model_bundle):
     return samples[..., 0, 0]
 
 
+def _default_model_factory(**kwargs):
+    from spider.tasks.g1_wbc.mjx_model import build_mjx_model_bundle
+
+    return build_mjx_model_bundle(**kwargs)
+
+
 def _validated_controls(value, *, horizon: int, device: torch.device) -> torch.Tensor:
     controls = _to_torch(value, device=device)
     expected = (int(horizon), QPOS_DIM - 1)
@@ -180,6 +198,49 @@ def _validated_execute_chunk(
             f"execute_chunk has {execute_chunk.shape[0]} steps, need {execute_steps}"
         )
     return execute_chunk
+
+
+def _apply_execute_chunk_to_refined_qpos(
+    refined_qpos: torch.Tensor,
+    execute_chunk,
+    *,
+    start: int,
+    execute_steps: int,
+    device: torch.device,
+) -> None:
+    chunk = _validated_execute_chunk(
+        execute_chunk,
+        execute_steps=execute_steps,
+        device=device,
+    )
+    end = int(start) + int(execute_steps)
+    refined_qpos[int(start) : end, 1:] = chunk[:execute_steps]
+
+
+def _validate_rollout_shape(rollout, *, total_steps: int, refined_qpos: torch.Tensor) -> None:
+    expected_qpos = (int(total_steps) + 1, 1, QPOS_DIM)
+    if tuple(rollout.qpos.shape) != expected_qpos:
+        raise ValueError(
+            f"Expected rollout qpos shape {expected_qpos}, got {tuple(rollout.qpos.shape)}"
+        )
+    if tuple(refined_qpos.shape) != (int(total_steps) + 1, QPOS_DIM):
+        expected_refined = (int(total_steps) + 1, QPOS_DIM)
+        raise ValueError(
+            f"Expected refined_qpos shape {expected_refined}, got {tuple(refined_qpos.shape)}"
+        )
+    for name in ("body_pos_w", "body_quat_w", "body_lin_vel_w", "body_ang_vel_w"):
+        value = getattr(rollout, name)
+        if int(value.shape[0]) != int(total_steps) + 1 or int(value.shape[1]) != 1:
+            raise ValueError(f"Rollout {name} has inconsistent shape {tuple(value.shape)}")
+
+
+def _validate_command_shape(command: G1CommandBatch, *, total_steps: int) -> None:
+    expected_frames = int(total_steps) + 1
+    if tuple(command.qpos_trajectory.shape) != (expected_frames, 1, QPOS_DIM):
+        raise ValueError(
+            "Expected command qpos trajectory shape "
+            f"{(expected_frames, 1, QPOS_DIM)}, got {tuple(command.qpos_trajectory.shape)}"
+        )
 
 
 def _to_torch(value, *, device: torch.device) -> torch.Tensor:
