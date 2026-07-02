@@ -133,12 +133,11 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                     info={"best_score": torch.tensor(1.0)},
                 )
 
-            def rollout_factory(motion, total_steps, *, device):
+            def rollout_factory(motion, total_steps, *, device, refined_qpos):
                 del motion
                 frames = int(total_steps) + 1
                 bodies = len(MUJOCO_BODY_NAMES)
-                qpos = torch.zeros(frames, 1, QPOS_DIM, device=device)
-                qpos[..., 3] = 1.0
+                qpos = refined_qpos.to(device).view(frames, 1, QPOS_DIM).clone()
                 body_quat = torch.zeros(frames, 1, bodies, 4, device=device)
                 body_quat[..., 0] = 1.0
                 return SimpleNamespace(
@@ -257,7 +256,11 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 torch.full((800,), 0.25),
             )
         )
-        self.assertAlmostEqual(float(result.result.command.qpos_trajectory[800, 0, 1]), 0.25)
+        self.assertAlmostEqual(
+            float(result.result.command.qpos_trajectory[800, 0, 1]),
+            0.25,
+        )
+        self.assertAlmostEqual(float(result.result.rollout.qpos[800, 0, 1]), 0.25)
         self.assertEqual(result.result.scores.shape, (40,))
         self.assertTrue(torch.allclose(result.result.scores, torch.full((40,), 1.25)))
         self.assertEqual(result.receding.executed_steps, 800)
@@ -292,8 +295,62 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 rollout_factory=_fake_rollout_result,
             )
 
+    def test_mjx_backend_rejects_non_finite_best_score(self) -> None:
+        with self.assertRaisesRegex(ValueError, "best_score"):
+            _run_with_fakes(
+                optimizer=_nan_score_optimizer,
+                rollout_factory=_fake_rollout_result,
+            )
 
-def _run_with_fakes(*, optimizer, rollout_factory):
+    def test_mjx_backend_rejects_non_scalar_best_score(self) -> None:
+        with self.assertRaisesRegex(ValueError, "best_score"):
+            _run_with_fakes(
+                optimizer=_vector_score_optimizer,
+                rollout_factory=_fake_rollout_result,
+            )
+
+    def test_mjx_backend_shifts_controls_between_windows(self) -> None:
+        captured: list[torch.Tensor] = []
+
+        def optimizer(**kwargs):
+            controls = kwargs["controls"].detach().clone()
+            captured.append(controls)
+            updated = torch.zeros_like(controls)
+            updated[:, 0] = torch.arange(controls.shape[0], dtype=torch.float32)
+            chunk = torch.zeros(21, QPOS_DIM - 1)
+            chunk[:, 0] = 0.25
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25)},
+            )
+
+        _run_with_fakes(optimizer=optimizer, rollout_factory=_fake_rollout_result)
+
+        self.assertGreaterEqual(len(captured), 2)
+        self.assertTrue(
+            torch.allclose(
+                captured[1][:20, 0],
+                torch.arange(20, 40, dtype=torch.float32),
+            )
+        )
+        self.assertTrue(torch.allclose(captured[1][20:, 0], torch.zeros(20)))
+
+    def test_mjx_backend_rejects_multiple_visible_devices(self) -> None:
+        runtime = SimpleNamespace(
+            jnp=SimpleNamespace(),
+            jax=SimpleNamespace(),
+            status=SimpleNamespace(visible_devices=("0", "1")),
+        )
+        with self.assertRaisesRegex(RuntimeError, "single GPU"):
+            _run_with_fakes(
+                optimizer=_fake_optimizer,
+                rollout_factory=_fake_rollout_result,
+                runtime=runtime,
+            )
+
+
+def _run_with_fakes(*, optimizer, rollout_factory, runtime=None):
     return run_g1_wbc_mjx_mpc(
         spider_config=_spider_config(),
         motion=_motion(),
@@ -304,7 +361,7 @@ def _run_with_fakes(*, optimizer, rollout_factory):
         reward_weights=None,
         total_steps=800,
         seed=5,
-        runtime=SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
+        runtime=runtime or SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
         model_factory=lambda **kwargs: SimpleNamespace(
             profile=SimpleNamespace(name=kwargs["profile_name"])
         ),
@@ -334,11 +391,40 @@ def _missing_score_optimizer(**kwargs):
     return SimpleNamespace(updated_controls=updated, execute_chunk=chunk, info={})
 
 
-def _fake_rollout_result(motion: G1Motion, total_steps: int, *, device: torch.device):
+def _nan_score_optimizer(**kwargs):
+    del kwargs
+    updated = torch.zeros(40, QPOS_DIM - 1)
+    chunk = torch.zeros(21, QPOS_DIM - 1)
+    chunk[:, 0] = 0.25
+    return SimpleNamespace(
+        updated_controls=updated,
+        execute_chunk=chunk,
+        info={"best_score": torch.tensor(float("nan"))},
+    )
+
+
+def _vector_score_optimizer(**kwargs):
+    del kwargs
+    updated = torch.zeros(40, QPOS_DIM - 1)
+    chunk = torch.zeros(21, QPOS_DIM - 1)
+    chunk[:, 0] = 0.25
+    return SimpleNamespace(
+        updated_controls=updated,
+        execute_chunk=chunk,
+        info={"best_score": torch.tensor([1.0, 2.0])},
+    )
+
+
+def _fake_rollout_result(
+    motion: G1Motion,
+    total_steps: int,
+    *,
+    device: torch.device,
+    refined_qpos: torch.Tensor,
+):
     frames = int(total_steps) + 1
     bodies = len(MUJOCO_BODY_NAMES)
-    qpos = torch.zeros(frames, 1, QPOS_DIM, device=device)
-    qpos[..., 3] = 1.0
+    qpos = refined_qpos.to(device).view(frames, 1, QPOS_DIM).clone()
     qvel = torch.zeros(frames, 1, QVEL_DIM, device=device)
     body_quat = torch.zeros(frames, 1, bodies, 4, device=device)
     body_quat[..., 0] = 1.0
@@ -359,8 +445,19 @@ def _fake_rollout_result(motion: G1Motion, total_steps: int, *, device: torch.de
     )
 
 
-def _bad_qvel_rollout_result(motion: G1Motion, total_steps: int, *, device: torch.device):
-    result = _fake_rollout_result(motion, total_steps, device=device)
+def _bad_qvel_rollout_result(
+    motion: G1Motion,
+    total_steps: int,
+    *,
+    device: torch.device,
+    refined_qpos: torch.Tensor,
+):
+    result = _fake_rollout_result(
+        motion,
+        total_steps,
+        device=device,
+        refined_qpos=refined_qpos,
+    )
     result.qvel = torch.zeros(int(total_steps) + 1, 1, 1, device=device)
     return result
 

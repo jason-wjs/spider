@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Callable
 
@@ -43,6 +44,8 @@ def run_g1_wbc_mjx_mpc(
     compile_start = time.perf_counter()
     if runtime is None:
         runtime = require_mjx_runtime()
+    device = torch.device(rollout_config.device)
+    _validate_single_gpu_runtime(runtime, device=device)
 
     if rollout_factory is None or optimizer is optimize_window:
         raise NotImplementedError(
@@ -56,7 +59,6 @@ def run_g1_wbc_mjx_mpc(
     actor_params = policy_converter(actor, jnp=runtime.jnp)
     compile_init_wall_time_sec = time.perf_counter() - compile_start
 
-    device = torch.device(rollout_config.device)
     total_steps = int(total_steps)
     horizon = int(spider_config.horizon_steps)
     control_steps = int(spider_config.ctrl_steps)
@@ -109,9 +111,20 @@ def run_g1_wbc_mjx_mpc(
         best_scores.append(_scalar_info(info, "best_score"))
         accepted_windows += 1
         sim_step += execute_steps
+        controls = _shift_controls(
+            controls,
+            execute_steps=execute_steps,
+            horizon=horizon,
+            device=device,
+        )
     steady_state_wall_time_sec = time.perf_counter() - steady_start
 
-    rollout = rollout_factory(motion, total_steps, device=device)
+    rollout = rollout_factory(
+        motion,
+        total_steps,
+        device=device,
+        refined_qpos=refined_qpos.detach().clone(),
+    )
     _validate_rollout_shape(rollout, total_steps=total_steps, refined_qpos=refined_qpos)
     command = _command_from_refined_qpos(motion, refined_qpos, rollout)
     _validate_command_shape(command, total_steps=total_steps)
@@ -175,6 +188,38 @@ def _default_model_factory(**kwargs):
     return build_mjx_model_bundle(**kwargs)
 
 
+def _validate_single_gpu_runtime(runtime, *, device: torch.device) -> None:
+    status = getattr(runtime, "status", None)
+    visible_devices = tuple(getattr(status, "visible_devices", ()) or ())
+    if len(visible_devices) > 1:
+        raise RuntimeError(
+            "MJX backend requires single GPU visibility per motion; "
+            f"got CUDA_VISIBLE_DEVICES={visible_devices}."
+        )
+    if visible_devices and device.type == "cuda" and device.index not in (None, 0):
+        raise RuntimeError(
+            "MJX backend requires cuda:0 after narrowing CUDA_VISIBLE_DEVICES "
+            f"to one GPU; got device={device}."
+        )
+
+    jax_devices_fn = getattr(getattr(runtime, "jax", None), "devices", None)
+    if not visible_devices and device.type == "cuda" and callable(jax_devices_fn):
+        try:
+            devices = tuple(jax_devices_fn())
+        except Exception:
+            return
+        accelerator_count = sum(
+            1
+            for item in devices
+            if str(getattr(item, "platform", "")).lower() in {"gpu", "cuda", "tpu"}
+        )
+        if accelerator_count > 1:
+            raise RuntimeError(
+                "MJX backend requires single GPU visibility per motion; "
+                f"jax.devices() reports {accelerator_count} accelerators."
+            )
+
+
 def _validated_controls(value, *, horizon: int, device: torch.device) -> torch.Tensor:
     controls = _to_torch(value, device=device)
     expected = (int(horizon), QPOS_DIM - 1)
@@ -221,6 +266,28 @@ def _apply_execute_chunk_to_refined_qpos(
     end = int(start) + int(execute_steps)
     refined_qpos[int(start) : end, 1:] = chunk[:execute_steps]
     refined_qpos[end, 1:] = chunk[int(execute_steps)]
+
+
+def _shift_controls(
+    controls: torch.Tensor,
+    *,
+    execute_steps: int,
+    horizon: int,
+    device: torch.device,
+) -> torch.Tensor:
+    previous = controls[int(execute_steps) :]
+    tail_steps = int(horizon) - int(previous.shape[0])
+    if tail_steps > 0:
+        tail = torch.zeros(
+            tail_steps,
+            QPOS_DIM - 1,
+            dtype=controls.dtype,
+            device=device,
+        )
+        controls = torch.cat([previous, tail], dim=0)
+    else:
+        controls = previous[: int(horizon)]
+    return controls.contiguous()
 
 
 def _validate_rollout_shape(rollout, *, total_steps: int, refined_qpos: torch.Tensor) -> None:
@@ -308,10 +375,23 @@ def _scalar_info(info: dict[str, Any], name: str) -> float:
         raise ValueError(f"Missing optimizer info field {name}")
     value = info[name]
     if isinstance(value, torch.Tensor):
-        return float(value.detach().cpu().reshape(()).item())
-    if hasattr(value, "item"):
-        return float(value.item())
-    return float(value)
+        tensor = value.detach().cpu()
+        if tensor.numel() != 1:
+            raise ValueError(f"Optimizer info field {name} must be scalar")
+        scalar = float(tensor.reshape(()).item())
+    elif hasattr(value, "item"):
+        try:
+            scalar = float(value.item())
+        except Exception as exc:
+            raise ValueError(f"Optimizer info field {name} must be scalar") from exc
+    else:
+        try:
+            scalar = float(value)
+        except Exception as exc:
+            raise ValueError(f"Optimizer info field {name} must be numeric") from exc
+    if not math.isfinite(scalar):
+        raise ValueError(f"Optimizer info field {name} must be finite")
+    return scalar
 
 
 def _command_from_refined_qpos(
