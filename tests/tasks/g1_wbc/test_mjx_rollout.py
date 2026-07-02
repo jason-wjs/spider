@@ -1,3 +1,4 @@
+from dataclasses import is_dataclass
 import unittest
 
 import numpy as np
@@ -102,6 +103,14 @@ class _NumpyJnp:
     def abs(value):
         return np.abs(value)
 
+    @staticmethod
+    def arange(stop):
+        return np.arange(stop, dtype=np.int32)
+
+    @staticmethod
+    def logical_or(left, right):
+        return np.logical_or(left, right)
+
 
 class _FakeRandom:
     @staticmethod
@@ -123,6 +132,48 @@ class _FakeNN:
 class _FakeJax:
     random = _FakeRandom()
     nn = _FakeNN()
+
+
+class _RecordingLax:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, int]] = []
+
+    def scan(self, fn, init, xs=None, length=None):
+        if xs is None:
+            steps = list(range(int(length)))
+        else:
+            steps = list(xs)
+        self.calls.append({"steps": len(steps)})
+        carry = init
+        signature = self._carry_signature(carry)
+        for step in steps:
+            self.assert_valid_carry(carry, signature)
+            carry, _ = fn(carry, step)
+            self.assert_valid_carry(carry, signature)
+        return carry, None
+
+    def assert_valid_carry(self, value, signature) -> None:
+        actual = self._carry_signature(value)
+        if actual != signature:
+            raise AssertionError(f"scan carry structure changed: {actual} != {signature}")
+
+    def _carry_signature(self, value):
+        if value is None:
+            raise AssertionError("scan carry must not contain None")
+        if is_dataclass(value):
+            raise AssertionError("scan carry must not contain dataclass instances")
+        if isinstance(value, tuple):
+            return ("tuple", tuple(self._carry_signature(item) for item in value))
+        if isinstance(value, dict):
+            return (
+                "dict",
+                tuple(
+                    (key, self._carry_signature(value[key]))
+                    for key in sorted(value)
+                ),
+            )
+        arr = np.asarray(value)
+        return ("array", tuple(arr.shape), str(arr.dtype))
 
 
 class _FakeRuntime:
@@ -344,6 +395,94 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertAlmostEqual(float(actions[0][0, 0]), expected[0], places=6)
         self.assertAlmostEqual(float(actions[1][0, 0]), expected[1], places=6)
         self.assertAlmostEqual(float(actions[2][0, 0]), expected[2], places=6)
+
+    def test_score_candidate_controls_uses_lax_scan_when_available(self) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+        lax = _RecordingLax()
+        runtime = type(
+            "ScanRuntime",
+            (),
+            {
+                "jnp": _NumpyJnp(),
+                "jax": type("ScanJax", (), {"lax": lax})(),
+            },
+        )()
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=_physics_step,
+        )
+
+        self.assertEqual(scores.shape, (2,))
+        self.assertEqual(lax.calls, [{"steps": 3}])
+
+    def test_lax_scan_carry_keeps_base_ang_vel_structure_stable(self) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+        reference["initial_robot_state"]["base_ang_vel_b"] = np.ones(
+            (2, 3),
+            dtype=np.float32,
+        )
+        lax = _RecordingLax()
+        runtime = type(
+            "ScanRuntime",
+            (),
+            {
+                "jnp": _NumpyJnp(),
+                "jax": type("ScanJax", (), {"lax": lax})(),
+            },
+        )()
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=_physics_step,
+        )
+
+        self.assertEqual(scores.shape, (2,))
+        self.assertEqual(lax.calls, [{"steps": 3}])
+
+    def test_lax_scan_materializes_partial_obs_history(self) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+        reference["obs_state"] = JaxObsState(
+            history={
+                "actions": np.zeros(
+                    (2, OBS_FIELD_SPECS["actions"][0], ACTION_DIM),
+                    dtype=np.float32,
+                )
+            },
+            last_action=np.zeros((2, ACTION_DIM), dtype=np.float32),
+        )
+        lax = _RecordingLax()
+        runtime = type(
+            "ScanRuntime",
+            (),
+            {
+                "jnp": _NumpyJnp(),
+                "jax": type("ScanJax", (), {"lax": lax})(),
+            },
+        )()
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=_physics_step,
+        )
+
+        self.assertEqual(scores.shape, (2,))
+        self.assertEqual(lax.calls, [{"steps": 3}])
 
     def test_rollout_scorer_factory_matches_optimizer_callable_contract(self) -> None:
         config = JaxWindowOptimizerConfig(

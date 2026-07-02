@@ -143,7 +143,7 @@ def build_wbc_observation_from_state(
     joint_vel_rel = robot_qvel[:, 6:]
     motion_ref_ang_vel = ref_body_ang_vel[:, int(indices.tracking_anchor_index)]
 
-    previous_history = obs_state.history or {}
+    previous_history = {} if obs_state.history is None else obs_state.history
     history_fields = {
         "ref_limb_ee_pose_b": ref_limb,
         "robot_limb_ee_pose_b": robot_limb,

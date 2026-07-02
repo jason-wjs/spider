@@ -8,6 +8,7 @@ from spider.tasks.g1_wbc.constants import ACTION_DIM, QPOS_DIM
 from spider.tasks.g1_wbc.mjx_obs import (
     JaxObsIndices,
     JaxObsState,
+    OBS_FIELD_SPECS,
     build_wbc_observation_from_state,
 )
 from spider.tasks.g1_wbc.mjx_policy import jax_actor_forward
@@ -120,57 +121,212 @@ def score_candidate_controls(
         weights = JaxScoreWeights(dict(weights))
     accumulator = init_score_accumulator((sample_count,), jnp=jnp)
     obs_initialized = reference.get("obs_initialized", False)
+    step_reference = _with_commanded_qpos(reference, commanded_qpos)
+
+    scan = _lax_scan(runtime)
+    if scan is not None:
+        obs_state = _materialized_obs_state(obs_state, sample_count, jnp=jnp)
+        carry = (
+            robot_state,
+            obs_state.history,
+            obs_state.last_action,
+            prev_control,
+            prev_joint_vel,
+            accumulator,
+        )
+
+        def scan_step(carry, step_index):
+            (
+                robot_state,
+                obs_history,
+                last_action,
+                prev_control,
+                prev_joint_vel,
+                accumulator,
+            ) = carry
+            next_values = _score_rollout_step(
+                step_index,
+                robot_state=robot_state,
+                obs_state=JaxObsState(history=obs_history, last_action=last_action),
+                prev_control=prev_control,
+                prev_joint_vel=prev_joint_vel,
+                accumulator=accumulator,
+                samples=samples,
+                reference=step_reference,
+                obs_indices=obs_indices,
+                default_joint_pos=default_joint_pos,
+                actor_params=actor_params,
+                model_bundle=model_bundle,
+                weights=weights,
+                obs_initialized=_step_obs_initialized(
+                    obs_initialized,
+                    step_index,
+                    jnp=jnp,
+                ),
+                physics_step_fn=physics_step_fn,
+                runtime=runtime,
+                sample_count=sample_count,
+            )
+            return (
+                next_values["robot_state"],
+                next_values["obs_state"].history,
+                next_values["obs_state"].last_action,
+                next_values["prev_control"],
+                next_values["prev_joint_vel"],
+                next_values["accumulator"],
+            ), None
+
+        carry, _ = scan(scan_step, carry, jnp.arange(horizon))
+        accumulator = carry[-1]
+        return finalize_score(accumulator, jnp=jnp)["score"]
 
     for step_index in range(horizon):
-        obs_reference = _time_slice_reference(
-            _required(reference, "obs_reference"),
+        next_values = _score_rollout_step(
             step_index,
-            sample_count,
-            jnp=jnp,
-        )
-        obs, next_obs_state = build_wbc_observation_from_state(
             robot_state=robot_state,
-            reference_state=obs_reference,
             obs_state=obs_state,
-            indices=obs_indices,
+            prev_control=prev_control,
+            prev_joint_vel=prev_joint_vel,
+            accumulator=accumulator,
+            samples=samples,
+            reference=step_reference,
+            obs_indices=obs_indices,
             default_joint_pos=default_joint_pos,
-            initialized=obs_initialized if step_index == 0 else True,
-            jnp=jnp,
-        )
-        action = jax_actor_forward(actor_params, obs, jnp=jnp)
-        robot_state, physics_score_state = physics_step_fn(
-            model_bundle,
-            robot_state,
-            commanded_qpos[:, step_index],
-            action,
-            step_index,
+            actor_params=actor_params,
+            model_bundle=model_bundle,
+            weights=weights,
+            obs_initialized=obs_initialized if step_index == 0 else True,
+            physics_step_fn=physics_step_fn,
             runtime=runtime,
+            sample_count=sample_count,
         )
-        robot_state = _batched_robot_state(robot_state, sample_count, jnp=jnp)
-        step_control = samples[:, step_index]
-        step_state = dict(physics_score_state)
-        step_state.setdefault("control", step_control)
-        step_state.setdefault("prev_control", prev_control)
-        step_state.setdefault("joint_vel", _joint_vel(robot_state))
-        step_state.setdefault("prev_joint_vel", prev_joint_vel)
-        score_reference = _time_slice_reference(
-            _required(reference, "score_reference"),
-            step_index,
-            sample_count,
-            jnp=jnp,
-        )
-        accumulator = score_step(
-            accumulator,
-            step_state,
-            score_reference,
-            weights,
-            jnp=jnp,
-        )
-        obs_state = JaxObsState(history=next_obs_state.history, last_action=action)
-        prev_control = step_control
-        prev_joint_vel = _joint_vel(robot_state)
+        robot_state = next_values["robot_state"]
+        obs_state = next_values["obs_state"]
+        prev_control = next_values["prev_control"]
+        prev_joint_vel = next_values["prev_joint_vel"]
+        accumulator = next_values["accumulator"]
 
     return finalize_score(accumulator, jnp=jnp)["score"]
+
+
+def _score_rollout_step(
+    step_index,
+    *,
+    robot_state,
+    obs_state: JaxObsState,
+    prev_control,
+    prev_joint_vel,
+    accumulator,
+    samples,
+    reference: Mapping[str, object],
+    obs_indices: JaxObsIndices,
+    default_joint_pos,
+    actor_params,
+    model_bundle,
+    weights: JaxScoreWeights,
+    obs_initialized,
+    physics_step_fn: PhysicsStepFn,
+    runtime,
+    sample_count: int,
+) -> dict[str, object]:
+    jnp = runtime.jnp
+    obs_reference = _time_slice_reference(
+        _required(reference, "obs_reference"),
+        step_index,
+        sample_count,
+        jnp=jnp,
+    )
+    obs, next_obs_state = build_wbc_observation_from_state(
+        robot_state=robot_state,
+        reference_state=obs_reference,
+        obs_state=obs_state,
+        indices=obs_indices,
+        default_joint_pos=default_joint_pos,
+        initialized=obs_initialized,
+        jnp=jnp,
+    )
+    action = jax_actor_forward(actor_params, obs, jnp=jnp)
+    commanded_qpos = _required(reference, "commanded_qpos")
+    robot_state, physics_score_state = physics_step_fn(
+        model_bundle,
+        robot_state,
+        commanded_qpos[:, step_index],
+        action,
+        step_index,
+        runtime=runtime,
+    )
+    robot_state = _batched_robot_state(robot_state, sample_count, jnp=jnp)
+    step_control = samples[:, step_index]
+    step_state = dict(physics_score_state)
+    step_state.setdefault("control", step_control)
+    step_state.setdefault("prev_control", prev_control)
+    step_state.setdefault("joint_vel", _joint_vel(robot_state))
+    step_state.setdefault("prev_joint_vel", prev_joint_vel)
+    score_reference = _time_slice_reference(
+        _required(reference, "score_reference"),
+        step_index,
+        sample_count,
+        jnp=jnp,
+    )
+    accumulator = score_step(
+        accumulator,
+        step_state,
+        score_reference,
+        weights,
+        jnp=jnp,
+    )
+    return {
+        "robot_state": robot_state,
+        "obs_state": JaxObsState(history=next_obs_state.history, last_action=action),
+        "prev_control": step_control,
+        "prev_joint_vel": _joint_vel(robot_state),
+        "accumulator": accumulator,
+    }
+
+
+def _lax_scan(runtime):
+    lax = getattr(getattr(runtime, "jax", None), "lax", None)
+    return getattr(lax, "scan", None)
+
+
+def _step_obs_initialized(initialized, step_index, *, jnp):
+    if isinstance(initialized, bool):
+        if initialized:
+            return True
+        return step_index > 0
+    return jnp.logical_or(initialized, step_index > 0)
+
+
+def _materialized_obs_state(
+    obs_state: JaxObsState,
+    sample_count: int,
+    *,
+    jnp,
+) -> JaxObsState:
+    history = _zero_obs_history(sample_count, jnp=jnp)
+    if obs_state.history is not None:
+        for name, value in obs_state.history.items():
+            if name in history and value is not None:
+                history[name] = value
+    return JaxObsState(history=history, last_action=obs_state.last_action)
+
+
+def _zero_obs_history(sample_count: int, *, jnp):
+    history = {}
+    for name, spec in OBS_FIELD_SPECS.items():
+        if name in {"command", "motion_ref_ang_vel"}:
+            continue
+        history[name] = jnp.zeros((int(sample_count), *spec))
+    return history
+
+
+def _with_commanded_qpos(
+    reference: Mapping[str, object],
+    commanded_qpos,
+) -> dict[str, object]:
+    values = dict(reference)
+    values["commanded_qpos"] = commanded_qpos
+    return values
 
 
 def _validate_samples(samples) -> None:
@@ -194,46 +350,64 @@ def _batched_robot_state(
     *,
     jnp,
 ) -> dict[str, object]:
-    base_ang_vel_b = state.get("base_ang_vel_b")
-    if base_ang_vel_b is not None:
-        base_ang_vel_b = _ensure_batch(
-            jnp.asarray(base_ang_vel_b),
-            sample_count,
-            jnp=jnp,
-        )
+    qpos = _ensure_robot_state_batch(
+        "qpos",
+        jnp.asarray(state["qpos"]),
+        sample_count,
+        jnp=jnp,
+    )
+    qvel = _ensure_robot_state_batch(
+        "qvel",
+        jnp.asarray(state["qvel"]),
+        sample_count,
+        jnp=jnp,
+    )
+    body_pos_w = _ensure_robot_state_batch(
+        "body_pos_w",
+        jnp.asarray(state["body_pos_w"]),
+        sample_count,
+        jnp=jnp,
+    )
+    body_quat_w = _ensure_robot_state_batch(
+        "body_quat_w",
+        jnp.asarray(state["body_quat_w"]),
+        sample_count,
+        jnp=jnp,
+    )
+    body_ang_vel_w = _ensure_robot_state_batch(
+        "body_ang_vel_w",
+        jnp.asarray(state["body_ang_vel_w"]),
+        sample_count,
+        jnp=jnp,
+    )
+    base_ang_vel_b = _batched_base_ang_vel(
+        state.get("base_ang_vel_b"),
+        qpos=qpos,
+        body_ang_vel_w=body_ang_vel_w,
+        sample_count=sample_count,
+        jnp=jnp,
+    )
     return {
-        "qpos": _ensure_robot_state_batch(
-            "qpos",
-            jnp.asarray(state["qpos"]),
-            sample_count,
-            jnp=jnp,
-        ),
-        "qvel": _ensure_robot_state_batch(
-            "qvel",
-            jnp.asarray(state["qvel"]),
-            sample_count,
-            jnp=jnp,
-        ),
-        "body_pos_w": _ensure_robot_state_batch(
-            "body_pos_w",
-            jnp.asarray(state["body_pos_w"]),
-            sample_count,
-            jnp=jnp,
-        ),
-        "body_quat_w": _ensure_robot_state_batch(
-            "body_quat_w",
-            jnp.asarray(state["body_quat_w"]),
-            sample_count,
-            jnp=jnp,
-        ),
-        "body_ang_vel_w": _ensure_robot_state_batch(
-            "body_ang_vel_w",
-            jnp.asarray(state["body_ang_vel_w"]),
-            sample_count,
-            jnp=jnp,
-        ),
+        "qpos": qpos,
+        "qvel": qvel,
+        "body_pos_w": body_pos_w,
+        "body_quat_w": body_quat_w,
+        "body_ang_vel_w": body_ang_vel_w,
         "base_ang_vel_b": base_ang_vel_b,
     }
+
+
+def _batched_base_ang_vel(
+    base_ang_vel_b,
+    *,
+    qpos,
+    body_ang_vel_w,
+    sample_count: int,
+    jnp,
+):
+    if base_ang_vel_b is not None:
+        return _ensure_batch(jnp.asarray(base_ang_vel_b), sample_count, jnp=jnp)
+    return _quat_apply_inverse(qpos[:, 3:7], body_ang_vel_w[:, 0], jnp=jnp)
 
 
 def _initial_obs_state(reference: Mapping[str, object], sample_count: int, *, jnp):
@@ -364,6 +538,23 @@ def _quat_mul(q1, q2, *, jnp):
     y = qq - yy + (w1 - x1) * (y2 + z2)
     z = qq - zz + (z1 + y1) * (w2 - x2)
     return jnp.stack([w, x, y, z], axis=-1)
+
+
+def _quat_apply_inverse(quat, vec, *, jnp):
+    xyz = quat[..., 1:]
+    t = _cross(xyz, vec, jnp=jnp) * 2.0
+    return vec - quat[..., 0:1] * t + _cross(xyz, t, jnp=jnp)
+
+
+def _cross(a, b, *, jnp):
+    return jnp.stack(
+        [
+            a[..., 1] * b[..., 2] - a[..., 2] * b[..., 1],
+            a[..., 2] * b[..., 0] - a[..., 0] * b[..., 2],
+            a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0],
+        ],
+        axis=-1,
+    )
 
 
 def _required(values: Mapping[str, object], name: str):
