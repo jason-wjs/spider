@@ -57,9 +57,37 @@ class _FakeJax:
     nn = _FakeNN()
 
 
+class _StrictRandom:
+    @staticmethod
+    def PRNGKey(seed):
+        return ("key", int(seed))
+
+    @staticmethod
+    def fold_in(key, value):
+        return ("fold", key, int(value))
+
+    @staticmethod
+    def normal(key, shape):
+        if not (isinstance(key, tuple) and key and key[0] == "fold"):
+            raise TypeError("normal requires folded PRNGKey")
+        seed = int(np.asarray(key, dtype=object)[-1])
+        rng = np.random.default_rng(seed)
+        return rng.normal(size=shape).astype(np.float32)
+
+
+class _StrictJax:
+    random = _StrictRandom()
+    nn = _FakeNN()
+
+
 class _FakeRuntime:
     jnp = _NumpyJnp()
     jax = _FakeJax()
+
+
+class _StrictRuntime:
+    jnp = _NumpyJnp()
+    jax = _StrictJax()
 
 
 def _config() -> JaxWindowOptimizerConfig:
@@ -98,6 +126,19 @@ class MjxOptimizerTest(unittest.TestCase):
         self.assertGreater(np.max(np.abs(nonzero[..., :3])), 0.0)
         self.assertGreater(np.max(np.abs(nonzero[..., 3:6])), 0.0)
         self.assertGreater(np.max(np.abs(nonzero[..., 6:])), 0.0)
+
+    def test_sample_residual_controls_converts_tuple_seed_to_prng_key(self) -> None:
+        controls = np.zeros((5, 8), dtype=np.float32)
+
+        samples = sample_residual_controls(
+            _config(),
+            controls,
+            (3, 17),
+            runtime=_StrictRuntime,
+        )
+
+        self.assertEqual(samples.shape, (4, 5, 8))
+        np.testing.assert_allclose(samples[0], controls)
 
     def test_optimize_window_weighted_update_and_execute_chunk(self) -> None:
         config = _config()

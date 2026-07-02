@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+import numpy as np
+
 from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
     LIMB_EE_BODY_NAMES,
@@ -219,13 +221,14 @@ def _flatten_field(name: str, value, *, jnp):
 
 
 def _take_body(value, indices, *, jnp):
-    return jnp.take(jnp.asarray(value), tuple(int(index) for index in indices), axis=1)
+    return jnp.take(jnp.asarray(value), _index_array(indices, jnp=jnp), axis=1)
 
 
 def _limb_pose_in_anchor_frame(body_pos_w, body_quat_w, *, indices: JaxObsIndices, jnp):
     limb_indices = tuple(int(index) for index in indices.limb_indices)
-    limb_pos_w = jnp.take(body_pos_w, limb_indices, axis=1)
-    limb_quat_w = jnp.take(body_quat_w, limb_indices, axis=1)
+    limb_index_array = _index_array(limb_indices, jnp=jnp)
+    limb_pos_w = jnp.take(body_pos_w, limb_index_array, axis=1)
+    limb_quat_w = jnp.take(body_quat_w, limb_index_array, axis=1)
     anchor = int(indices.anchor_index)
     anchor_pos_w = jnp.repeat(
         body_pos_w[:, anchor : anchor + 1],
@@ -325,6 +328,20 @@ def _matrix_from_quat(quat, *, jnp):
 
 def _insert_history_axis(value, *, jnp):
     return jnp.expand_dims(value, axis=-2)
+
+
+def _index_array(indices, *, jnp):
+    values = tuple(int(index) for index in indices)
+    dtype = getattr(jnp, "int32", None)
+    if dtype is not None:
+        try:
+            return jnp.asarray(values, dtype=dtype)
+        except TypeError:
+            pass
+    try:
+        return jnp.asarray(values, dtype="int32")
+    except TypeError:
+        return np.asarray(values, dtype=np.int32)
 
 
 def _validate_history_shape(history, obs_width: int) -> None:

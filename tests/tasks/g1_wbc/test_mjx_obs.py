@@ -29,9 +29,11 @@ from spider.tasks.g1_wbc.obs import G1WbcObservationBuilder, RobotState
 
 
 class _NumpyJnp:
+    int32 = np.int32
+
     @staticmethod
-    def asarray(value):
-        return np.asarray(value, dtype=np.float32)
+    def asarray(value, dtype=None):
+        return np.asarray(value, dtype=dtype or np.float32)
 
     @staticmethod
     def concatenate(values, axis=0):
@@ -64,6 +66,14 @@ class _NumpyJnp:
     @staticmethod
     def sum(value, axis=None, keepdims=False):
         return np.sum(value, axis=axis, keepdims=keepdims)
+
+
+class _StrictTakeJnp(_NumpyJnp):
+    @staticmethod
+    def take(value, indices, axis=0):
+        if isinstance(indices, (list, tuple)):
+            raise TypeError("take requires ndarray indices")
+        return np.take(value, indices, axis=axis)
 
 
 def _values(shape: tuple[int, ...], start: int) -> np.ndarray:
@@ -230,6 +240,57 @@ class MjxObsTest(unittest.TestCase):
             set(OBS_FIELD_ORDER) - {"command", "motion_ref_ang_vel"},
         )
         np.testing.assert_allclose(obs, torch_obs.numpy(), atol=1.0e-5, rtol=1.0e-5)
+
+    def test_state_observation_materializes_body_indices_for_jax_take(self) -> None:
+        motion = _synthetic_motion()
+        ref_indices = torch.tensor([1])
+        default_joint_pos = torch.linspace(-0.05, 0.05, ACTION_DIM)
+        qpos = motion.qpos()[1:2].clone()
+        qvel = torch.zeros(1, QVEL_DIM)
+        command_body_indices = [motion.body_index[name] for name in COMMAND_BODY_NAMES]
+        reference = {
+            "joint_pos": motion.joint_pos[ref_indices].numpy(),
+            "joint_vel": motion.joint_vel[ref_indices].numpy(),
+            "body_pos_w": motion.body_pos_w[ref_indices][
+                :, command_body_indices
+            ].numpy(),
+            "body_quat_w": motion.body_quat_w[ref_indices][
+                :, command_body_indices
+            ].numpy(),
+            "body_ang_vel_w": motion.body_ang_vel_w[ref_indices][
+                :, command_body_indices
+            ].numpy(),
+        }
+
+        obs, _ = build_wbc_observation_from_state(
+            robot_state={
+                "qpos": qpos.numpy(),
+                "qvel": qvel.numpy(),
+                "body_pos_w": motion.body_pos_w[1:2].numpy(),
+                "body_quat_w": motion.body_quat_w[1:2].numpy(),
+                "body_ang_vel_w": motion.body_ang_vel_w[1:2].numpy(),
+            },
+            reference_state=reference,
+            obs_state=JaxObsState(
+                history=None,
+                last_action=torch.zeros(1, ACTION_DIM).numpy(),
+            ),
+            indices=JaxObsIndices(
+                command_body_indices=command_body_indices,
+                limb_indices=[
+                    COMMAND_BODY_NAMES.index(name) for name in LIMB_EE_BODY_NAMES
+                ],
+                anchor_index=COMMAND_BODY_NAMES.index(ANCHOR_BODY_NAME),
+                tracking_anchor_index=COMMAND_BODY_NAMES.index(
+                    TRACKING_ANCHOR_BODY_NAME
+                ),
+            ),
+            default_joint_pos=default_joint_pos.numpy(),
+            initialized=False,
+            jnp=_StrictTakeJnp,
+        )
+
+        self.assertEqual(obs.shape, (1, OBS_DIM))
 
     def test_build_wbc_observation_preserves_batch_axis(self) -> None:
         fields = _synthetic_fields(batch_shape=(2,))

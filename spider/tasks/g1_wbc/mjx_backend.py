@@ -6,6 +6,7 @@ import math
 import time
 from typing import Any, Callable
 
+import numpy as np
 import torch
 
 from spider.tasks.g1_wbc.constants import (
@@ -547,7 +548,8 @@ def _require_shape(name: str, value, expected: tuple[int, ...]) -> None:
 def _to_torch(value, *, device: torch.device) -> torch.Tensor:
     if isinstance(value, torch.Tensor):
         return value.to(device=device, dtype=torch.float32).detach().clone()
-    return torch.as_tensor(value, dtype=torch.float32, device=device)
+    array = np.array(value, dtype=np.float32, copy=True)
+    return torch.as_tensor(array, dtype=torch.float32, device=device)
 
 
 def _scalar_info(info: dict[str, Any], name: str) -> float:

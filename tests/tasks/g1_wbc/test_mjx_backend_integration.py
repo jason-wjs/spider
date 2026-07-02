@@ -464,6 +464,27 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(captured[1][20:, 0], torch.zeros(20)))
 
+    def test_mjx_backend_accepts_jax_optimizer_arrays(self) -> None:
+        try:
+            import jax.numpy as jnp
+        except Exception as exc:
+            self.skipTest(f"JAX is not available: {exc}")
+
+        def optimizer(**kwargs):
+            del kwargs
+            return SimpleNamespace(
+                updated_controls=jnp.zeros((40, QPOS_DIM - 1), dtype=jnp.float32),
+                execute_chunk=jnp.zeros((21, QPOS_DIM - 1), dtype=jnp.float32),
+                info={"best_score": jnp.asarray(1.25, dtype=jnp.float32)},
+            )
+
+        result = _run_with_fakes(
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+        )
+
+        self.assertTrue(result.metadata["accepted"])
+
     def test_mjx_backend_rejects_multiple_visible_devices(self) -> None:
         runtime = SimpleNamespace(
             jnp=SimpleNamespace(),

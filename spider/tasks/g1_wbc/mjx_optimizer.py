@@ -38,7 +38,7 @@ def sample_residual_controls(config: JaxWindowOptimizerConfig, controls, key, *,
         )
     sigma = _control_sigma(config, controls.shape[-1], jnp=jnp)
     noise = runtime.jax.random.normal(
-        key,
+        _prng_key(key, runtime=runtime),
         (int(config.samples), int(config.horizon_steps), int(controls.shape[-1])),
     )
     samples = controls[None, :, :] + noise * sigma[None, :, :]
@@ -112,6 +112,25 @@ def _validate_scores(scores, config: JaxWindowOptimizerConfig) -> None:
     actual = tuple(int(dim) for dim in scores.shape)
     if actual != expected:
         raise ValueError(f"Expected rollout scores shape {expected}, got {actual}")
+
+
+def _prng_key(key, *, runtime):
+    random = runtime.jax.random
+    if not hasattr(random, "PRNGKey"):
+        return key
+    if isinstance(key, tuple):
+        if not key:
+            raise ValueError("JAX optimizer key tuple must not be empty")
+        prng = random.PRNGKey(int(key[0]))
+        fold_in = getattr(random, "fold_in", None)
+        if fold_in is None:
+            return prng
+        for value in key[1:]:
+            prng = fold_in(prng, int(value))
+        return prng
+    if isinstance(key, int):
+        return random.PRNGKey(int(key))
+    return key
 
 
 def _set_first(samples, controls):
