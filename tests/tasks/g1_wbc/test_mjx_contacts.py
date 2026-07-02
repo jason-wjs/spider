@@ -21,6 +21,7 @@ class MjxContactProfilesTest(unittest.TestCase):
         self.assertTrue(any("left" in name for name in profile.foot_body_names))
         self.assertTrue(any("right" in name for name in profile.foot_body_names))
         self.assertEqual(len(profile.foot_collision_geom_names), 14)
+        self.assertEqual(profile.explicit_pair_names, ())
         self.assertTrue(profile.eligible_for_parity)
 
     def test_reference_profiles_are_not_parity_eligible(self) -> None:

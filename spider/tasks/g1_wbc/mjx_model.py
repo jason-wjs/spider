@@ -127,6 +127,9 @@ def _assert_required_names(
     for floor_geom_name in profile.floor_geom_names:
         if profile.eligible_for_parity:
             _require_name(maps["geom"], floor_geom_name, "geom")
+    for geom_a, geom_b in profile.explicit_pair_names:
+        _require_name(maps["geom"], geom_a, "geom")
+        _require_name(maps["geom"], geom_b, "geom")
 
 
 def _require_name(names: dict[str, int], name: str, kind: str) -> None:

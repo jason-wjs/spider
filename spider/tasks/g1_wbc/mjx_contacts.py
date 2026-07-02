@@ -31,11 +31,11 @@ CONTACT_PROFILES: dict[str, ContactProfile] = {
         floor_geom_names=("terrain",),
         foot_body_names=("robot/left_ankle_roll_link", "robot/right_ankle_roll_link"),
         foot_collision_geom_names=WXY_FOOT_COLLISION_GEOMS,
-        explicit_pair_names=tuple(("terrain", geom) for geom in WXY_FOOT_COLLISION_GEOMS),
+        explicit_pair_names=(),
         max_contact_points=512,
         max_geom_pairs=1024,
         eligible_for_parity=True,
-        notes="Preserves WXY seven-capsule foot collision semantics.",
+        notes="Preserves WXY seven-capsule foot collision semantics in the CPU bundle.",
     ),
     "hgpt_track_reference": ContactProfile(
         name="hgpt_track_reference",

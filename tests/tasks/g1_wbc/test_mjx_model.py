@@ -23,6 +23,8 @@ class MjxModelBundleTest(unittest.TestCase):
         self.assertIn("robot/left_hip_pitch_joint", bundle.joint_name_to_id)
         self.assertIn("robot/left_hip_pitch_joint", bundle.actuator_name_to_id)
         self.assertIn("terrain", bundle.geom_name_to_id)
+        self.assertEqual(bundle.cpu_model.npair, 0)
+        self.assertEqual(bundle.profile.explicit_pair_names, ())
         for floor_geom_name in bundle.profile.floor_geom_names:
             self.assertIn(floor_geom_name, bundle.geom_name_to_id)
         for foot_geom_name in bundle.profile.foot_collision_geom_names:
