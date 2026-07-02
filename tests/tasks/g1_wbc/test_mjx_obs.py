@@ -1,15 +1,31 @@
 import unittest
 
 import numpy as np
+import torch
 
-from spider.tasks.g1_wbc.constants import ACTION_DIM, OBS_DIM, OBS_HISTORY_LENGTH
+from spider.tasks.g1_wbc.constants import (
+    ACTION_DIM,
+    ANCHOR_BODY_NAME,
+    COMMAND_BODY_NAMES,
+    LIMB_EE_BODY_NAMES,
+    MUJOCO_BODY_NAMES,
+    OBS_DIM,
+    OBS_HISTORY_LENGTH,
+    QVEL_DIM,
+    TRACKING_ANCHOR_BODY_NAME,
+)
+from spider.tasks.g1_wbc.motion import G1Motion
 from spider.tasks.g1_wbc.mjx_obs import (
+    JaxObsIndices,
+    JaxObsState,
     LIMB_POSE_DIM,
     OBS_FIELD_ORDER,
     OBS_FIELD_SPECS,
     build_wbc_observation,
+    build_wbc_observation_from_state,
     update_obs_history,
 )
+from spider.tasks.g1_wbc.obs import G1WbcObservationBuilder, RobotState
 
 
 class _NumpyJnp:
@@ -32,6 +48,22 @@ class _NumpyJnp:
     @staticmethod
     def where(condition, x, y):
         return np.where(condition, x, y)
+
+    @staticmethod
+    def stack(values, axis=0):
+        return np.stack(values, axis=axis)
+
+    @staticmethod
+    def zeros(shape, dtype=np.float32):
+        return np.zeros(shape, dtype=dtype)
+
+    @staticmethod
+    def take(value, indices, axis=0):
+        return np.take(value, indices, axis=axis)
+
+    @staticmethod
+    def sum(value, axis=None, keepdims=False):
+        return np.sum(value, axis=axis, keepdims=keepdims)
 
 
 def _values(shape: tuple[int, ...], start: int) -> np.ndarray:
@@ -56,6 +88,44 @@ def _flatten_reference(fields: dict[str, np.ndarray]) -> np.ndarray:
         width = int(np.prod(OBS_FIELD_SPECS[name]))
         parts.append(value.reshape((*value.shape[: -len(OBS_FIELD_SPECS[name])], width)))
     return np.concatenate(parts, axis=-1)
+
+
+def _synthetic_motion(frames: int = 3) -> G1Motion:
+    bodies = len(MUJOCO_BODY_NAMES)
+    joint_pos = torch.linspace(-0.2, 0.2, frames * ACTION_DIM).reshape(
+        frames,
+        ACTION_DIM,
+    )
+    joint_vel = torch.linspace(0.1, 0.4, frames * ACTION_DIM).reshape(
+        frames,
+        ACTION_DIM,
+    )
+    body_pos = torch.zeros(frames, bodies, 3)
+    for frame in range(frames):
+        for body in range(bodies):
+            body_pos[frame, body] = torch.tensor(
+                [0.1 * body + 0.01 * frame, -0.02 * body, 0.8 + 0.03 * frame]
+            )
+    body_quat = torch.zeros(frames, bodies, 4)
+    body_quat[..., 0] = 1.0
+    body_lin_vel = torch.zeros(frames, bodies, 3)
+    body_ang_vel = torch.linspace(-0.3, 0.3, frames * bodies * 3).reshape(
+        frames,
+        bodies,
+        3,
+    )
+    return G1Motion(
+        path=None,
+        motion_type="mujoco",
+        fps=50.0,
+        joint_pos=joint_pos,
+        joint_vel=joint_vel,
+        body_pos_w=body_pos,
+        body_quat_w=body_quat,
+        body_lin_vel_w=body_lin_vel,
+        body_ang_vel_w=body_ang_vel,
+        contact=torch.zeros(frames, 2),
+    )
 
 
 class MjxObsTest(unittest.TestCase):
@@ -88,6 +158,78 @@ class MjxObsTest(unittest.TestCase):
                 err_msg=f"bad slice for {name}",
             )
             offset += width
+
+    def test_state_observation_matches_torch_builder_first_frame(self) -> None:
+        motion = _synthetic_motion()
+        ref_indices = torch.tensor([1])
+        default_joint_pos = torch.linspace(-0.05, 0.05, ACTION_DIM)
+        torch_builder = G1WbcObservationBuilder(
+            motion=motion,
+            num_envs=1,
+            default_joint_pos=default_joint_pos,
+            device="cpu",
+        )
+        qpos = motion.qpos()[1:2].clone()
+        qpos[:, 7:] += 0.03
+        qvel = torch.zeros(1, QVEL_DIM)
+        qvel[:, 6:] = motion.joint_vel[1:2] + 0.02
+        robot = RobotState(
+            qpos=qpos,
+            qvel=qvel,
+            body_pos_w=motion.body_pos_w[1:2] + 0.01,
+            body_quat_w=motion.body_quat_w[1:2],
+            body_lin_vel_w=motion.body_lin_vel_w[1:2],
+            body_ang_vel_w=motion.body_ang_vel_w[1:2],
+        )
+        last_action = torch.linspace(-0.1, 0.1, ACTION_DIM).view(1, ACTION_DIM)
+
+        torch_obs = torch_builder.compute(robot, ref_indices, last_action)
+
+        command_body_indices = [motion.body_index[name] for name in COMMAND_BODY_NAMES]
+        reference = {
+            "joint_pos": motion.joint_pos[ref_indices].numpy(),
+            "joint_vel": motion.joint_vel[ref_indices].numpy(),
+            "body_pos_w": motion.body_pos_w[ref_indices][
+                :, command_body_indices
+            ].numpy(),
+            "body_quat_w": motion.body_quat_w[ref_indices][
+                :, command_body_indices
+            ].numpy(),
+            "body_ang_vel_w": motion.body_ang_vel_w[ref_indices][
+                :, command_body_indices
+            ].numpy(),
+        }
+        obs, next_state = build_wbc_observation_from_state(
+            robot_state={
+                "qpos": robot.qpos.numpy(),
+                "qvel": robot.qvel.numpy(),
+                "body_pos_w": robot.body_pos_w.numpy(),
+                "body_quat_w": robot.body_quat_w.numpy(),
+                "body_ang_vel_w": robot.body_ang_vel_w.numpy(),
+            },
+            reference_state=reference,
+            obs_state=JaxObsState(history=None, last_action=last_action.numpy()),
+            indices=JaxObsIndices(
+                command_body_indices=command_body_indices,
+                limb_indices=[
+                    COMMAND_BODY_NAMES.index(name) for name in LIMB_EE_BODY_NAMES
+                ],
+                anchor_index=COMMAND_BODY_NAMES.index(ANCHOR_BODY_NAME),
+                tracking_anchor_index=COMMAND_BODY_NAMES.index(
+                    TRACKING_ANCHOR_BODY_NAME
+                ),
+            ),
+            default_joint_pos=default_joint_pos.numpy(),
+            initialized=False,
+            jnp=_NumpyJnp,
+        )
+
+        self.assertEqual(obs.shape, (1, OBS_DIM))
+        self.assertEqual(
+            set(next_state.history),
+            set(OBS_FIELD_ORDER) - {"command", "motion_ref_ang_vel"},
+        )
+        np.testing.assert_allclose(obs, torch_obs.numpy(), atol=1.0e-5, rtol=1.0e-5)
 
     def test_build_wbc_observation_preserves_batch_axis(self) -> None:
         fields = _synthetic_fields(batch_shape=(2,))
