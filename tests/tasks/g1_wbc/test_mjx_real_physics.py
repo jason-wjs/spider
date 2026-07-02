@@ -16,6 +16,8 @@ from spider.tasks.g1_wbc.constants import (
 from spider.tasks.g1_wbc.mjx_model import build_mjx_model_bundle
 from spider.tasks.g1_wbc.mjx_physics import (
     action_to_model_ctrl,
+    foot_contact_geom_groups,
+    foot_contact_indicator_from_contact,
     joint_order_to_model_ctrl,
     make_mjx_physics_step_fn,
     reset_forward_step_smoke,
@@ -36,6 +38,10 @@ class _NumpyJnp:
     @staticmethod
     def zeros(shape):
         return np.zeros(shape, dtype=np.float32)
+
+    @staticmethod
+    def any(value, axis=None):
+        return np.any(value, axis=axis)
 
 
 class MjxRealPhysicsTest(unittest.TestCase):
@@ -89,6 +95,115 @@ class MjxRealPhysicsTest(unittest.TestCase):
             for joint_name in MUJOCO_JOINT_NAMES
         ]
         np.testing.assert_allclose(model_ctrl[actuator_ids], expected_joint_ctrl)
+
+    def test_foot_contact_geom_groups_resolve_wxy_profile_ids(self) -> None:
+        geom_name_to_id = {"terrain": 3}
+        geom_name_to_id.update(
+            {
+                f"robot/left_foot{index}_collision": 10 + index
+                for index in range(1, 8)
+            }
+        )
+        geom_name_to_id.update(
+            {
+                f"robot/right_foot{index}_collision": 20 + index
+                for index in range(1, 8)
+            }
+        )
+        bundle = SimpleNamespace(
+            profile=SimpleNamespace(
+                floor_geom_names=("terrain",),
+                foot_collision_geom_names=tuple(
+                    f"robot/{side}_foot{index}_collision"
+                    for side in ("left", "right")
+                    for index in range(1, 8)
+                ),
+            ),
+            geom_name_to_id=geom_name_to_id,
+        )
+
+        groups = foot_contact_geom_groups(bundle)
+
+        self.assertEqual(groups.floor_geom_ids, (3,))
+        self.assertEqual(groups.left_foot_geom_ids, tuple(range(11, 18)))
+        self.assertEqual(groups.right_foot_geom_ids, tuple(range(21, 28)))
+
+    def test_foot_contact_indicator_from_contact_uses_active_floor_pairs(self) -> None:
+        contact = SimpleNamespace(
+            geom=np.array(
+                [
+                    [3, 11],
+                    [25, 3],
+                    [12, 26],
+                    [3, 14],
+                    [3, 25],
+                    [3, 16],
+                ],
+                dtype=np.int32,
+            ),
+            dist=np.array([-0.001, 0.0, -0.1, 0.02, 0.006, 0.01], dtype=np.float32),
+            includemargin=np.array(
+                [0.0, 0.0, 0.0, 0.015, 0.005, 0.02],
+                dtype=np.float32,
+            ),
+        )
+
+        indicator = foot_contact_indicator_from_contact(
+            contact,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=tuple(range(11, 18)),
+            right_foot_geom_ids=tuple(range(21, 28)),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(indicator, np.array([1.0, 1.0], dtype=np.float32))
+
+    def test_foot_contact_indicator_from_contact_ignores_inactive_pairs(self) -> None:
+        contact = SimpleNamespace(
+            geom=np.array(
+                [
+                    [3, 11],
+                    [25, 3],
+                    [12, 26],
+                ],
+                dtype=np.int32,
+            ),
+            dist=np.array([0.02, 0.03, -0.1], dtype=np.float32),
+            includemargin=np.array([0.0, 0.01, 0.0], dtype=np.float32),
+        )
+
+        indicator = foot_contact_indicator_from_contact(
+            contact,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=tuple(range(11, 18)),
+            right_foot_geom_ids=tuple(range(21, 28)),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(indicator, np.zeros(2, dtype=np.float32))
+
+    def test_foot_contact_indicator_from_contact_ignores_negative_geom_slots(self) -> None:
+        contact = SimpleNamespace(
+            geom=np.array(
+                [
+                    [-1, 11],
+                    [3, -1],
+                ],
+                dtype=np.int32,
+            ),
+            dist=np.array([-1.0, -1.0], dtype=np.float32),
+            includemargin=np.zeros(2, dtype=np.float32),
+        )
+
+        indicator = foot_contact_indicator_from_contact(
+            contact,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=tuple(range(11, 18)),
+            right_foot_geom_ids=tuple(range(21, 28)),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(indicator, np.zeros(2, dtype=np.float32))
 
     def test_reset_forward_step_smoke_runs_real_mjx_when_runtime_available(self) -> None:
         if not probe_mjx_runtime().available:

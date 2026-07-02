@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from dataclasses import dataclass
+
 from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
     ACTUATOR_GROUPS,
@@ -16,10 +18,81 @@ from spider.tasks.g1_wbc.constants import (
 )
 
 
+@dataclass(frozen=True)
+class FootContactGeomGroups:
+    floor_geom_ids: tuple[int, ...]
+    left_foot_geom_ids: tuple[int, ...]
+    right_foot_geom_ids: tuple[int, ...]
+
+
 def default_action_scale(*, jnp):
     """Return WXY raw-action scale factors in MuJoCo joint order."""
 
     return jnp.asarray(_action_scale_values())
+
+
+def foot_contact_geom_groups(bundle) -> FootContactGeomGroups:
+    """Resolve floor and left/right foot collision geom ids from a model bundle."""
+
+    profile = getattr(bundle, "profile", None)
+    geom_name_to_id = getattr(bundle, "geom_name_to_id", None)
+    if profile is None or geom_name_to_id is None:
+        raise ValueError("MJX model bundle must expose profile and geom_name_to_id")
+    floor_geom_ids = tuple(
+        _lookup_geom_id(geom_name_to_id, name)
+        for name in getattr(profile, "floor_geom_names", ())
+    )
+    left_names = tuple(
+        name
+        for name in getattr(profile, "foot_collision_geom_names", ())
+        if "left_" in name
+    )
+    right_names = tuple(
+        name
+        for name in getattr(profile, "foot_collision_geom_names", ())
+        if "right_" in name
+    )
+    if not floor_geom_ids or not left_names or not right_names:
+        raise ValueError(
+            "Contact profile must define floor, left foot, and right foot geoms"
+        )
+    return FootContactGeomGroups(
+        floor_geom_ids=floor_geom_ids,
+        left_foot_geom_ids=tuple(
+            _lookup_geom_id(geom_name_to_id, name) for name in left_names
+        ),
+        right_foot_geom_ids=tuple(
+            _lookup_geom_id(geom_name_to_id, name) for name in right_names
+        ),
+    )
+
+
+def foot_contact_indicator_from_contact(
+    contact,
+    *,
+    floor_geom_ids: tuple[int, ...],
+    left_foot_geom_ids: tuple[int, ...],
+    right_foot_geom_ids: tuple[int, ...],
+    jnp,
+):
+    """Return left/right foot-floor contact indicators from fixed-shape MJX contact."""
+
+    geom = jnp.asarray(contact.geom)
+    dist = jnp.asarray(contact.dist)
+    includemargin = jnp.asarray(contact.includemargin)
+    if len(geom.shape) != 2 or int(geom.shape[-1]) != 2:
+        raise ValueError(f"Expected contact.geom shape (contacts, 2), got {geom.shape}")
+    valid = (geom[:, 0] >= 0) & (geom[:, 1] >= 0)
+    active = valid & (dist <= includemargin + 1.0e-5)
+    has_floor = _contact_has_any_geom(geom, floor_geom_ids, jnp=jnp)
+    left = _contact_has_any_geom(geom, left_foot_geom_ids, jnp=jnp)
+    right = _contact_has_any_geom(geom, right_foot_geom_ids, jnp=jnp)
+    return jnp.asarray(
+        [
+            _as_indicator(jnp.any(active & has_floor & left), jnp=jnp),
+            _as_indicator(jnp.any(active & has_floor & right), jnp=jnp),
+        ]
+    )
 
 
 def joint_order_to_model_ctrl(bundle, joint_ctrl, *, jnp):
@@ -123,6 +196,7 @@ def make_mjx_physics_step_fn(
         score_body_id_array = jnp.asarray(score_body_ids)
         ee_body_id_array = jnp.asarray(ee_body_ids)
         root_body_id = _lookup_body_id(bundle, MUJOCO_BODY_NAMES[0])
+        contact_groups = foot_contact_geom_groups(bundle)
 
         def step_one(qpos_one, qvel_one, action_one):
             model_ctrl = action_to_model_ctrl(
@@ -162,7 +236,13 @@ def make_mjx_physics_step_fn(
                 "root_pos": data.qpos[:3],
                 "body_pos": jnp.take(data.xpos, score_body_id_array, axis=0),
                 "ee_pos": jnp.take(data.xpos, ee_body_id_array, axis=0),
-                "contact": jnp.zeros((2,)),
+                "contact": foot_contact_indicator_from_contact(
+                    data._impl.contact,
+                    floor_geom_ids=contact_groups.floor_geom_ids,
+                    left_foot_geom_ids=contact_groups.left_foot_geom_ids,
+                    right_foot_geom_ids=contact_groups.right_foot_geom_ids,
+                    jnp=jnp,
+                ),
                 "model_ctrl": data.ctrl,
                 "time": data.time,
             }
@@ -268,6 +348,21 @@ def _lookup_body_id(bundle, body_name: str) -> int:
     raise ValueError(f"MJX model bundle is missing body {body_name!r}")
 
 
+def _lookup_geom_id(name_to_id: dict[str, int], geom_name: str) -> int:
+    if geom_name in name_to_id:
+        return int(name_to_id[geom_name])
+    raise ValueError(f"MJX model bundle is missing geom {geom_name!r}")
+
+
+def _contact_has_any_geom(geom, geom_ids: tuple[int, ...], *, jnp):
+    geom_ids = jnp.asarray(tuple(int(value) for value in geom_ids))
+    return jnp.any(geom[..., None] == geom_ids, axis=(1, 2))
+
+
+def _as_indicator(value, *, jnp):
+    return jnp.asarray(value) * 1.0
+
+
 def _action_scale_values() -> tuple[float, ...]:
     values: list[float] = []
     for joint_name in MUJOCO_JOINT_NAMES:
@@ -310,6 +405,9 @@ def _lookup_actuator_id(name_to_id: dict[str, int], joint_name: str) -> int:
 __all__ = [
     "action_to_model_ctrl",
     "default_action_scale",
+    "FootContactGeomGroups",
+    "foot_contact_geom_groups",
+    "foot_contact_indicator_from_contact",
     "joint_order_to_model_ctrl",
     "make_mjx_physics_step_fn",
     "reset_forward_step_smoke",
