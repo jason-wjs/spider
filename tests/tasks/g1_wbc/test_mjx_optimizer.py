@@ -38,7 +38,8 @@ class _NumpyJnp:
 class _FakeRandom:
     @staticmethod
     def normal(key, shape):
-        rng = np.random.default_rng(int(key))
+        seed = int(np.asarray(key, dtype=np.uint32).sum())
+        rng = np.random.default_rng(seed)
         return rng.normal(size=shape).astype(np.float32)
 
 
@@ -79,9 +80,9 @@ class MjxOptimizerTest(unittest.TestCase):
         controls = np.zeros((5, 8), dtype=np.float32)
         config = _config()
 
-        first = sample_residual_controls(config, controls, 17, runtime=_FakeRuntime)
-        second = sample_residual_controls(config, controls, 17, runtime=_FakeRuntime)
-        different = sample_residual_controls(config, controls, 18, runtime=_FakeRuntime)
+        first = sample_residual_controls(config, controls, (0, 17), runtime=_FakeRuntime)
+        second = sample_residual_controls(config, controls, (0, 17), runtime=_FakeRuntime)
+        different = sample_residual_controls(config, controls, (0, 18), runtime=_FakeRuntime)
 
         np.testing.assert_allclose(first, second)
         self.assertGreater(np.max(np.abs(first - different)), 1.0e-6)
@@ -90,7 +91,7 @@ class MjxOptimizerTest(unittest.TestCase):
     def test_sample_residual_controls_uses_segment_sigmas(self) -> None:
         controls = np.zeros((5, 8), dtype=np.float32)
 
-        samples = sample_residual_controls(_config(), controls, 3, runtime=_FakeRuntime)
+        samples = sample_residual_controls(_config(), controls, (0, 3), runtime=_FakeRuntime)
 
         self.assertEqual(samples.shape, (4, 5, 8))
         nonzero = samples[1:]
@@ -115,7 +116,7 @@ class MjxOptimizerTest(unittest.TestCase):
             reference={"unused": True},
             actor_params=None,
             model_bundle=None,
-            key=11,
+            key=(0, 11),
             runtime=_FakeRuntime,
         )
 
@@ -126,8 +127,27 @@ class MjxOptimizerTest(unittest.TestCase):
         self.assertEqual(result.execute_chunk.shape, (config.control_steps + 1, 8))
         np.testing.assert_allclose(result.updated_controls, expected, rtol=1.0e-6)
         np.testing.assert_allclose(result.execute_chunk, expected[:3], rtol=1.0e-6)
-        self.assertEqual(result.info["best_index"], 2.0)
-        self.assertEqual(result.info["best_score"], 3.0)
+        self.assertEqual(float(result.info["best_index"]), 2.0)
+        self.assertEqual(float(result.info["best_score"]), 3.0)
+
+    def test_optimize_window_rejects_column_vector_scores(self) -> None:
+        config = _config()
+
+        def rollout_fn(samples, reference, actor_params, model_bundle):
+            del samples, reference, actor_params, model_bundle
+            return np.zeros((config.samples, 1), dtype=np.float32)
+
+        with self.assertRaisesRegex(ValueError, "scores shape"):
+            optimize_window(
+                config,
+                {"rollout_fn": rollout_fn},
+                np.zeros((5, 8), dtype=np.float32),
+                reference=None,
+                actor_params=None,
+                model_bundle=None,
+                key=(0, 7),
+                runtime=_FakeRuntime,
+            )
 
     def test_optimize_window_rejects_wrong_control_horizon(self) -> None:
         with self.assertRaisesRegex(ValueError, "Expected controls horizon"):
