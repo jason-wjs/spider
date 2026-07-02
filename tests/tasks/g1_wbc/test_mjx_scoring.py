@@ -1,0 +1,209 @@
+import unittest
+
+import numpy as np
+
+from spider.tasks.g1_wbc.mjx_scoring import (
+    JaxScoreWeights,
+    finalize_score,
+    score_step,
+)
+
+
+class _NumpyJnp:
+    @staticmethod
+    def asarray(value):
+        return np.asarray(value, dtype=np.float32)
+
+    @staticmethod
+    def mean(value):
+        return np.mean(value)
+
+    @staticmethod
+    def abs(value):
+        return np.abs(value)
+
+    @staticmethod
+    def maximum(x, y):
+        return np.maximum(x, y)
+
+
+def _step_state(offset: float = 0.0) -> dict[str, np.ndarray]:
+    return {
+        "root_pos": np.array([1.0 + offset, 2.0, 3.0], dtype=np.float32),
+        "body_pos": np.array(
+            [[0.0, 1.0 + offset, 2.0], [3.0, 4.0, 5.0]],
+            dtype=np.float32,
+        ),
+        "ee_pos": np.array([[1.0, -1.0 + offset, 0.5]], dtype=np.float32),
+        "contact": np.array([1.0, 0.0], dtype=np.float32),
+        "control": np.array([0.2, 0.4, 0.6], dtype=np.float32),
+        "prev_control": np.array([0.1, 0.5, 0.3], dtype=np.float32),
+        "joint_vel": np.array([-0.2, 0.1, 0.3], dtype=np.float32),
+        "prev_joint_vel": np.array([-0.1, 0.0, 0.5], dtype=np.float32),
+    }
+
+
+def _reference_state() -> dict[str, np.ndarray]:
+    return {
+        "root_pos": np.array([1.5, 1.0, 3.0], dtype=np.float32),
+        "body_pos": np.array(
+            [[0.0, 2.0, 2.0], [2.0, 4.0, 7.0]],
+            dtype=np.float32,
+        ),
+        "ee_pos": np.array([[0.5, -1.0, 1.5]], dtype=np.float32),
+        "contact": np.array([0.0, 0.0], dtype=np.float32),
+    }
+
+
+def _expected_terms(step_state, reference_state) -> dict[str, float]:
+    root_error = np.mean((step_state["root_pos"] - reference_state["root_pos"]) ** 2)
+    body_error = np.mean((step_state["body_pos"] - reference_state["body_pos"]) ** 2)
+    ee_error = np.mean((step_state["ee_pos"] - reference_state["ee_pos"]) ** 2)
+    contact_error = np.mean(np.abs(step_state["contact"] - reference_state["contact"]))
+    control_delta = np.mean((step_state["control"] - step_state["prev_control"]) ** 2)
+    joint_acc = np.mean((step_state["joint_vel"] - step_state["prev_joint_vel"]) ** 2)
+    return {
+        "root_pos_error_mean": float(root_error),
+        "body_global_pos_error_mean": float(body_error),
+        "ee_global_pos_error_mean": float(ee_error),
+        "contact_mismatch_rate": float(contact_error),
+        "control_delta_mean": float(control_delta),
+        "joint_acc_mean": float(joint_acc),
+    }
+
+
+class MjxScoringTest(unittest.TestCase):
+    def test_score_step_matches_numpy_expected_terms(self) -> None:
+        step_state = _step_state()
+        reference_state = _reference_state()
+        weights = JaxScoreWeights(
+            {
+                "root_pos": 1.5,
+                "body_global_pos": 4.0,
+                "ee_global_pos": 3.0,
+                "contact": 2.0,
+                "control_delta": 0.5,
+                "joint_acc": 0.25,
+            }
+        )
+
+        accumulator = score_step({}, step_state, reference_state, weights, jnp=_NumpyJnp)
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        expected = _expected_terms(step_state, reference_state)
+        for name, value in expected.items():
+            self.assertAlmostEqual(float(metrics[name]), value, places=6)
+
+        expected_penalty = (
+            1.5 * expected["root_pos_error_mean"]
+            + 4.0 * expected["body_global_pos_error_mean"]
+            + 3.0 * expected["ee_global_pos_error_mean"]
+            + 2.0 * expected["contact_mismatch_rate"]
+            + 0.5 * expected["control_delta_mean"]
+            + 0.25 * expected["joint_acc_mean"]
+        )
+        self.assertAlmostEqual(float(metrics["score"]), -expected_penalty, places=6)
+
+    def test_finalize_score_returns_compute_rollout_scores_term_aliases(self) -> None:
+        step_state = _step_state()
+        reference_state = _reference_state()
+        accumulator = score_step(
+            {},
+            step_state,
+            reference_state,
+            JaxScoreWeights({"root_pos_error": 1.0}),
+            jnp=_NumpyJnp,
+        )
+
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        self.assertEqual(metrics["root_pos_error"], metrics["root_pos_error_mean"])
+        self.assertEqual(
+            metrics["body_global_pos_error"],
+            metrics["body_global_pos_error_mean"],
+        )
+        self.assertEqual(
+            metrics["ee_global_pos_error"],
+            metrics["ee_global_pos_error_mean"],
+        )
+        self.assertEqual(metrics["contact_mismatch"], metrics["contact_mismatch_rate"])
+        self.assertEqual(metrics["control_delta"], metrics["control_delta_mean"])
+        self.assertEqual(metrics["joint_acc"], metrics["joint_acc_mean"])
+
+    def test_accumulator_averages_multiple_steps(self) -> None:
+        reference_state = _reference_state()
+        first = _step_state(offset=0.0)
+        second = _step_state(offset=0.3)
+
+        accumulator = score_step(
+            {},
+            first,
+            reference_state,
+            JaxScoreWeights({"root_pos": 1.0}),
+            jnp=_NumpyJnp,
+        )
+        accumulator = score_step(
+            accumulator,
+            second,
+            reference_state,
+            JaxScoreWeights({"root_pos": 1.0}),
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        expected_root = (
+            _expected_terms(first, reference_state)["root_pos_error_mean"]
+            + _expected_terms(second, reference_state)["root_pos_error_mean"]
+        ) / 2.0
+        self.assertAlmostEqual(
+            float(metrics["root_pos_error_mean"]),
+            expected_root,
+            places=6,
+        )
+        self.assertAlmostEqual(float(metrics["score"]), -expected_root, places=6)
+
+    def test_larger_errors_lower_total_score(self) -> None:
+        reference_state = _reference_state()
+        weights = JaxScoreWeights(
+            {
+                "root_pos": 1.0,
+                "body_global_pos": 1.0,
+                "ee_global_pos": 1.0,
+                "contact": 1.0,
+                "control_delta": 1.0,
+                "joint_acc": 1.0,
+            }
+        )
+
+        small = finalize_score(
+            score_step(
+                {},
+                _step_state(offset=0.0),
+                reference_state,
+                weights,
+                jnp=_NumpyJnp,
+            ),
+            jnp=_NumpyJnp,
+        )
+        large = finalize_score(
+            score_step(
+                {},
+                _step_state(offset=2.0),
+                reference_state,
+                weights,
+                jnp=_NumpyJnp,
+            ),
+            jnp=_NumpyJnp,
+        )
+
+        self.assertLess(float(large["score"]), float(small["score"]))
+
+    def test_finalize_score_handles_empty_accumulator(self) -> None:
+        metrics = finalize_score({}, jnp=_NumpyJnp)
+
+        self.assertEqual(float(metrics["score"]), 0.0)
+        self.assertEqual(float(metrics["root_pos_error_mean"]), 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()
