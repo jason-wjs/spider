@@ -394,6 +394,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "mpc_used_baseline_fallback": False,
                     "num_steps": 800,
                     "steady_state_wall_time_sec": timing,
+                    "command_wall_time_sec": 1.0,
                 }
 
             with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
@@ -433,14 +434,16 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "status": "ok",
                     "metrics": _metrics(success=True),
                     "num_steps": 800,
-                    "steady_state_wall_time_sec": 1.0,
                 }
-                if not is_replay:
+                if is_replay:
+                    row["command_wall_time_sec"] = 1.0
+                else:
                     row.update(
                         {
                             "mpc_accepted": True,
                             "accepted_windows": 40,
                             "mpc_used_baseline_fallback": False,
+                            "steady_state_wall_time_sec": 1.0,
                         }
                     )
                 return row
