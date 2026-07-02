@@ -6,17 +6,22 @@ import numpy as np
 from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
     DECIMATION,
+    MUJOCO_BODY_NAMES,
     MUJOCO_JOINT_NAMES,
     PHYSICS_DT,
     QPOS_DIM,
     QVEL_DIM,
+    TASK_EE_BODY_NAMES,
 )
 from spider.tasks.g1_wbc.mjx_model import build_mjx_model_bundle
 from spider.tasks.g1_wbc.mjx_physics import (
+    action_to_model_ctrl,
     joint_order_to_model_ctrl,
+    make_mjx_physics_step_fn,
     reset_forward_step_smoke,
 )
 from spider.tasks.g1_wbc.mjx_runtime import probe_mjx_runtime, require_mjx_runtime
+from spider.tasks.g1_wbc.rollout import default_joint_pos_tensor, joint_actuator_specs
 
 
 class _NumpyJnp:
@@ -27,6 +32,10 @@ class _NumpyJnp:
     @staticmethod
     def zeros_like(value):
         return np.zeros_like(value, dtype=np.float32)
+
+    @staticmethod
+    def zeros(shape):
+        return np.zeros(shape, dtype=np.float32)
 
 
 class MjxRealPhysicsTest(unittest.TestCase):
@@ -54,6 +63,32 @@ class MjxRealPhysicsTest(unittest.TestCase):
         self.assertEqual(float(model_ctrl[0]), float(joint_ctrl[1]))
         self.assertEqual(float(model_ctrl[1]), float(joint_ctrl[2]))
         np.testing.assert_allclose(model_ctrl[3:], joint_ctrl[3:])
+
+    def test_action_to_model_ctrl_applies_wbc_scale_before_actuator_mapping(self) -> None:
+        bundle = SimpleNamespace(
+            actuator_name_to_id={
+                f"robot/{joint_name}": ACTION_DIM - index - 1
+                for index, joint_name in enumerate(MUJOCO_JOINT_NAMES)
+            }
+        )
+        action = np.linspace(-0.5, 0.5, ACTION_DIM, dtype=np.float32)
+        default_joint_pos = np.linspace(0.1, 0.2, ACTION_DIM, dtype=np.float32)
+        action_scale = np.linspace(0.01, 0.03, ACTION_DIM, dtype=np.float32)
+
+        model_ctrl = action_to_model_ctrl(
+            bundle,
+            action,
+            default_joint_pos,
+            action_scale,
+            jnp=_NumpyJnp,
+        )
+
+        expected_joint_ctrl = action * action_scale + default_joint_pos
+        actuator_ids = [
+            bundle.actuator_name_to_id[f"robot/{joint_name}"]
+            for joint_name in MUJOCO_JOINT_NAMES
+        ]
+        np.testing.assert_allclose(model_ctrl[actuator_ids], expected_joint_ctrl)
 
     def test_reset_forward_step_smoke_runs_real_mjx_when_runtime_available(self) -> None:
         if not probe_mjx_runtime().available:
@@ -89,6 +124,114 @@ class MjxRealPhysicsTest(unittest.TestCase):
         self.assertAlmostEqual(float(np.linalg.norm(result["qpos"][3:7])), 1.0, places=4)
         self.assertTrue(np.all(np.isfinite(result["qpos"])))
         self.assertTrue(np.all(np.isfinite(result["qvel"])))
+
+    def test_real_mjx_physics_step_returns_rollout_state_fields(self) -> None:
+        if not probe_mjx_runtime().available:
+            self.skipTest("jax/mujoco.mjx runtime is not available")
+        runtime = require_mjx_runtime()
+        bundle = build_mjx_model_bundle(profile_name="wxy_parity", require_runtime=True)
+        default_joint_pos = default_joint_pos_tensor("cpu").numpy()
+        action_scale = joint_actuator_specs("cpu")["action_scale"].numpy()
+        physics_step = make_mjx_physics_step_fn(
+            default_joint_pos=default_joint_pos,
+            action_scale=action_scale,
+        )
+        sample_count = 2
+        qpos = np.zeros((sample_count, QPOS_DIM), dtype=np.float32)
+        qpos[:, 3] = 1.0
+        qpos[:, 7:] = default_joint_pos
+        qpos[:, 0] = np.array([0.0, 0.05], dtype=np.float32)
+        qvel = np.zeros((sample_count, QVEL_DIM), dtype=np.float32)
+        robot_state = {
+            "qpos": qpos,
+            "qvel": qvel,
+            "body_pos_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 3),
+                dtype=np.float32,
+            ),
+            "body_quat_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 4),
+                dtype=np.float32,
+            ),
+            "body_ang_vel_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 3),
+                dtype=np.float32,
+            ),
+        }
+        action = np.zeros((sample_count, ACTION_DIM), dtype=np.float32)
+        action[:, 0] = np.array([0.2, -0.2], dtype=np.float32)
+
+        next_robot, score_state = physics_step(
+            bundle,
+            robot_state,
+            qpos,
+            action,
+            0,
+            runtime=runtime,
+        )
+        next_robot = {
+            name: runtime.jax.device_get(value)
+            for name, value in next_robot.items()
+            if value is not None
+        }
+        score_state = {
+            name: runtime.jax.device_get(value)
+            for name, value in score_state.items()
+        }
+
+        self.assertEqual(next_robot["qpos"].shape, (sample_count, QPOS_DIM))
+        self.assertEqual(next_robot["qvel"].shape, (sample_count, QVEL_DIM))
+        self.assertEqual(
+            next_robot["body_pos_w"].shape,
+            (sample_count, len(MUJOCO_BODY_NAMES), 3),
+        )
+        self.assertEqual(
+            next_robot["body_quat_w"].shape,
+            (sample_count, len(MUJOCO_BODY_NAMES), 4),
+        )
+        self.assertEqual(
+            next_robot["body_lin_vel_w"].shape,
+            (sample_count, len(MUJOCO_BODY_NAMES), 3),
+        )
+        self.assertEqual(
+            next_robot["body_ang_vel_w"].shape,
+            (sample_count, len(MUJOCO_BODY_NAMES), 3),
+        )
+        self.assertEqual(score_state["root_pos"].shape, (sample_count, 3))
+        self.assertEqual(
+            score_state["body_pos"].shape,
+            (sample_count, len(MUJOCO_BODY_NAMES), 3),
+        )
+        self.assertEqual(
+            score_state["ee_pos"].shape,
+            (sample_count, len(TASK_EE_BODY_NAMES), 3),
+        )
+        self.assertEqual(score_state["contact"].shape, (sample_count, 2))
+        self.assertEqual(score_state["model_ctrl"].shape, (sample_count, ACTION_DIM))
+        self.assertEqual(score_state["time"].shape, (sample_count,))
+
+        actuator_ids = [
+            bundle.actuator_name_to_id[f"robot/{joint_name}"]
+            for joint_name in MUJOCO_JOINT_NAMES
+        ]
+        expected_joint_ctrl = action * action_scale.reshape(1, -1) + default_joint_pos
+        np.testing.assert_allclose(
+            score_state["model_ctrl"][:, actuator_ids],
+            expected_joint_ctrl,
+            atol=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            score_state["time"],
+            np.full(sample_count, PHYSICS_DT * DECIMATION, dtype=np.float32),
+            atol=1.0e-5,
+        )
+        np.testing.assert_allclose(
+            np.linalg.norm(next_robot["qpos"][:, 3:7], axis=-1),
+            np.ones(sample_count, dtype=np.float32),
+            atol=1.0e-4,
+        )
+        for values in (*next_robot.values(), *score_state.values()):
+            self.assertTrue(np.all(np.isfinite(values)))
 
 
 if __name__ == "__main__":
