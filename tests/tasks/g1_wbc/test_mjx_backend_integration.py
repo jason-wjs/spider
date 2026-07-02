@@ -13,10 +13,12 @@ from spider.config import Config
 from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
     MUJOCO_BODY_NAMES,
+    MUJOCO_JOINT_NAMES,
     QPOS_DIM,
     QVEL_DIM,
 )
 from spider.tasks.g1_wbc.mjx_backend import run_g1_wbc_mjx_mpc
+from spider.tasks.g1_wbc.mjx_components import build_mjx_rollout_components
 from spider.tasks.g1_wbc.motion import G1Motion
 from spider.tasks.g1_wbc.policy import WbcActor
 from spider.tasks.g1_wbc.result_types import G1WbcMpcRun
@@ -319,6 +321,50 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(references[0]["window_start"], 0)
         self.assertEqual(references[0]["score_scale"], 0.5)
 
+    def test_mjx_backend_accepts_explicit_rollout_components(self) -> None:
+        runtime = _FakeOptimizerRuntime()
+
+        def physics_step_fn(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            raise AssertionError("fake optimizer should not call rollout scorer")
+
+        components = build_mjx_rollout_components(
+            runtime=runtime,
+            physics_step_fn=physics_step_fn,
+            score_weights={"root_pos": 1.0},
+        )
+
+        result = run_g1_wbc_mjx_mpc(
+            spider_config=_spider_config(),
+            motion=_motion(),
+            actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
+            rollout_config=SimpleNamespace(device="cpu", max_steps=800),
+            execute_rollout_config=SimpleNamespace(device="cpu", max_steps=800),
+            method="g1_wbc_joint_global",
+            reward_weights=None,
+            total_steps=800,
+            seed=5,
+            runtime=runtime,
+            model_factory=lambda **kwargs: _fake_model_bundle(
+                profile_name=kwargs["profile_name"]
+            ),
+            policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
+            optimizer=_fake_optimizer,
+            rollout_factory=_fake_rollout_result,
+            rollout_scorer=components.rollout_scorer,
+            rollout_reference_factory=components.rollout_reference_factory,
+        )
+
+        self.assertTrue(result.metadata["accepted"])
+        self.assertEqual(result.metadata["backend"], "mjx")
+
     def test_mjx_backend_default_path_stays_fail_closed(self) -> None:
         with self.assertRaisesRegex(
             (RuntimeError, NotImplementedError),
@@ -498,6 +544,26 @@ class _FakeOptimizerJax:
 class _FakeOptimizerRuntime:
     jnp = _FakeOptimizerJnp()
     jax = _FakeOptimizerJax()
+
+
+def _fake_model_bundle(*, profile_name: str = "wxy_parity"):
+    return SimpleNamespace(
+        profile=SimpleNamespace(name=profile_name),
+        cpu_model=SimpleNamespace(
+            jnt_limited=np.ones(ACTION_DIM, dtype=np.int32),
+            jnt_range=np.stack(
+                [
+                    np.full(ACTION_DIM, -1.0, dtype=np.float32),
+                    np.full(ACTION_DIM, 1.0, dtype=np.float32),
+                ],
+                axis=-1,
+            ),
+        ),
+        joint_name_to_id={
+            f"robot/{joint_name}": index
+            for index, joint_name in enumerate(MUJOCO_JOINT_NAMES)
+        },
+    )
 
 
 def _fake_optimizer(**kwargs):
