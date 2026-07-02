@@ -365,6 +365,26 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertTrue(result.metadata["accepted"])
         self.assertEqual(result.metadata["backend"], "mjx")
 
+    def test_mjx_backend_builds_rollout_components_when_scan_enabled(self) -> None:
+        result = _run_with_fakes(
+            optimizer=_fake_optimizer,
+            rollout_factory=_fake_rollout_result,
+            runtime=_FakeOptimizerRuntime(),
+            enable_physics_scan=True,
+            reward_weights={
+                "body_global_pos_error": 4.0,
+                "ee_global_pos_error": 1.5,
+                "contact_false_positive": 1.5,
+                "contact_false_negative": 0.4,
+                "control_delta": 1.8,
+                "joint_acc": 0.006,
+            },
+        )
+
+        self.assertTrue(result.metadata["accepted"])
+        self.assertEqual(result.metadata["backend"], "mjx")
+        self.assertTrue(result.metadata["physics_scan_enabled"])
+
     def test_mjx_backend_default_path_stays_fail_closed(self) -> None:
         with self.assertRaisesRegex(
             (RuntimeError, NotImplementedError),
@@ -465,6 +485,8 @@ def _run_with_fakes(
     runtime=None,
     rollout_scorer=None,
     rollout_reference_factory=None,
+    enable_physics_scan=False,
+    reward_weights=None,
 ):
     kwargs = {}
     if optimizer is not None:
@@ -480,15 +502,16 @@ def _run_with_fakes(
         rollout_config=SimpleNamespace(device="cpu", max_steps=800),
         execute_rollout_config=SimpleNamespace(device="cpu", max_steps=800),
         method="g1_wbc_joint_global",
-        reward_weights=None,
+        reward_weights=reward_weights,
         total_steps=800,
         seed=5,
         runtime=runtime or SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
-        model_factory=lambda **kwargs: SimpleNamespace(
-            profile=SimpleNamespace(name=kwargs["profile_name"])
+        model_factory=lambda **kwargs: _fake_model_bundle(
+            profile_name=kwargs["profile_name"]
         ),
         policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
         rollout_factory=rollout_factory,
+        enable_physics_scan=enable_physics_scan,
         **kwargs,
     )
 

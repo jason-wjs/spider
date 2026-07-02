@@ -136,8 +136,10 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             with self.subTest(motion=item.motion, seed=item.seed):
                 backend_idx = item.mjx_argv.index("--mpc-backend")
                 self.assertEqual(item.mjx_argv[backend_idx + 1], "mjx")
+                self.assertIn("--mjx-enable-scan", item.mjx_argv)
                 replay_backend_idx = item.replay_argv.index("--mpc-backend")
                 self.assertEqual(item.replay_argv[replay_backend_idx + 1], "mujoco_warp")
+                self.assertNotIn("--mjx-enable-scan", item.replay_argv)
                 method_idx = item.replay_argv.index("--method")
                 self.assertEqual(item.replay_argv[method_idx + 1], "replay_command")
 

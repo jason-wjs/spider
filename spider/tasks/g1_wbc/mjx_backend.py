@@ -41,15 +41,29 @@ def run_g1_wbc_mjx_mpc(
     rollout_factory: Callable[..., Any] | None = None,
     rollout_scorer: Callable[..., Any] | None = None,
     rollout_reference_factory: Callable[..., Any] | None = None,
+    enable_physics_scan: bool = False,
 ):
     """Run the MJX full-rollout backend or fail before touching Warp state."""
 
-    del execute_rollout_config
     compile_start = time.perf_counter()
     if runtime is None:
         runtime = require_mjx_runtime()
     device = torch.device(rollout_config.device)
     _validate_single_gpu_runtime(runtime, device=device)
+
+    if enable_physics_scan:
+        if rollout_scorer is None or rollout_reference_factory is None:
+            components = _default_rollout_components(
+                runtime=runtime,
+                method=method,
+                reward_weights=reward_weights,
+            )
+            if rollout_scorer is None:
+                rollout_scorer = components.rollout_scorer
+            if rollout_reference_factory is None:
+                rollout_reference_factory = components.rollout_reference_factory
+        if rollout_factory is None:
+            rollout_factory = _default_static_rollout_factory(execute_rollout_config)
 
     if rollout_factory is None or (
         optimizer is optimize_window and rollout_scorer is None
@@ -172,6 +186,7 @@ def run_g1_wbc_mjx_mpc(
             "method": method,
             "reward_weights": reward_weights,
             "accepted": True,
+            "physics_scan_enabled": bool(enable_physics_scan),
             "used_baseline_fallback": False,
             "accepted_windows": accepted_windows,
             "num_windows": len(infos),
@@ -206,6 +221,57 @@ def _default_model_factory(**kwargs):
     from spider.tasks.g1_wbc.mjx_model import build_mjx_model_bundle
 
     return build_mjx_model_bundle(**kwargs)
+
+
+def _default_rollout_components(
+    *,
+    runtime,
+    method: str,
+    reward_weights: dict[str, float] | None,
+):
+    from spider.tasks.g1_wbc.mjx_components import build_mjx_rollout_components
+
+    return build_mjx_rollout_components(
+        runtime=runtime,
+        score_weights=_mjx_score_weights(method, reward_weights),
+    )
+
+
+def _default_static_rollout_factory(rollout_config):
+    def rollout_factory(motion, total_steps, *, device: torch.device, refined_qpos):
+        del motion, device
+        from spider.tasks.g1_wbc.rollout import run_static_qpos_rollout
+
+        return run_static_qpos_rollout(
+            refined_qpos,
+            rollout_config,
+            max_steps=int(total_steps),
+        )
+
+    return rollout_factory
+
+
+def _mjx_score_weights(
+    method: str,
+    reward_weights: dict[str, float] | None,
+) -> dict[str, float]:
+    del method
+    if not reward_weights:
+        return {}
+    contact_weight = (
+        float(reward_weights.get("contact_mismatch", 0.0))
+        + float(reward_weights.get("contact_false_positive", 0.0))
+        + float(reward_weights.get("contact_false_negative", 0.0))
+    )
+    mapping = {
+        "root_pos": float(reward_weights.get("root_pos_error", 0.0)),
+        "body_global_pos": float(reward_weights.get("body_global_pos_error", 0.0)),
+        "ee_global_pos": float(reward_weights.get("ee_global_pos_error", 0.0)),
+        "contact": contact_weight,
+        "control_delta": float(reward_weights.get("control_delta", 0.0)),
+        "joint_acc": float(reward_weights.get("joint_acc", 0.0)),
+    }
+    return {name: value for name, value in mapping.items() if value != 0.0}
 
 
 def _validate_single_gpu_runtime(runtime, *, device: torch.device) -> None:

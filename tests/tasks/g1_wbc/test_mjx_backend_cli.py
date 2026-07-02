@@ -36,6 +36,24 @@ class MjxBackendCliTest(unittest.TestCase):
             args = evaluate._parse_args()
 
         self.assertEqual(args.mpc_backend, "mujoco_warp")
+        self.assertFalse(args.mjx_enable_scan)
+
+    def test_parse_args_accepts_explicit_mjx_scan_enable(self) -> None:
+        argv = [
+            "evaluate.py",
+            "--motion",
+            "/tmp/motion.npz",
+            "--method",
+            "g1_wbc_joint_global",
+            "--mpc-backend",
+            "mjx",
+            "--mjx-enable-scan",
+        ]
+
+        with mock.patch("sys.argv", argv):
+            args = evaluate._parse_args()
+
+        self.assertTrue(args.mjx_enable_scan)
 
     def test_mjx_backend_rejects_non_mpc_method(self) -> None:
         argv = [

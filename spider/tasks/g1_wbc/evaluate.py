@@ -133,6 +133,7 @@ def main() -> None:
         if args.mpc_backend == "mjx":
             from spider.tasks.g1_wbc.mjx_backend import run_g1_wbc_mjx_mpc
 
+            effective_reward_weights = _effective_reward_weights(args.method, reward_weights)
             mpc_run = run_g1_wbc_mjx_mpc(
                 spider_config=spider_config,
                 motion=motion,
@@ -140,9 +141,10 @@ def main() -> None:
                 rollout_config=config,
                 execute_rollout_config=execute_config,
                 method=args.method,
-                reward_weights=reward_weights,
+                reward_weights=effective_reward_weights,
                 total_steps=total_steps,
                 seed=int(args.seed),
+                enable_physics_scan=bool(args.mjx_enable_scan),
             )
         else:
             task = G1WbcSamplingTask(
@@ -360,6 +362,14 @@ def _parse_args() -> argparse.Namespace:
         choices=("mujoco_warp", "mjx"),
         default="mujoco_warp",
         help="MPC rollout backend. MuJoCo-Warp remains the default.",
+    )
+    parser.add_argument(
+        "--mjx-enable-scan",
+        action="store_true",
+        help=(
+            "Explicitly enable the experimental MJX/JAX physics scan for "
+            "--mpc-backend mjx. Without this flag MJX stays fail-closed."
+        ),
     )
     parser.add_argument("--mpc-samples", type=int, default=None)
     parser.add_argument("--mpc-rollout-batch-size", type=int, default=0)

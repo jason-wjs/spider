@@ -222,6 +222,8 @@ def _mjx_argv_from_baseline_row(
     argv = _set_arg(argv, "--mpc-backend", "mjx")
     argv = _set_arg(argv, "--output-dir", str(output_dir))
     argv = _set_arg(argv, "--device", str(device))
+    if "--mjx-enable-scan" not in argv:
+        argv.append("--mjx-enable-scan")
     if "--save-rollout" not in argv:
         argv.append("--save-rollout")
     return argv
@@ -238,6 +240,7 @@ def _replay_argv_from_mjx(
     argv = _set_arg(argv, "--mpc-backend", "mujoco_warp")
     argv = _set_arg(argv, "--output-dir", str(replay_output_dir))
     argv = _drop_arg_with_value(argv, "--mpc-reward-weights")
+    argv = _drop_flag(argv, "--mjx-enable-scan")
     argv.extend(["--saved-command", str(mjx_output_dir / "mpc_command.npz")])
     argv.extend(["--replay-control-steps", "20"])
     argv.extend(["--replay-task-mode", "g1_wbc_joint_global"])
@@ -522,6 +525,10 @@ def _drop_arg_with_value(argv: list[str], flag: str) -> list[str]:
             continue
         out.append(value)
     return out
+
+
+def _drop_flag(argv: list[str], flag: str) -> list[str]:
+    return [value for value in argv if value != flag]
 
 
 if __name__ == "__main__":
