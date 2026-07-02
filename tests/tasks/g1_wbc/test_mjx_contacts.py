@@ -15,6 +15,7 @@ class MjxContactProfilesTest(unittest.TestCase):
 
         self.assertEqual(profile.name, "wxy_parity")
         self.assertIn("terrain", profile.floor_geom_names)
+        self.assertNotIn("floor", profile.floor_geom_names)
         self.assertGreaterEqual(profile.max_contact_points, 128)
         self.assertGreaterEqual(profile.max_geom_pairs, 256)
         self.assertTrue(any("left" in name for name in profile.foot_body_names))

@@ -28,7 +28,7 @@ WXY_FOOT_COLLISION_GEOMS = tuple(
 CONTACT_PROFILES: dict[str, ContactProfile] = {
     "wxy_parity": ContactProfile(
         name="wxy_parity",
-        floor_geom_names=("terrain", "floor"),
+        floor_geom_names=("terrain",),
         foot_body_names=("robot/left_ankle_roll_link", "robot/right_ankle_roll_link"),
         foot_collision_geom_names=WXY_FOOT_COLLISION_GEOMS,
         explicit_pair_names=tuple(("terrain", geom) for geom in WXY_FOOT_COLLISION_GEOMS),

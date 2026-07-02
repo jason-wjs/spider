@@ -70,9 +70,15 @@ def assert_mjx_model_parity(bundle: MjxModelBundle) -> None:
     if not bundle.profile.eligible_for_parity:
         raise ValueError(f"Profile {bundle.profile.name!r} is not parity-eligible.")
     _assert_model_dims(bundle.cpu_model)
-    for joint_name in MUJOCO_JOINT_NAMES:
-        if f"robot/{joint_name}" not in bundle.joint_name_to_id:
-            raise ValueError(f"Missing parity joint robot/{joint_name}.")
+    _assert_required_names(
+        {
+            "body": bundle.body_name_to_id,
+            "joint": bundle.joint_name_to_id,
+            "actuator": bundle.actuator_name_to_id,
+            "geom": bundle.geom_name_to_id,
+        },
+        bundle.profile,
+    )
 
 
 def _assert_model_dims(model: mujoco.MjModel) -> None:
@@ -118,8 +124,9 @@ def _assert_required_names(
     for geom_name in profile.foot_collision_geom_names:
         if profile.eligible_for_parity:
             _require_name(maps["geom"], geom_name, "geom")
-    if profile.eligible_for_parity:
-        _require_name(maps["geom"], "terrain", "geom")
+    for floor_geom_name in profile.floor_geom_names:
+        if profile.eligible_for_parity:
+            _require_name(maps["geom"], floor_geom_name, "geom")
 
 
 def _require_name(names: dict[str, int], name: str, kind: str) -> None:
