@@ -71,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
                 "returncode": None,
                 "timed_out": False,
                 "wall_time_sec": 0.0,
+                "steady_state_wall_time_sec": 0.0,
+                "compile_init_wall_time_sec": None,
                 "started_at": None,
                 "finished_at": None,
                 "cuda_memory": cuda_memory_unavailable(args.device, "dry-run"),
@@ -146,6 +148,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Optional method-keyed or flat reward-weight JSON passed to evaluate.py.",
     )
     parser.add_argument("--max-steps", type=positive_int, default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--mpc-backend",
+        choices=("mujoco_warp", "mjx"),
+        default="mujoco_warp",
+    )
+    parser.add_argument("--save-rollout", action="store_true")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--python-executable", default=str(DEFAULT_PYTHON_EXECUTABLE))
@@ -193,7 +202,13 @@ def build_evaluate_command(args: argparse.Namespace, evaluate_output_dir: Path) 
         args.device,
         "--output-dir",
         str(evaluate_output_dir),
+        "--seed",
+        str(args.seed),
+        "--mpc-backend",
+        args.mpc_backend,
     ]
+    if args.save_rollout:
+        command.append("--save-rollout")
     if args.max_steps is not None:
         command.extend(["--max-steps", str(args.max_steps)])
     if args.method == "no_mpc":
@@ -298,6 +313,8 @@ def build_base_profile(
         "motion": str(args.motion.expanduser().resolve()),
         "motion_type": args.motion_type,
         "method": args.method,
+        "seed": args.seed,
+        "mpc_backend": args.mpc_backend,
         "checkpoint": str(args.checkpoint),
         "device": args.device,
         "max_steps": args.max_steps,
@@ -376,6 +393,8 @@ def run_profiled_command(
         "returncode": returncode,
         "timed_out": timed_out,
         "wall_time_sec": wall_time_sec,
+        "steady_state_wall_time_sec": wall_time_sec,
+        "compile_init_wall_time_sec": None,
         "started_at": started_at.isoformat(timespec="seconds"),
         "finished_at": finished_at.isoformat(timespec="seconds"),
         "cuda_memory": tracker.to_payload(),
