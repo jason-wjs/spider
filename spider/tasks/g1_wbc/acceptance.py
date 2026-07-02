@@ -287,6 +287,8 @@ def _global_repeat_failures(
     failures: list[str] = []
     for row in repeats:
         metrics = _metrics(row)
+        if not isinstance(row.get("metrics", {}), Mapping):
+            failures.append("metrics")
         if row.get("status") != "ok":
             failures.append("status")
         if _safe_int(row.get("num_steps", metrics.get("num_steps"))) != 800:
@@ -323,7 +325,7 @@ def _missing_metric_failures(
 def _metrics(row: Mapping[str, Any]) -> Mapping[str, Any]:
     metrics = row.get("metrics", {})
     if not isinstance(metrics, Mapping):
-        raise TypeError("repeat metrics must be a mapping")
+        return {}
     return metrics
 
 
@@ -377,12 +379,23 @@ def _has_valid_metric(row: Mapping[str, Any], metric: str) -> bool:
 
 
 def _safe_int(value: Any) -> int | None:
-    try:
-        if isinstance(value, bool) or value is None:
-            return None
-        return int(value)
-    except (TypeError, ValueError):
+    if isinstance(value, bool) or value is None:
         return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) and value.is_integer() else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("-", "+")):
+            sign = stripped[0]
+            digits = stripped[1:]
+        else:
+            sign = ""
+            digits = stripped
+        if digits.isdecimal():
+            return int(f"{sign}{digits}")
+    return None
 
 
 def _metric_present(

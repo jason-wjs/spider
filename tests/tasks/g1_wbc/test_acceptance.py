@@ -102,6 +102,35 @@ class AcceptanceTest(unittest.TestCase):
         self.assertIn("num_steps", result.failures)
         self.assertIn("accepted_windows", result.failures)
 
+    def test_baseline_group_fails_closed_when_metrics_container_is_malformed(self):
+        rows = [
+            _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
+            _baseline_repeat("jump", 1, -2.08, 0.061, 0.071, 0.081, 0.35, 0.43, 211.0),
+            _baseline_repeat("jump", 2, -2.10, 0.062, 0.072, 0.082, 0.35, 0.44, 212.0),
+        ]
+        rows[1]["metrics"] = None
+
+        result = evaluate_baseline_group("jump", rows)
+
+        self.assertFalse(result.passed)
+        self.assertIn("metrics", result.failures)
+        self.assertIn("score_missing", result.failures)
+
+    def test_baseline_group_fails_closed_on_non_integral_metadata(self):
+        rows = [
+            _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
+            _baseline_repeat("jump", 1, -2.08, 0.061, 0.071, 0.081, 0.35, 0.43, 211.0),
+            _baseline_repeat("jump", 2, -2.10, 0.062, 0.072, 0.082, 0.35, 0.44, 212.0),
+        ]
+        rows[0]["num_steps"] = 800.9
+        rows[1]["accepted_windows"] = 40.9
+
+        result = evaluate_baseline_group("jump", rows)
+
+        self.assertFalse(result.passed)
+        self.assertIn("num_steps", result.failures)
+        self.assertIn("accepted_windows", result.failures)
+
     def test_baseline_group_does_not_hard_fail_on_wall_time_outlier(self):
         rows = [
             _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
