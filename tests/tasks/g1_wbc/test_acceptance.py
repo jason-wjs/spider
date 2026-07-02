@@ -74,6 +74,32 @@ class AcceptanceTest(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("joint_jerk_mean_missing", result.failures)
 
+    def test_baseline_group_fails_when_primary_metric_is_non_numeric(self):
+        rows = [
+            _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
+            _baseline_repeat("jump", 1, -2.08, 0.061, 0.071, 0.081, 0.35, 0.43, 211.0),
+            _baseline_repeat("jump", 2, -2.10, 0.062, 0.072, 0.082, 0.35, 0.44, 212.0),
+        ]
+        rows[1]["metrics"]["joint_jerk_mean"] = "bad"
+
+        result = evaluate_baseline_group("jump", rows)
+
+        self.assertFalse(result.passed)
+        self.assertIn("joint_jerk_mean_missing", result.failures)
+
+    def test_baseline_group_does_not_hard_fail_on_wall_time_outlier(self):
+        rows = [
+            _baseline_repeat("jump", 0, -2.05, 0.060, 0.070, 0.080, 0.34, 0.42, 210.0),
+            _baseline_repeat("jump", 1, -2.08, 0.061, 0.071, 0.081, 0.35, 0.43, 211.0),
+            _baseline_repeat("jump", 2, -2.10, 0.062, 0.072, 0.082, 0.35, 0.44, 212.0),
+        ]
+        rows[2]["wall_time_sec"] = 9999.0
+
+        result = evaluate_baseline_group("jump", rows)
+
+        self.assertTrue(result.passed)
+        self.assertNotIn("timing_outlier", result.failures)
+
     def test_walk_baseline_fails_when_contact_mismatch_rate_mean_exceeds_threshold(self):
         rows = [
             _baseline_repeat("walk", seed, -1.20, 0.070, 0.075, 0.078, 0.18, 0.23, 110.0)

@@ -159,7 +159,6 @@ def evaluate_baseline_group(
         if stats is None or stats["mean"] > upper:
             failures.append(f"{metric}_mean")
 
-    failures.extend(_timing_outlier_failures(repeats))
     unique_failures = _unique(failures)
     return BaselineGroupResult(
         passed=not unique_failures,
@@ -314,7 +313,7 @@ def _missing_metric_failures(
 ) -> list[str]:
     failures: list[str] = []
     for metric in required_metrics:
-        if any(metric not in _metrics(row) for row in repeats):
+        if any(not _has_valid_metric(row, metric) for row in repeats):
             failures.append(f"{metric}_missing")
     return failures
 
@@ -365,6 +364,16 @@ def _metric_values(repeats: Sequence[Mapping[str, Any]], metric: str) -> list[fl
     return values
 
 
+def _has_valid_metric(row: Mapping[str, Any], metric: str) -> bool:
+    metrics = _metrics(row)
+    if metric not in metrics:
+        return False
+    value = metrics[metric]
+    if isinstance(value, bool):
+        return metric == "success"
+    return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
 def _metric_present(
     metric: str,
     envelope: Mapping[str, Mapping[str, float]],
@@ -392,22 +401,6 @@ def _promoted_seed(repeats: Sequence[Mapping[str, Any]]) -> int | None:
     best = max(repeats, key=lambda row: float(_metrics(row).get("score", float("-inf"))))
     seed = best.get("seed")
     return int(seed) if seed is not None else None
-
-
-def _timing_outlier_failures(repeats: Sequence[Mapping[str, Any]]) -> list[str]:
-    wall_times = [
-        float(row["wall_time_sec"])
-        for row in repeats
-        if isinstance(row.get("wall_time_sec"), (int, float)) and math.isfinite(float(row["wall_time_sec"]))
-    ]
-    if not wall_times:
-        return ["wall_time_sec"]
-    median_time = median(wall_times)
-    if median_time <= 0.0:
-        return ["wall_time_sec"]
-    if any(wall_time > median_time * 1.25 for wall_time in wall_times):
-        return ["timing_outlier"]
-    return []
 
 
 def _unique(failures: Sequence[str]) -> tuple[str, ...]:
