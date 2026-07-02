@@ -82,6 +82,31 @@ class MjxRuntimeTest(unittest.TestCase):
         self.assertFalse(status.mjx_available)
         self.assertIn("mujoco", str(status.error))
 
+    def test_require_mjx_runtime_wraps_post_probe_import_failure(self) -> None:
+        status = mjx_runtime.MjxRuntimeStatus(
+            available=True,
+            jax_available=True,
+            jnp_available=True,
+            mjx_available=True,
+            jax_version="0.test",
+            mujoco_version="3.7.0",
+            mjx_module="mujoco.mjx",
+            visible_devices=(),
+            error=None,
+        )
+
+        def fake_import_module(name, package=None):
+            if name == "jax.numpy":
+                raise ModuleNotFoundError(name)
+            return SimpleNamespace(__name__=name)
+
+        with mock.patch.object(mjx_runtime, "probe_mjx_runtime", return_value=status):
+            with mock.patch.object(importlib, "import_module", fake_import_module):
+                with self.assertRaisesRegex(RuntimeError, "--mpc-backend mjx") as cm:
+                    mjx_runtime.require_mjx_runtime()
+
+        self.assertIn("jax.numpy", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

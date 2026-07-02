@@ -116,7 +116,13 @@ def require_mjx_runtime() -> MjxRuntime:
             "--mpc-backend mjx requires importable jax and mujoco.mjx. "
             f"Runtime probe failed: {status.error}"
         )
-    jax = importlib.import_module("jax")
-    jnp = importlib.import_module("jax.numpy")
-    mjx = importlib.import_module("mujoco.mjx")
+    try:
+        jax = importlib.import_module("jax")
+        jnp = importlib.import_module("jax.numpy")
+        mjx = importlib.import_module("mujoco.mjx")
+    except Exception as exc:
+        raise RuntimeError(
+            "--mpc-backend mjx requires importable jax and mujoco.mjx. "
+            f"Runtime import failed after probe succeeded: {exc}"
+        ) from exc
     return MjxRuntime(jax=jax, jnp=jnp, mjx=mjx, status=status)
