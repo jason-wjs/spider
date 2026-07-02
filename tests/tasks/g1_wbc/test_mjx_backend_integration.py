@@ -319,8 +319,11 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(references[0]["window_start"], 0)
         self.assertEqual(references[0]["score_scale"], 0.5)
 
-    def test_mjx_backend_default_path_still_requires_runtime(self) -> None:
-        with self.assertRaisesRegex(RuntimeError, "--mpc-backend mjx"):
+    def test_mjx_backend_default_path_stays_fail_closed(self) -> None:
+        with self.assertRaisesRegex(
+            (RuntimeError, NotImplementedError),
+            "--mpc-backend mjx|production MJX physics scan",
+        ):
             run_g1_wbc_mjx_mpc(
                 spider_config=_spider_config(),
                 motion=_motion(),

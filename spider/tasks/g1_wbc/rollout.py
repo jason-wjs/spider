@@ -291,7 +291,7 @@ def _add_wxy_init_keyframe(spec: mujoco.MjSpec) -> None:
     spec.add_key(name="init_state", qpos=qpos, ctrl=ctrl)
 
 
-def _build_wxy_model() -> mujoco.MjModel:
+def _build_wxy_model(*, include_self_collision_sensors: bool = True) -> mujoco.MjModel:
     """Build a G1 WBC model matching tracking_bfm body/joint/actuator layout."""
 
     wxy_path = WXY_G1_MODEL_PATH.expanduser().resolve()
@@ -321,13 +321,18 @@ def _build_wxy_model() -> mujoco.MjModel:
     _configure_wxy_collision_spec(spec)
     _add_wxy_actuators_to_spec(spec)
     _add_wxy_init_keyframe(spec)
-    _add_wxy_self_collision_sensors(spec)
+    if include_self_collision_sensors:
+        _add_wxy_self_collision_sensors(spec)
     model = spec.compile()
     configure_wbc_model(model)
     return model
 
 
-def load_wbc_model(model_path: str | Path) -> mujoco.MjModel:
+def load_wbc_model(
+    model_path: str | Path,
+    *,
+    include_self_collision_sensors: bool = True,
+) -> mujoco.MjModel:
     """Load a G1 WBC model with tracking_bfm-compatible physics semantics."""
 
     path = Path(model_path).expanduser()
@@ -336,7 +341,9 @@ def load_wbc_model(model_path: str | Path) -> mujoco.MjModel:
         with open(path, "rb") as _f:
             return _pickle.load(_f)
     if path.name == WXY_G1_MODEL_PATH.name:
-        return _build_wxy_model()
+        return _build_wxy_model(
+            include_self_collision_sensors=include_self_collision_sensors
+        )
     model = mujoco.MjModel.from_xml_path(str(path))
     configure_wbc_model(model)
     return model

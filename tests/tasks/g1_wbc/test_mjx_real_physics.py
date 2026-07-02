@@ -3,7 +3,14 @@ import unittest
 
 import numpy as np
 
-from spider.tasks.g1_wbc.constants import ACTION_DIM, DECIMATION, PHYSICS_DT, QPOS_DIM, QVEL_DIM
+from spider.tasks.g1_wbc.constants import (
+    ACTION_DIM,
+    DECIMATION,
+    MUJOCO_JOINT_NAMES,
+    PHYSICS_DT,
+    QPOS_DIM,
+    QVEL_DIM,
+)
 from spider.tasks.g1_wbc.mjx_model import build_mjx_model_bundle
 from spider.tasks.g1_wbc.mjx_physics import (
     joint_order_to_model_ctrl,
@@ -36,8 +43,6 @@ class MjxRealPhysicsTest(unittest.TestCase):
             }
         )
         # Fill the remaining expected G1 names after the deliberately permuted prefix.
-        from spider.tasks.g1_wbc.constants import MUJOCO_JOINT_NAMES
-
         for index, joint_name in enumerate(MUJOCO_JOINT_NAMES[3:], start=3):
             bundle.actuator_name_to_id[f"robot/{joint_name}"] = index
         joint_ctrl = np.linspace(-1.0, 1.0, ACTION_DIM, dtype=np.float32)
@@ -54,9 +59,6 @@ class MjxRealPhysicsTest(unittest.TestCase):
         if not probe_mjx_runtime().available:
             self.skipTest("jax/mujoco.mjx runtime is not available")
         runtime = require_mjx_runtime()
-        devices = tuple(runtime.jax.devices())
-        if not any(getattr(device, "platform", "") == "gpu" for device in devices):
-            self.skipTest("JAX GPU device is not available")
         bundle = build_mjx_model_bundle(profile_name="wxy_parity", require_runtime=True)
         qpos = np.zeros(QPOS_DIM, dtype=np.float32)
         qpos[3] = 1.0
@@ -74,7 +76,11 @@ class MjxRealPhysicsTest(unittest.TestCase):
         self.assertEqual(result["qpos"].shape, (QPOS_DIM,))
         self.assertEqual(result["qvel"].shape, (QVEL_DIM,))
         self.assertEqual(result["ctrl"].shape, (ACTION_DIM,))
-        np.testing.assert_allclose(result["ctrl"], joint_ctrl, atol=1.0e-6)
+        actuator_ids = [
+            bundle.actuator_name_to_id[f"robot/{joint_name}"]
+            for joint_name in MUJOCO_JOINT_NAMES
+        ]
+        np.testing.assert_allclose(result["ctrl"][actuator_ids], joint_ctrl, atol=1.0e-6)
         self.assertAlmostEqual(
             float(result["time"]),
             PHYSICS_DT * DECIMATION,

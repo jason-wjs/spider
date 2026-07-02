@@ -45,7 +45,10 @@ def build_mjx_model_bundle(
         raise ValueError(
             f"Contact profile {profile.name!r} cannot be bound to the WXY model bundle."
         )
-    cpu_model = load_wbc_model(model_path)
+    cpu_model = load_wbc_model(
+        model_path,
+        include_self_collision_sensors=not require_runtime,
+    )
     _assert_model_dims(cpu_model)
     maps = _build_name_maps(cpu_model)
     _assert_required_names(maps, profile)
