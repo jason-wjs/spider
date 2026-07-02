@@ -10,34 +10,74 @@ class JaxScoreWeights:
     terms: dict[str, float]
 
 
+ACCUMULATOR_KEYS = (
+    "score_sum",
+    "root_pos_error_sum",
+    "body_global_pos_error_sum",
+    "ee_global_pos_error_sum",
+    "contact_mismatch_sum",
+    "control_delta_sum",
+    "joint_acc_sum",
+    "count",
+)
+
+
+def init_score_accumulator(batch_shape=(), *, jnp):
+    """Create a stable score accumulator PyTree for JAX scan carries."""
+
+    shape = _shape_tuple(batch_shape)
+    return {name: jnp.zeros(shape) for name in ACCUMULATOR_KEYS}
+
+
 def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeights, *, jnp):
     """Accumulate one step of core WBC rollout score terms."""
 
-    terms = dict(accumulator)
-    root_error = _mean_squared(step_state["root_pos"], reference_state["root_pos"], jnp=jnp)
-    body_error = _mean_squared(step_state["body_pos"], reference_state["body_pos"], jnp=jnp)
-    ee_error = _mean_squared(step_state["ee_pos"], reference_state["ee_pos"], jnp=jnp)
-    contact_error = _mean_abs(step_state["contact"], reference_state["contact"], jnp=jnp)
+    terms = _ensure_accumulator(accumulator, root=step_state["root_pos"], jnp=jnp)
+    batch_shape = _shape_tuple(terms["count"].shape)
+    root_error = _mean_squared(
+        step_state["root_pos"],
+        reference_state["root_pos"],
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
+    body_error = _mean_squared(
+        step_state["body_pos"],
+        reference_state["body_pos"],
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
+    ee_error = _mean_squared(
+        step_state["ee_pos"],
+        reference_state["ee_pos"],
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
+    contact_error = _mean_abs(
+        step_state["contact"],
+        reference_state["contact"],
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
     control_delta = _mean_squared(
-        step_state["control"], step_state["prev_control"], jnp=jnp
+        step_state["control"],
+        step_state["prev_control"],
+        batch_shape=batch_shape,
+        jnp=jnp,
     )
     joint_acc = _mean_squared(
-        step_state["joint_vel"], step_state["prev_joint_vel"], jnp=jnp
+        step_state["joint_vel"],
+        step_state["prev_joint_vel"],
+        batch_shape=batch_shape,
+        jnp=jnp,
     )
 
-    terms["root_pos_error_sum"] = terms.get("root_pos_error_sum", 0.0) + root_error
-    terms["body_global_pos_error_sum"] = (
-        terms.get("body_global_pos_error_sum", 0.0) + body_error
-    )
-    terms["ee_global_pos_error_sum"] = (
-        terms.get("ee_global_pos_error_sum", 0.0) + ee_error
-    )
-    terms["contact_mismatch_sum"] = (
-        terms.get("contact_mismatch_sum", 0.0) + contact_error
-    )
-    terms["control_delta_sum"] = terms.get("control_delta_sum", 0.0) + control_delta
-    terms["joint_acc_sum"] = terms.get("joint_acc_sum", 0.0) + joint_acc
-    terms["count"] = terms.get("count", 0.0) + 1.0
+    terms["root_pos_error_sum"] = terms["root_pos_error_sum"] + root_error
+    terms["body_global_pos_error_sum"] = terms["body_global_pos_error_sum"] + body_error
+    terms["ee_global_pos_error_sum"] = terms["ee_global_pos_error_sum"] + ee_error
+    terms["contact_mismatch_sum"] = terms["contact_mismatch_sum"] + contact_error
+    terms["control_delta_sum"] = terms["control_delta_sum"] + control_delta
+    terms["joint_acc_sum"] = terms["joint_acc_sum"] + joint_acc
+    terms["count"] = terms["count"] + 1.0
 
     penalty = (
         _weight(weights, "root_pos", "root_pos_error") * root_error
@@ -47,21 +87,22 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         + _weight(weights, "control_delta") * control_delta
         + _weight(weights, "joint_acc") * joint_acc
     )
-    terms["score_sum"] = terms.get("score_sum", 0.0) - penalty
+    terms["score_sum"] = terms["score_sum"] - penalty
     return terms
 
 
 def finalize_score(accumulator, *, jnp):
     """Return mean score metrics from a streaming score accumulator."""
 
-    count = jnp.maximum(accumulator.get("count", 0.0), 1.0)
-    score = accumulator.get("score_sum", 0.0) / count
-    root_pos_error = accumulator.get("root_pos_error_sum", 0.0) / count
-    body_global_pos_error = accumulator.get("body_global_pos_error_sum", 0.0) / count
-    ee_global_pos_error = accumulator.get("ee_global_pos_error_sum", 0.0) / count
-    contact_mismatch = accumulator.get("contact_mismatch_sum", 0.0) / count
-    control_delta = accumulator.get("control_delta_sum", 0.0) / count
-    joint_acc = accumulator.get("joint_acc_sum", 0.0) / count
+    terms = _ensure_accumulator(accumulator, root=0.0, jnp=jnp)
+    count = jnp.maximum(terms["count"], 1.0)
+    score = terms["score_sum"] / count
+    root_pos_error = terms["root_pos_error_sum"] / count
+    body_global_pos_error = terms["body_global_pos_error_sum"] / count
+    ee_global_pos_error = terms["ee_global_pos_error_sum"] / count
+    contact_mismatch = terms["contact_mismatch_sum"] / count
+    control_delta = terms["control_delta_sum"] / count
+    joint_acc = terms["joint_acc_sum"] / count
     return {
         "score": score,
         "root_pos_error_mean": root_pos_error,
@@ -79,25 +120,66 @@ def finalize_score(accumulator, *, jnp):
     }
 
 
-def _mean_squared(actual, expected, *, jnp):
+def _mean_squared(actual, expected, *, batch_shape: tuple[int, ...], jnp):
     delta = jnp.asarray(actual) - jnp.asarray(expected)
-    return jnp.mean(delta * delta)
+    return _mean_feature_axes(delta * delta, batch_shape=batch_shape, jnp=jnp)
 
 
-def _mean_abs(actual, expected, *, jnp):
+def _mean_abs(actual, expected, *, batch_shape: tuple[int, ...], jnp):
     delta = jnp.asarray(actual) - jnp.asarray(expected)
-    return jnp.mean(jnp.abs(delta))
+    return _mean_feature_axes(jnp.abs(delta), batch_shape=batch_shape, jnp=jnp)
 
 
 def _weight(weights: JaxScoreWeights, *names: str) -> float:
     for name in names:
         if name in weights.terms:
-            return float(weights.terms[name])
+            return weights.terms[name]
     return 0.0
 
 
+def _mean_feature_axes(value, *, batch_shape: tuple[int, ...], jnp):
+    value = jnp.asarray(value)
+    _validate_batch_prefix(value, batch_shape)
+    reduce_axes = tuple(range(len(batch_shape), len(value.shape)))
+    if not reduce_axes:
+        return value
+    if len(reduce_axes) == len(value.shape):
+        return jnp.mean(value)
+    return jnp.mean(value, axis=reduce_axes)
+
+
+def _ensure_accumulator(accumulator, *, root, jnp):
+    if accumulator:
+        missing = [name for name in ACCUMULATOR_KEYS if name not in accumulator]
+        if missing:
+            raise KeyError(f"Missing score accumulator keys: {missing}")
+        return dict(accumulator)
+    return init_score_accumulator(_leading_shape(root, jnp=jnp), jnp=jnp)
+
+
+def _leading_shape(value, *, jnp) -> tuple[int, ...]:
+    arr = jnp.asarray(value)
+    if len(arr.shape) <= 1:
+        return ()
+    return tuple(int(dim) for dim in arr.shape[:-1])
+
+
+def _validate_batch_prefix(value, batch_shape: tuple[int, ...]) -> None:
+    actual = tuple(int(dim) for dim in value.shape[: len(batch_shape)])
+    if actual != batch_shape:
+        raise ValueError(f"Expected batch shape {batch_shape}, got prefix {actual}")
+
+
+def _shape_tuple(value) -> tuple[int, ...]:
+    if isinstance(value, int):
+        return (int(value),)
+    return tuple(int(dim) for dim in value)
+
+
 __all__ = [
+    "ACCUMULATOR_KEYS",
     "JaxScoreWeights",
     "finalize_score",
+    "init_score_accumulator",
     "score_step",
 ]

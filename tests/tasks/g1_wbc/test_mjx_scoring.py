@@ -3,8 +3,10 @@ import unittest
 import numpy as np
 
 from spider.tasks.g1_wbc.mjx_scoring import (
+    ACCUMULATOR_KEYS,
     JaxScoreWeights,
     finalize_score,
+    init_score_accumulator,
     score_step,
 )
 
@@ -15,8 +17,12 @@ class _NumpyJnp:
         return np.asarray(value, dtype=np.float32)
 
     @staticmethod
-    def mean(value):
-        return np.mean(value)
+    def zeros(shape):
+        return np.zeros(shape, dtype=np.float32)
+
+    @staticmethod
+    def mean(value, axis=None):
+        return np.mean(value, axis=axis)
 
     @staticmethod
     def abs(value):
@@ -134,9 +140,10 @@ class MjxScoringTest(unittest.TestCase):
         reference_state = _reference_state()
         first = _step_state(offset=0.0)
         second = _step_state(offset=0.3)
+        accumulator = init_score_accumulator((), jnp=_NumpyJnp)
 
         accumulator = score_step(
-            {},
+            accumulator,
             first,
             reference_state,
             JaxScoreWeights({"root_pos": 1.0}),
@@ -161,6 +168,60 @@ class MjxScoringTest(unittest.TestCase):
             places=6,
         )
         self.assertAlmostEqual(float(metrics["score"]), -expected_root, places=6)
+
+    def test_batched_score_keeps_sample_axis(self) -> None:
+        first = _step_state(offset=0.0)
+        second = _step_state(offset=2.0)
+        batched_step = {
+            name: np.stack([first[name], second[name]], axis=0)
+            for name in first
+        }
+        ref = _reference_state()
+        batched_ref = {
+            name: np.stack([ref[name], ref[name]], axis=0)
+            for name in ref
+        }
+        accumulator = init_score_accumulator((2,), jnp=_NumpyJnp)
+
+        accumulator = score_step(
+            accumulator,
+            batched_step,
+            batched_ref,
+            JaxScoreWeights({"root_pos": 1.0}),
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        self.assertEqual(metrics["score"].shape, (2,))
+        expected = np.array(
+            [
+                _expected_terms(first, ref)["root_pos_error_mean"],
+                _expected_terms(second, ref)["root_pos_error_mean"],
+            ],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(metrics["root_pos_error_mean"], expected)
+        np.testing.assert_allclose(metrics["score"], -expected)
+
+    def test_score_accumulator_has_stable_keys(self) -> None:
+        accumulator = init_score_accumulator((2,), jnp=_NumpyJnp)
+
+        self.assertEqual(tuple(accumulator), ACCUMULATOR_KEYS)
+        for value in accumulator.values():
+            self.assertEqual(value.shape, (2,))
+
+    def test_score_step_rejects_missing_accumulator_key(self) -> None:
+        accumulator = init_score_accumulator((), jnp=_NumpyJnp)
+        del accumulator["joint_acc_sum"]
+
+        with self.assertRaisesRegex(KeyError, "joint_acc_sum"):
+            score_step(
+                accumulator,
+                _step_state(),
+                _reference_state(),
+                JaxScoreWeights({"root_pos": 1.0}),
+                jnp=_NumpyJnp,
+            )
 
     def test_larger_errors_lower_total_score(self) -> None:
         reference_state = _reference_state()
