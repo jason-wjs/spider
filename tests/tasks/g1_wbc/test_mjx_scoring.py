@@ -283,6 +283,19 @@ class MjxScoringTest(unittest.TestCase):
         self.assertEqual(float(metrics["score"]), 0.0)
         self.assertEqual(float(metrics["root_pos_error_mean"]), 0.0)
 
+    def test_score_weights_are_static_jax_pytree_node(self) -> None:
+        try:
+            import jax
+        except Exception as exc:
+            self.skipTest(f"JAX is not available: {exc}")
+
+        weights = JaxScoreWeights({"root_pos": 1.0, "control_delta": 0.5})
+
+        leaves, treedef = jax.tree_util.tree_flatten(weights)
+
+        self.assertEqual(leaves, [])
+        self.assertIn("JaxScoreWeights", str(treedef))
+
 
 if __name__ == "__main__":
     unittest.main()

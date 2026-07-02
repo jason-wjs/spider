@@ -4,10 +4,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+try:
+    from jax import tree_util as _jax_tree_util
+except Exception:
+    _jax_tree_util = None
 
+
+def _register_pytree_node_class(cls):
+    if _jax_tree_util is None:
+        return cls
+    return _jax_tree_util.register_pytree_node_class(cls)
+
+
+@_register_pytree_node_class
 @dataclass(frozen=True)
 class JaxScoreWeights:
     terms: dict[str, float]
+
+    def tree_flatten(self):
+        return (), tuple(
+            sorted((name, float(value)) for name, value in self.terms.items())
+        )
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del children
+        return cls(dict(aux_data))
 
 
 ACCUMULATOR_KEYS = (

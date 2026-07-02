@@ -9,12 +9,33 @@ from torch import nn
 
 from spider.tasks.g1_wbc.policy import WbcActor
 
+try:
+    from jax import tree_util as _jax_tree_util
+except Exception:
+    _jax_tree_util = None
 
+
+def _register_pytree_node_class(cls):
+    if _jax_tree_util is None:
+        return cls
+    return _jax_tree_util.register_pytree_node_class(cls)
+
+
+@_register_pytree_node_class
 @dataclass(frozen=True)
 class JaxActorParams:
     obs_mean: Any
     obs_std: Any
     layers: tuple[tuple[Any, Any], ...]
+
+    def tree_flatten(self):
+        return (self.obs_mean, self.obs_std, self.layers), None
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        del aux_data
+        obs_mean, obs_std, layers = children
+        return cls(obs_mean=obs_mean, obs_std=obs_std, layers=layers)
 
 
 def convert_wbc_actor_to_jax(actor: WbcActor, *, jnp) -> JaxActorParams:

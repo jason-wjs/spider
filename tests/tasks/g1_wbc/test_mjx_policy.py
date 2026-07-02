@@ -78,6 +78,23 @@ class MjxPolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "expected Linear"):
             convert_wbc_actor_to_jax(actor, jnp=_NumpyJnp)
 
+    def test_actor_params_are_jax_pytree_leaves(self) -> None:
+        try:
+            import jax
+            import jax.numpy as jnp
+        except Exception as exc:
+            self.skipTest(f"JAX is not available: {exc}")
+
+        params = convert_wbc_actor_to_jax(
+            WbcActor(input_dim=2, hidden_dims=(3,), output_dim=1),
+            jnp=jnp,
+        )
+
+        leaves, treedef = jax.tree_util.tree_flatten(params)
+
+        self.assertEqual(len(leaves), 6)
+        self.assertIn("JaxActorParams", str(treedef))
+
 
 if __name__ == "__main__":
     unittest.main()
