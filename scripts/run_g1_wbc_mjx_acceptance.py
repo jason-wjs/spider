@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shlex
 import subprocess
 import sys
@@ -14,6 +15,9 @@ from typing import Any
 
 from spider.tasks.g1_wbc.acceptance import (
     MjxQualityPolicy,
+    PRIMARY_ERROR_METRICS,
+    REQUIRED_ARTIFACT_FIELDS,
+    SpeedGateResult,
     evaluate_baseline_group,
     evaluate_mjx_group,
     evaluate_speed_gate,
@@ -61,35 +65,39 @@ def build_acceptance_plan(
 ) -> list[PlannedAcceptanceRun]:
     output_root = args.output_dir.expanduser().resolve()
     rows = manifest.get("rows", [])
+    matrix = _baseline_run_matrix(rows)
     plan: list[PlannedAcceptanceRun] = []
-    for row in rows:
-        motion = str(row["motion_name"])
-        seed = int(row["seed"])
-        if motion not in MOTIONS or seed not in SEEDS:
-            continue
-        output_dir = output_root / motion / f"seed_{seed}" / "mjx"
-        replay_output_dir = output_root / motion / f"seed_{seed}" / "replay"
-        mjx_argv = _mjx_argv_from_baseline_row(
-            row,
-            args.python_executable,
-            output_dir,
-            args.device,
-        )
-        replay_argv = _replay_argv_from_mjx(row, mjx_argv, output_dir, replay_output_dir)
-        plan.append(
-            PlannedAcceptanceRun(
-                motion=motion,
-                seed=seed,
-                backend="mjx",
-                replay_backend="mujoco_warp",
-                output_dir=str(output_dir),
-                replay_output_dir=str(replay_output_dir),
-                mjx_argv=mjx_argv,
-                replay_argv=replay_argv,
-                mjx_command_text=shlex.join(mjx_argv),
-                replay_command_text=shlex.join(replay_argv),
+    for motion in MOTIONS:
+        for seed in SEEDS:
+            row = matrix[(motion, seed)]
+            output_dir = output_root / motion / f"seed_{seed}" / "mjx"
+            replay_output_dir = output_root / motion / f"seed_{seed}" / "replay"
+            mjx_argv = _mjx_argv_from_baseline_row(
+                row,
+                args.python_executable,
+                output_dir,
+                args.device,
             )
-        )
+            replay_argv = _replay_argv_from_mjx(
+                row,
+                mjx_argv,
+                output_dir,
+                replay_output_dir,
+            )
+            plan.append(
+                PlannedAcceptanceRun(
+                    motion=motion,
+                    seed=seed,
+                    backend="mjx",
+                    replay_backend="mujoco_warp",
+                    output_dir=str(output_dir),
+                    replay_output_dir=str(replay_output_dir),
+                    mjx_argv=mjx_argv,
+                    replay_argv=replay_argv,
+                    mjx_command_text=shlex.join(mjx_argv),
+                    replay_command_text=shlex.join(replay_argv),
+                )
+            )
     return plan
 
 
@@ -170,6 +178,31 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if bool(report["passed"]) else 1
 
 
+def _baseline_run_matrix(rows: Any) -> dict[tuple[str, int], dict[str, Any]]:
+    expected = {(motion, seed) for motion in MOTIONS for seed in SEEDS}
+    matrix: dict[tuple[str, int], dict[str, Any]] = {}
+    duplicates: list[tuple[str, int]] = []
+    for row in rows if isinstance(rows, list) else []:
+        motion = str(row.get("motion_name"))
+        try:
+            seed = int(row.get("seed"))
+        except (TypeError, ValueError):
+            continue
+        key = (motion, seed)
+        if key not in expected:
+            continue
+        if key in matrix:
+            duplicates.append(key)
+        matrix[key] = row
+    missing = sorted(expected - set(matrix))
+    if missing or duplicates:
+        raise ValueError(
+            "Baseline manifest run matrix must contain exactly one row for "
+            f"{MOTIONS} x seeds {SEEDS}; missing={missing}, duplicates={duplicates}."
+        )
+    return matrix
+
+
 def _mjx_argv_from_baseline_row(
     row: dict[str, Any],
     python_executable: str,
@@ -227,10 +260,11 @@ def _build_report(
             baseline_gate.envelope,
             MjxQualityPolicy.for_motion(motion),
         )
-        replay_failures = tuple(
-            f"seed_{row.get('seed')}"
-            for row in replay_group
-            if row.get("status") != "ok" or row.get("returncode") not in (0, None)
+        replay_failures = _row_evidence_failures(
+            replay_group,
+            timing_failure="replay_steady_state_wall_time",
+            artifact_fields=("metrics_json", "rollout_npz"),
+            require_mpc_fields=False,
         )
         replay_passed = not replay_failures
         speed_gate = _speed_gate_for_motion(
@@ -264,9 +298,13 @@ def _build_report(
         "schema_version": 1,
         "backend": "mjx_canonical",
         "baseline_manifest": str(baseline_manifest),
+        "min_speedup": float(min_speedup),
         "motion_results": motion_results,
         "replay_results": replay_results,
         "speed_results": speed_results,
+        "baseline_rows": baseline_rows,
+        "mjx_rows": mjx_rows,
+        "replay_rows": replay_rows,
         "passed": passed,
     }
 
@@ -277,26 +315,53 @@ def _speed_gate_for_motion(
     *,
     min_speedup: float,
 ):
-    return evaluate_speed_gate(
-        baseline_wall_time_sec=_mean_timing(baseline_rows, "steady_state_wall_time_sec"),
-        mjx_steady_state_wall_time_sec=_mean_timing(
-            mjx_rows,
-            "steady_state_wall_time_sec",
-        ),
+    baseline_time, baseline_failures = _mean_timing_strict(
+        baseline_rows,
+        "steady_state_wall_time_sec",
+        expected_count=len(SEEDS),
+        failure="baseline_wall_time",
+    )
+    mjx_time, mjx_failures = _mean_timing_strict(
+        mjx_rows,
+        "steady_state_wall_time_sec",
+        expected_count=len(SEEDS),
+        failure="mjx_steady_state_wall_time",
+    )
+    gate = evaluate_speed_gate(
+        baseline_wall_time_sec=baseline_time,
+        mjx_steady_state_wall_time_sec=mjx_time,
         min_speedup=min_speedup,
     )
+    failures = _unique((*baseline_failures, *mjx_failures, *gate.failures))
+    if failures:
+        return SpeedGateResult(False, gate.speedup, failures)
+    return gate
 
 
-def _mean_timing(rows: list[dict[str, Any]], name: str) -> float:
+def _mean_timing_strict(
+    rows: list[dict[str, Any]],
+    name: str,
+    *,
+    expected_count: int,
+    failure: str,
+) -> tuple[float, tuple[str, ...]]:
     values = []
+    failures: list[str] = []
     for row in rows:
-        mpc = row.get("mpc", {})
-        value = row.get(name, mpc.get(name))
-        if isinstance(value, (int, float)):
+        value = _timing_value(row, name)
+        if (
+            isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value) > 0.0
+        ):
             values.append(float(value))
-    if not values:
-        return float("nan")
-    return sum(values) / len(values)
+        else:
+            failures.append(failure)
+    if len(values) != int(expected_count):
+        failures.append(failure)
+    if failures:
+        return float("nan"), _unique(failures)
+    return sum(values) / len(values), ()
 
 
 def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
@@ -306,11 +371,92 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
     return {
         "metrics": metrics,
         "mpc": mpc,
-        "mpc_accepted": bool(mpc.get("accepted", True)),
-        "accepted_windows": int(mpc.get("accepted_windows", mpc.get("num_windows", -1))),
-        "mpc_used_baseline_fallback": bool(mpc.get("used_baseline_fallback", False)),
-        "num_steps": int(metrics.get("num_steps", -1)),
+        "mpc_accepted": mpc.get("accepted") is True,
+        "accepted_windows": _safe_int(
+            mpc.get("accepted_windows", mpc.get("num_windows", -1))
+        ),
+        "mpc_used_baseline_fallback": mpc.get("used_baseline_fallback") is not False,
+        "num_steps": _safe_int(metrics.get("num_steps", -1)),
     }
+
+
+def _row_evidence_failures(
+    rows: list[dict[str, Any]],
+    *,
+    timing_failure: str | None = None,
+    artifact_fields: tuple[str, ...] = REQUIRED_ARTIFACT_FIELDS,
+    require_mpc_fields: bool = True,
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    if len(rows) != len(SEEDS):
+        failures.append("repeat_count")
+    seen: set[int] = set()
+    for row in rows:
+        seed = _safe_int(row.get("seed"))
+        if seed not in SEEDS:
+            failures.append("seed")
+        elif seed in seen:
+            failures.append("seed")
+        else:
+            seen.add(seed)
+        if row.get("status") != "ok":
+            failures.append("status")
+        if row.get("returncode") != 0:
+            failures.append("returncode")
+        metrics = row.get("metrics", {})
+        if not isinstance(metrics, dict):
+            failures.append("metrics")
+            metrics = {}
+        for metric in ("success", "score", *PRIMARY_ERROR_METRICS):
+            if not _has_valid_metric(metrics, metric):
+                failures.append(f"{metric}_missing")
+        if require_mpc_fields:
+            if row.get("mpc_accepted") is not True:
+                failures.append("mpc_accepted")
+            if _safe_int(row.get("accepted_windows")) != 40:
+                failures.append("accepted_windows")
+            if row.get("mpc_used_baseline_fallback") is not False:
+                failures.append("baseline_fallback")
+        artifacts = row.get("artifacts", {})
+        for key in artifact_fields:
+            if not isinstance(artifacts, dict) or not artifacts.get(key):
+                failures.append(key)
+        if timing_failure is not None:
+            value = _timing_value(row, "steady_state_wall_time_sec")
+            if not (
+                isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                and float(value) > 0.0
+            ):
+                failures.append(timing_failure)
+    missing = set(SEEDS) - seen
+    if missing:
+        failures.append("seed")
+    return _unique(failures)
+
+
+def _timing_value(row: dict[str, Any], name: str):
+    mpc = row.get("mpc", {})
+    return row.get(name, mpc.get(name) if isinstance(mpc, dict) else None)
+
+
+def _has_valid_metric(metrics: dict[str, Any], name: str) -> bool:
+    value = metrics.get(name)
+    if isinstance(value, bool):
+        return True
+    return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _safe_int(value) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if float(parsed) == float(value) else None
+
+
+def _unique(values) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(str(value) for value in values))
 
 
 def _attach_artifacts(row: dict[str, Any], output_dir: str | Path) -> dict[str, Any]:
