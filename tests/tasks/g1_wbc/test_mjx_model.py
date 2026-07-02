@@ -76,8 +76,10 @@ class MjxModelBundleTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown MJX contact profile"):
             build_mjx_model_bundle(profile_name="missing")
 
-    def test_reference_profile_runtime_is_not_parity_eligible(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not eligible for parity"):
+    def test_reference_profile_cannot_bind_to_wxy_bundle(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be bound"):
+            build_mjx_model_bundle(profile_name="hgpt_track_reference")
+        with self.assertRaisesRegex(ValueError, "cannot be bound"):
             build_mjx_model_bundle(
                 profile_name="hgpt_track_reference",
                 require_runtime=True,

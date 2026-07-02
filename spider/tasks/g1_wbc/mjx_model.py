@@ -41,9 +41,9 @@ def build_mjx_model_bundle(
     """Build a CPU MuJoCo model bundle and optionally put it on MJX."""
 
     profile = get_contact_profile(profile_name)
-    if require_runtime and not profile.eligible_for_parity:
+    if not profile.eligible_for_parity:
         raise ValueError(
-            f"Contact profile {profile.name!r} is not eligible for parity evaluation."
+            f"Contact profile {profile.name!r} cannot be bound to the WXY model bundle."
         )
     cpu_model = load_wbc_model(model_path)
     _assert_model_dims(cpu_model)
@@ -122,11 +122,9 @@ def _assert_required_names(
         _require_name(maps["joint"], f"robot/{joint_name}", "joint")
         _require_name(maps["actuator"], f"robot/{joint_name}", "actuator")
     for geom_name in profile.foot_collision_geom_names:
-        if profile.eligible_for_parity:
-            _require_name(maps["geom"], geom_name, "geom")
+        _require_name(maps["geom"], geom_name, "geom")
     for floor_geom_name in profile.floor_geom_names:
-        if profile.eligible_for_parity:
-            _require_name(maps["geom"], floor_geom_name, "geom")
+        _require_name(maps["geom"], floor_geom_name, "geom")
     for geom_a, geom_b in profile.explicit_pair_names:
         _require_name(maps["geom"], geom_a, "geom")
         _require_name(maps["geom"], geom_b, "geom")
