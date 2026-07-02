@@ -156,6 +156,48 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertFalse(row["mpc_used_baseline_fallback"])
         self.assertEqual(row["num_steps"], 800)
 
+    def test_main_writes_ok_status_for_successful_real_run(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_root = Path(tmp_dir) / "stage0"
+
+            def fake_run_command(command):
+                output_dir = Path(command.output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                for name in ("metrics.json", "rollout.npz", "mpc_command.npz"):
+                    (output_dir / name).write_text("{}")
+                return {
+                    "returncode": 0,
+                    "stdout": "{}",
+                    "stderr": "",
+                    "metrics": {"num_steps": 800, "success": True, "score": -2.0},
+                    "mpc_accepted": True,
+                    "accepted_windows": 40,
+                    "mpc_used_baseline_fallback": False,
+                    "num_steps": 800,
+                }
+
+            argv = [
+                "--jump-motion",
+                "/tmp/missing/jump.npz",
+                "--walk-motion",
+                "/tmp/missing/walk.npz",
+                "--checkpoint",
+                "model.pt",
+                "--reward-weights",
+                "/tmp/missing/reward.json",
+                "--output-dir",
+                str(output_root),
+            ]
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(argv)
+
+            manifest = json.loads((output_root / "baseline_manifest.json").read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual({row["status"] for row in manifest["rows"]}, {"ok"})
+        self.assertTrue(all(row["artifacts"]["metrics_json"] for row in manifest["rows"]))
+
 
 if __name__ == "__main__":
     unittest.main()

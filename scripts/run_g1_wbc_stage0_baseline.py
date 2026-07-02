@@ -238,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(command.output_dir).mkdir(parents=True, exist_ok=True)
             execution = run_command(command)
             row.update(execution)
-            row["status"] = "succeeded" if execution["returncode"] == 0 else "failed"
+            row["status"] = "ok" if execution["returncode"] == 0 else "failed"
             if execution["returncode"] != 0 and worst_returncode == 0:
                 worst_returncode = int(execution["returncode"])
         rows.append(attach_artifact_paths(row))
