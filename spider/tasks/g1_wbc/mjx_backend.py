@@ -24,6 +24,9 @@ from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion
 from spider.tasks.g1_wbc.result_types import G1WbcMpcRun, G1WbcSpiderResult
 
 
+_JIT_WARMUP_KEY_FOLD = 2_147_483_647
+
+
 def run_g1_wbc_mjx_mpc(
     *,
     spider_config,
@@ -78,11 +81,11 @@ def run_g1_wbc_mjx_mpc(
         model_factory = _default_model_factory
     model_bundle = model_factory(profile_name="wxy_parity", require_runtime=True)
     actor_params = policy_converter(actor, jnp=runtime.jnp)
-    compile_init_wall_time_sec = time.perf_counter() - compile_start
 
     total_steps = int(total_steps)
     horizon = int(spider_config.horizon_steps)
     control_steps = int(spider_config.ctrl_steps)
+    window_config = _window_config_from_spider(spider_config)
     use_jax_controls = optimizer is optimize_window and _supports_jax_controls(runtime)
     controls = (
         _initial_jax_controls(horizon, runtime=runtime)
@@ -96,6 +99,34 @@ def run_g1_wbc_mjx_mpc(
     best_scores: list[Any] = []
     sim_step = 0
     accepted_windows = 0
+    jit_warmup_enabled = False
+    jit_warmup_wall_time_sec = 0.0
+    if use_jax_controls:
+        warmup_start = time.perf_counter()
+        warmup_reference = _window_reference(
+            rollout_reference_factory,
+            start=0,
+            motion=motion,
+            controls=controls,
+            actor_params=actor_params,
+            model_bundle=model_bundle,
+            runtime=runtime,
+        )
+        warmup_result = optimizer(
+            config=window_config,
+            state={"rollout_fn": rollout_scorer or _placeholder_rollout_scores},
+            controls=controls,
+            reference=warmup_reference,
+            actor_params=actor_params,
+            model_bundle=model_bundle,
+            key=(int(seed), _JIT_WARMUP_KEY_FOLD),
+            runtime=runtime,
+        )
+        _block_window_result_until_ready(warmup_result)
+        jit_warmup_wall_time_sec = time.perf_counter() - warmup_start
+        jit_warmup_enabled = True
+        del warmup_result, warmup_reference
+    compile_init_wall_time_sec = time.perf_counter() - compile_start
     steady_start = time.perf_counter()
     while sim_step < total_steps:
         window_reference = _window_reference(
@@ -108,7 +139,7 @@ def run_g1_wbc_mjx_mpc(
             runtime=runtime,
         )
         window_result = optimizer(
-            config=_window_config_from_spider(spider_config),
+            config=window_config,
             state={"rollout_fn": rollout_scorer or _placeholder_rollout_scores},
             controls=controls,
             reference=window_reference,
@@ -218,6 +249,8 @@ def run_g1_wbc_mjx_mpc(
             "accepted_windows": accepted_windows,
             "num_windows": len(infos),
             "compile_init_wall_time_sec": compile_init_wall_time_sec,
+            "jit_warmup_enabled": jit_warmup_enabled,
+            "jit_warmup_wall_time_sec": jit_warmup_wall_time_sec,
             "steady_state_wall_time_sec": steady_state_wall_time_sec,
             "runtime_visible_devices": tuple(
                 getattr(getattr(runtime, "status", None), "visible_devices", ())
@@ -242,6 +275,19 @@ def _window_config_from_spider(spider_config) -> JaxWindowOptimizerConfig:
 def _placeholder_rollout_scores(samples, reference, actor_params, model_bundle):
     del reference, actor_params, model_bundle
     return samples[..., 0, 0]
+
+
+def _block_window_result_until_ready(window_result) -> None:
+    _block_until_ready(getattr(window_result, "updated_controls", None))
+    _block_until_ready(getattr(window_result, "execute_chunk", None))
+    for value in getattr(window_result, "info", {}).values():
+        _block_until_ready(value)
+
+
+def _block_until_ready(value) -> None:
+    block = getattr(value, "block_until_ready", None)
+    if callable(block):
+        block()
 
 
 def _default_model_factory(**kwargs):

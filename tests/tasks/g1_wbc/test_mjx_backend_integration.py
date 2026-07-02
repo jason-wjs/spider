@@ -292,6 +292,48 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertGreater(len(calls), 0)
         self.assertEqual(calls[0], (4, 40, QPOS_DIM - 1))
 
+    def test_default_optimizer_warms_once_before_timed_windows(self) -> None:
+        calls: list[dict[str, object]] = []
+
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del actor_params, model_bundle
+            sample_array = np.asarray(samples, dtype=np.float32)
+            calls.append(
+                {
+                    "shape": tuple(int(dim) for dim in sample_array.shape),
+                    "start": int(reference["start"]),
+                    "first_candidate_max_abs": float(np.max(np.abs(sample_array[0]))),
+                }
+            )
+            return -np.sum(sample_array**2, axis=(1, 2))
+
+        result = _run_with_fakes(
+            optimizer=None,
+            rollout_factory=_fake_rollout_result,
+            runtime=_FakeOptimizerRuntime(),
+            rollout_scorer=rollout_scorer,
+        )
+
+        self.assertTrue(result.metadata["accepted"])
+        self.assertEqual(result.metadata["num_windows"], 40)
+        self.assertEqual(result.metadata["accepted_windows"], 40)
+        self.assertEqual(result.result.num_windows, 40)
+        self.assertEqual(len(result.result.infos), 40)
+        self.assertEqual(len(result.receding.infos), 40)
+        self.assertEqual(result.result.scores.shape, (40,))
+        self.assertEqual(
+            [info["sim_step"] for info in result.result.infos],
+            list(range(0, 800, 20)),
+        )
+        self.assertEqual(len(calls), result.metadata["num_windows"] + 1)
+        self.assertEqual(calls[0]["shape"], (4, 40, QPOS_DIM - 1))
+        self.assertEqual(calls[0]["start"], 0)
+        self.assertEqual(calls[1]["start"], 0)
+        self.assertEqual(calls[0]["first_candidate_max_abs"], 0.0)
+        self.assertEqual(calls[1]["first_candidate_max_abs"], 0.0)
+        self.assertTrue(result.metadata["jit_warmup_enabled"])
+        self.assertGreaterEqual(result.metadata["jit_warmup_wall_time_sec"], 0.0)
+
     def test_default_optimizer_uses_explicit_rollout_reference_factory(self) -> None:
         references: list[dict[str, object]] = []
 
@@ -695,6 +737,31 @@ class MjxBackendConversionTest(unittest.TestCase):
         self.assertEqual(source.array_calls, 0)
         self.assertEqual(tuple(chunk.shape), (21, QPOS_DIM - 1))
         self.assertTrue(torch.allclose(chunk, torch.ones_like(chunk)))
+
+    def test_block_window_result_until_ready_blocks_outputs_and_info(self) -> None:
+        class Blockable:
+            def __init__(self) -> None:
+                self.blocked = False
+
+            def block_until_ready(self):
+                self.blocked = True
+                return self
+
+        updated_controls = Blockable()
+        execute_chunk = Blockable()
+        best_score = Blockable()
+
+        mjx_backend_module._block_window_result_until_ready(
+            SimpleNamespace(
+                updated_controls=updated_controls,
+                execute_chunk=execute_chunk,
+                info={"best_score": best_score},
+            )
+        )
+
+        self.assertTrue(updated_controls.blocked)
+        self.assertTrue(execute_chunk.blocked)
+        self.assertTrue(best_score.blocked)
 
 
 def _fake_model_bundle(*, profile_name: str = "wxy_parity"):
