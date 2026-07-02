@@ -252,6 +252,65 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertFalse(report["replay_results"]["jump"]["passed"])
         self.assertFalse(report["replay_results"]["walk"]["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+
+    def test_replay_quality_regression_classifies_as_parity_failure(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                metrics = _metrics(success=True)
+                if is_replay:
+                    metrics["root_pos_error_mean"] = 1.0
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": metrics,
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row["command_wall_time_sec"] = 1.0
+                else:
+                    row.update(
+                        {
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "steady_state_wall_time_sec": 1.0,
+                        }
+                    )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "parity_failure")
+        self.assertIn("root_pos_error_mean", report["replay_results"]["jump"]["failures"])
 
     def test_dry_run_writes_plan_but_fails_gates(self) -> None:
         runner = load_runner()
@@ -478,6 +537,62 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             "mjx_jit_warmup_wall_time",
             report["motion_results"]["jump"]["mjx_failures"],
         )
+        self.assertEqual(report["classification"], "invalid_benchmark")
+
+    def test_speed_shortfall_classifies_as_speed_regression(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row["command_wall_time_sec"] = 1.0
+                else:
+                    row.update(
+                        {
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "steady_state_wall_time_sec": 20.0,
+                        }
+                    )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "speed_regression")
+        self.assertIn("speedup", report["speed_results"]["jump"]["failures"])
 
     def test_main_returns_zero_when_all_gates_have_complete_evidence(self) -> None:
         runner = load_runner()
@@ -535,6 +650,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(len(report["planned_runs"]), 6)
         self.assertEqual(len(report["mjx_rows"]), 6)
         self.assertEqual(len(report["replay_rows"]), 6)
+        self.assertEqual(report["classification"], "pass_h100_milestone")
 
     def test_metrics_parser_extracts_compile_and_warmup_timing(self) -> None:
         runner = load_runner()

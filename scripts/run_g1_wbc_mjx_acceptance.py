@@ -281,6 +281,16 @@ def _build_report(
             artifact_fields=("metrics_json", "rollout_npz"),
             require_mpc_fields=False,
         )
+        replay_failures = _unique(
+            (
+                *replay_failures,
+                *_replay_quality_failures(
+                    motion,
+                    replay_group,
+                    baseline_gate.envelope,
+                ),
+            )
+        )
         replay_passed = not replay_failures
         speed_gate = _speed_gate_for_motion(
             baseline_group,
@@ -309,10 +319,17 @@ def _build_report(
             and replay_passed
             and speed_gate.passed
         )
+    classification = _classify_report(
+        motion_results=motion_results,
+        replay_results=replay_results,
+        speed_results=speed_results,
+        passed=passed,
+    )
     return {
         "schema_version": 1,
         "backend": "mjx_canonical",
         "baseline_manifest": str(baseline_manifest),
+        "classification": classification,
         "min_speedup": float(min_speedup),
         "motion_results": motion_results,
         "replay_results": replay_results,
@@ -322,6 +339,110 @@ def _build_report(
         "replay_rows": replay_rows,
         "passed": passed,
     }
+
+
+def _classify_report(
+    *,
+    motion_results: dict[str, dict[str, Any]],
+    replay_results: dict[str, dict[str, Any]],
+    speed_results: dict[str, dict[str, Any]],
+    passed: bool,
+) -> str:
+    if passed:
+        return "pass_h100_milestone"
+    if _has_invalid_benchmark_failure(motion_results, replay_results, speed_results):
+        return "invalid_benchmark"
+    if any(not result.get("passed") for result in replay_results.values()):
+        return "parity_failure"
+    if any(
+        not result.get("baseline_passed") or not result.get("mjx_passed")
+        for result in motion_results.values()
+    ):
+        return "quality_regression"
+    if any(not result.get("passed") for result in speed_results.values()):
+        return "speed_regression"
+    return "invalid_benchmark"
+
+
+def _replay_quality_failures(
+    motion: str,
+    rows: list[dict[str, Any]],
+    baseline_envelope: dict[str, dict[str, float]],
+) -> tuple[str, ...]:
+    if len(rows) != len(SEEDS):
+        return ()
+    quality_rows = [_replay_quality_row(row) for row in rows]
+    gate = evaluate_mjx_group(
+        motion,
+        quality_rows,
+        baseline_envelope,
+        MjxQualityPolicy.for_motion(motion),
+    )
+    return tuple(
+        failure
+        for failure in gate.failures
+        if failure
+        not in {
+            "accepted_windows",
+            "baseline_fallback",
+            "mpc_accepted",
+            "mpc_command_npz",
+        }
+    )
+
+
+def _replay_quality_row(row: dict[str, Any]) -> dict[str, Any]:
+    quality_row = dict(row)
+    artifacts = dict(quality_row.get("artifacts", {}) or {})
+    artifacts.setdefault("mpc_command_npz", "replay_uses_mjx_command")
+    quality_row.update(
+        {
+            "mpc_accepted": True,
+            "accepted_windows": 40,
+            "mpc_used_baseline_fallback": False,
+            "artifacts": artifacts,
+        }
+    )
+    return quality_row
+
+
+def _has_invalid_benchmark_failure(
+    motion_results: dict[str, dict[str, Any]],
+    replay_results: dict[str, dict[str, Any]],
+    speed_results: dict[str, dict[str, Any]],
+) -> bool:
+    invalid_markers = {
+        "accepted_windows",
+        "baseline_fallback",
+        "baseline_wall_time",
+        "compile_init_wall_time",
+        "fallback",
+        "metrics_json",
+        "mjx_compile_init_wall_time",
+        "mjx_jit_warmup_enabled",
+        "mjx_jit_warmup_wall_time",
+        "mjx_steady_state_wall_time",
+        "mpc_accepted",
+        "mpc_command_npz",
+        "num_steps",
+        "repeat_count",
+        "returncode",
+        "rollout_npz",
+        "seed",
+        "status",
+    }
+    for result in motion_results.values():
+        failures = (*result.get("baseline_failures", ()), *result.get("mjx_failures", ()))
+        if any(failure in invalid_markers for failure in failures):
+            return True
+    for result in replay_results.values():
+        if any(failure in invalid_markers for failure in result.get("failures", ())):
+            return True
+    for result in speed_results.values():
+        failures = result.get("failures", ())
+        if any(failure in invalid_markers for failure in failures):
+            return True
+    return False
 
 
 def _speed_gate_for_motion(
