@@ -37,9 +37,12 @@ from spider.tasks.g1_wbc.rollout import (
     run_static_qpos_rollout,
 )
 
+MPC_METHODS = ("g1_wbc_ee", "g1_wbc_joint", "g1_wbc_joint_global")
+
 
 def main() -> None:
     args = _parse_args()
+    _validate_backend_args(args)
     device = args.device
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(f"Requested {device}, but CUDA is not available.")
@@ -124,27 +127,43 @@ def main() -> None:
         assert actor is not None
         spider_config = _build_sampling_config(args)
         reward_weights = _load_method_reward_weights(args)
-        task = G1WbcSamplingTask(
-            motion,
-            actor,
-            config,
-            mode=args.method,
-            reward_weights=reward_weights,
-            execute_rollout_config=execute_config,
-        )
         total_steps = motion.num_frames - 1
         if args.max_steps is not None:
             total_steps = min(total_steps, int(args.max_steps))
-        mpc_run = run_g1_wbc_sampling_mpc(
-            spider_config,
-            task,
-            total_steps=total_steps,
-        )
+        if args.mpc_backend == "mjx":
+            from spider.tasks.g1_wbc.mjx_backend import run_g1_wbc_mjx_mpc
+
+            mpc_run = run_g1_wbc_mjx_mpc(
+                spider_config=spider_config,
+                motion=motion,
+                actor=actor,
+                rollout_config=config,
+                execute_rollout_config=execute_config,
+                method=args.method,
+                reward_weights=reward_weights,
+                total_steps=total_steps,
+                seed=int(args.seed),
+            )
+        else:
+            task = G1WbcSamplingTask(
+                motion,
+                actor,
+                config,
+                mode=args.method,
+                reward_weights=reward_weights,
+                execute_rollout_config=execute_config,
+            )
+            mpc_run = run_g1_wbc_sampling_mpc(
+                spider_config,
+                task,
+                total_steps=total_steps,
+            )
         receding_result = mpc_run.receding
         mpc_result = mpc_run.result
         rollout = mpc_result.rollout
         mpc_payload = {
             **mpc_run.metadata,
+            "mpc_backend": args.mpc_backend,
             "reward_weight_source": (
                 str(Path(args.mpc_reward_weights).expanduser().resolve())
                 if args.mpc_reward_weights is not None
@@ -155,6 +174,13 @@ def main() -> None:
             "final_scores_mean": _safe_tensor_stat(mpc_result.scores, "mean"),
             "final_scores_max": _safe_tensor_stat(mpc_result.scores, "max"),
             "num_windows": mpc_result.num_windows,
+            "accepted": bool(mpc_run.metadata.get("accepted", True)),
+            "accepted_windows": int(
+                mpc_run.metadata.get("accepted_windows", mpc_result.num_windows)
+            ),
+            "used_baseline_fallback": bool(
+                mpc_run.metadata.get("used_baseline_fallback", False)
+            ),
             "serial_execute_warp_launches": bool(args.serial_execute_warp_launches),
         }
     metrics = compute_rollout_metrics(motion, rollout)
@@ -329,6 +355,12 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Save rollout tensors to rollout.npz when output-dir is set.",
     )
+    parser.add_argument(
+        "--mpc-backend",
+        choices=("mujoco_warp", "mjx"),
+        default="mujoco_warp",
+        help="MPC rollout backend. MuJoCo-Warp remains the default.",
+    )
     parser.add_argument("--mpc-samples", type=int, default=None)
     parser.add_argument("--mpc-rollout-batch-size", type=int, default=0)
     parser.add_argument("--mpc-iterations", type=int, default=None)
@@ -417,6 +449,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
+
+
+def _validate_backend_args(args: argparse.Namespace) -> None:
+    if args.mpc_backend == "mjx" and args.method not in MPC_METHODS:
+        raise ValueError("--mpc-backend mjx requires an MPC method.")
 
 
 def _build_sampling_config(args: argparse.Namespace) -> Config:
