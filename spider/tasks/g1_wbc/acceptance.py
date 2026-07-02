@@ -137,14 +137,16 @@ def evaluate_baseline_group(
 ) -> BaselineGroupResult:
     threshold = _baseline_threshold(motion)
     failures = _global_repeat_failures(repeats)
-    required_metrics = ("score", *threshold.metric_mean_max)
+    required_metrics = ("success", "score", *PRIMARY_ERROR_METRICS)
 
     if len(repeats) < 3:
         failures.append("repeat_count")
     failures.extend(_missing_metric_failures(repeats, required_metrics))
 
-    success_count = sum(bool(_metrics(row).get("success")) for row in repeats)
+    success_count = _success_count(repeats)
     if success_count < threshold.success_count_min:
+        failures.append("success_count")
+    if motion == "walk" and success_count != len(repeats):
         failures.append("success_count")
 
     envelope = _build_envelope(repeats)
@@ -178,6 +180,11 @@ def evaluate_mjx_group(
     failures = _global_repeat_failures(repeats)
     required_metrics = ("score", *baseline_envelope.keys())
     failures.extend(_missing_metric_failures(repeats, required_metrics))
+    baseline_success_count = _baseline_success_count(baseline_envelope)
+    if baseline_success_count is None:
+        failures.append("baseline_success_count")
+    elif _success_count(repeats) < baseline_success_count:
+        failures.append("success_count")
 
     if any(bool(row.get("mpc_used_baseline_fallback")) for row in repeats):
         failures.append("fallback")
@@ -321,6 +328,16 @@ def _metrics(row: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _build_envelope(repeats: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, float]]:
     envelope: dict[str, dict[str, float]] = {}
+    success_values = [1.0 if bool(_metrics(row).get("success")) else 0.0 for row in repeats]
+    if success_values:
+        envelope["success"] = {
+            "mean": mean(success_values),
+            "std": pstdev(success_values) if len(success_values) > 1 else 0.0,
+            "min": min(success_values),
+            "max": max(success_values),
+            "median": median(success_values),
+            "count": float(sum(success_values)),
+        }
     for metric in ("score", *PRIMARY_ERROR_METRICS):
         values = _metric_values(repeats, metric)
         if not values:
@@ -354,6 +371,19 @@ def _metric_present(
     baseline_envelope: Mapping[str, Mapping[str, float]],
 ) -> bool:
     return metric in envelope and metric in baseline_envelope
+
+
+def _success_count(repeats: Sequence[Mapping[str, Any]]) -> int:
+    return sum(bool(_metrics(row).get("success")) for row in repeats)
+
+
+def _baseline_success_count(
+    baseline_envelope: Mapping[str, Mapping[str, float]],
+) -> int | None:
+    success = baseline_envelope.get("success")
+    if success is None or "count" not in success:
+        return None
+    return int(round(float(success["count"])))
 
 
 def _promoted_seed(repeats: Sequence[Mapping[str, Any]]) -> int | None:
