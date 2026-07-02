@@ -1,0 +1,84 @@
+"""Explicit opt-in component wiring for G1 WBC MJX rollout scoring."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from spider.tasks.g1_wbc.mjx_physics import (
+    default_action_scale,
+    make_mjx_physics_step_fn,
+)
+from spider.tasks.g1_wbc.mjx_reference import (
+    build_mjx_rollout_reference,
+    default_joint_pos,
+)
+from spider.tasks.g1_wbc.mjx_rollout import make_rollout_scorer
+from spider.tasks.g1_wbc.mjx_scoring import JaxScoreWeights
+
+
+@dataclass(frozen=True)
+class MjxRolloutComponents:
+    """Scorer and reference factory bundle for explicit MJX backend injection."""
+
+    rollout_scorer: Callable[..., Any]
+    rollout_reference_factory: Callable[..., dict[str, object]]
+    physics_step_fn: Callable[..., Any]
+    default_joint_pos: Any
+    action_scale: Any
+
+
+def build_mjx_rollout_components(
+    *,
+    runtime,
+    physics_step_fn: Callable[..., Any] | None = None,
+    score_weights: JaxScoreWeights | Mapping[str, float] | None = None,
+    default_joint_pos_override=None,
+    action_scale_override=None,
+) -> MjxRolloutComponents:
+    """Build explicit MJX rollout scorer/reference components."""
+
+    jnp = runtime.jnp
+    default_pos = (
+        default_joint_pos(jnp=jnp)
+        if default_joint_pos_override is None
+        else jnp.asarray(default_joint_pos_override)
+    )
+    scale = (
+        default_action_scale(jnp=jnp)
+        if action_scale_override is None
+        else jnp.asarray(action_scale_override)
+    )
+    if physics_step_fn is None:
+        physics_step_fn = make_mjx_physics_step_fn(
+            default_joint_pos=default_pos,
+            action_scale=scale,
+        )
+    rollout_scorer = make_rollout_scorer(
+        runtime=runtime,
+        physics_step_fn=physics_step_fn,
+    )
+
+    def rollout_reference_factory(**kwargs):
+        reference_kwargs = dict(kwargs)
+        reference_runtime = reference_kwargs.pop("runtime", runtime)
+        return build_mjx_rollout_reference(
+            runtime=reference_runtime,
+            score_weights=score_weights,
+            **reference_kwargs,
+        )
+
+    return MjxRolloutComponents(
+        rollout_scorer=rollout_scorer,
+        rollout_reference_factory=rollout_reference_factory,
+        physics_step_fn=physics_step_fn,
+        default_joint_pos=default_pos,
+        action_scale=scale,
+    )
+
+
+__all__ = [
+    "MjxRolloutComponents",
+    "build_mjx_rollout_components",
+]

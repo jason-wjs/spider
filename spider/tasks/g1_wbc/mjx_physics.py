@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
+
 from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
+    ACTUATOR_GROUPS,
     DECIMATION,
     MUJOCO_BODY_NAMES,
     MUJOCO_JOINT_NAMES,
@@ -11,6 +14,12 @@ from spider.tasks.g1_wbc.constants import (
     QVEL_DIM,
     TASK_EE_BODY_NAMES,
 )
+
+
+def default_action_scale(*, jnp):
+    """Return WXY raw-action scale factors in MuJoCo joint order."""
+
+    return jnp.asarray(_action_scale_values())
 
 
 def joint_order_to_model_ctrl(bundle, joint_ctrl, *, jnp):
@@ -259,6 +268,28 @@ def _lookup_body_id(bundle, body_name: str) -> int:
     raise ValueError(f"MJX model bundle is missing body {body_name!r}")
 
 
+def _action_scale_values() -> tuple[float, ...]:
+    values: list[float] = []
+    for joint_name in MUJOCO_JOINT_NAMES:
+        joint_kp, _joint_kd, joint_effort, _joint_armature = _match_actuator_group(
+            joint_name
+        )
+        values.append(float(joint_effort) / (4.0 * float(joint_kp)))
+    return tuple(values)
+
+
+def _match_actuator_group(joint_name: str) -> tuple[float, float, float, float]:
+    matches: list[tuple[float, float, float, float]] = []
+    for patterns, kp, kd, effort, armature in ACTUATOR_GROUPS:
+        if any(re.fullmatch(pattern, joint_name) for pattern in patterns):
+            matches.append((float(kp), float(kd), float(effort), float(armature)))
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected one actuator group for {joint_name}, got {len(matches)}"
+        )
+    return matches[0]
+
+
 def _actuator_ids_for_joint_order(bundle) -> tuple[int, ...]:
     name_to_id = getattr(bundle, "actuator_name_to_id", None)
     if name_to_id is None:
@@ -278,6 +309,7 @@ def _lookup_actuator_id(name_to_id: dict[str, int], joint_name: str) -> int:
 
 __all__ = [
     "action_to_model_ctrl",
+    "default_action_scale",
     "joint_order_to_model_ctrl",
     "make_mjx_physics_step_fn",
     "reset_forward_step_smoke",
