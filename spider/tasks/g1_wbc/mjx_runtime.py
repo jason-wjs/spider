@@ -7,13 +7,12 @@ import os
 from dataclasses import dataclass
 from types import ModuleType
 
-import mujoco
-
 
 @dataclass(frozen=True)
 class MjxRuntimeStatus:
     available: bool
     jax_available: bool
+    jnp_available: bool
     mjx_available: bool
     jax_version: str | None
     mujoco_version: str | None
@@ -38,26 +37,56 @@ def probe_mjx_runtime() -> MjxRuntimeStatus:
         for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
         if value.strip()
     )
-    mujoco_version = getattr(mujoco, "__version__", None)
     try:
         jax = importlib.import_module("jax")
     except Exception as exc:
         return MjxRuntimeStatus(
             available=False,
             jax_available=False,
+            jnp_available=False,
             mjx_available=False,
             jax_version=None,
-            mujoco_version=mujoco_version,
+            mujoco_version=None,
             mjx_module=None,
             visible_devices=visible_devices,
             error=str(exc),
         )
+    try:
+        importlib.import_module("jax.numpy")
+    except Exception as exc:
+        return MjxRuntimeStatus(
+            available=False,
+            jax_available=True,
+            jnp_available=False,
+            mjx_available=False,
+            jax_version=getattr(jax, "__version__", None),
+            mujoco_version=None,
+            mjx_module=None,
+            visible_devices=visible_devices,
+            error=str(exc),
+        )
+    try:
+        mujoco = importlib.import_module("mujoco")
+    except Exception as exc:
+        return MjxRuntimeStatus(
+            available=False,
+            jax_available=True,
+            jnp_available=True,
+            mjx_available=False,
+            jax_version=getattr(jax, "__version__", None),
+            mujoco_version=None,
+            mjx_module=None,
+            visible_devices=visible_devices,
+            error=str(exc),
+        )
+    mujoco_version = getattr(mujoco, "__version__", None)
     try:
         mjx = importlib.import_module("mujoco.mjx")
     except Exception as exc:
         return MjxRuntimeStatus(
             available=False,
             jax_available=True,
+            jnp_available=True,
             mjx_available=False,
             jax_version=getattr(jax, "__version__", None),
             mujoco_version=mujoco_version,
@@ -68,6 +97,7 @@ def probe_mjx_runtime() -> MjxRuntimeStatus:
     return MjxRuntimeStatus(
         available=True,
         jax_available=True,
+        jnp_available=True,
         mjx_available=True,
         jax_version=getattr(jax, "__version__", None),
         mujoco_version=mujoco_version,
