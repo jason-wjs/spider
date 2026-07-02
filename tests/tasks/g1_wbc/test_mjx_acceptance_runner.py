@@ -417,7 +417,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertIn("mjx_steady_state_wall_time", report["speed_results"]["jump"]["failures"])
 
-    def test_main_returns_zero_when_all_gates_have_complete_evidence(self) -> None:
+    def test_missing_mjx_compile_or_warmup_timing_fails_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -464,12 +464,104 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
 
             report = json.loads((output_dir / "acceptance_report.json").read_text())
 
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertIn(
+            "mjx_compile_init_wall_time",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+        self.assertIn(
+            "mjx_jit_warmup_enabled",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+        self.assertIn(
+            "mjx_jit_warmup_wall_time",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+
+    def test_main_returns_zero_when_all_gates_have_complete_evidence(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row["command_wall_time_sec"] = 1.0
+                else:
+                    row.update(
+                        {
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "steady_state_wall_time_sec": 1.0,
+                        }
+                    )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
         self.assertEqual(exit_code, 0)
         self.assertTrue(report["passed"])
         self.assertEqual(report["min_speedup"], 12.0)
         self.assertEqual(len(report["planned_runs"]), 6)
         self.assertEqual(len(report["mjx_rows"]), 6)
         self.assertEqual(len(report["replay_rows"]), 6)
+
+    def test_metrics_parser_extracts_compile_and_warmup_timing(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "metrics.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "metrics": _metrics(success=True),
+                        "mpc": {
+                            "accepted": True,
+                            "accepted_windows": 40,
+                            "used_baseline_fallback": False,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "steady_state_wall_time_sec": 1.0,
+                        },
+                    }
+                )
+            )
+
+            row = runner._row_from_metrics(path)
+
+        self.assertEqual(row["compile_init_wall_time_sec"], 2.0)
+        self.assertTrue(row["jit_warmup_enabled"])
+        self.assertEqual(row["jit_warmup_wall_time_sec"], 1.5)
 
     def test_metrics_parser_missing_mpc_safety_fields_fails_closed(self) -> None:
         runner = load_runner()

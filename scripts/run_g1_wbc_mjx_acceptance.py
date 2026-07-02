@@ -271,6 +271,9 @@ def _build_report(
             baseline_gate.envelope,
             MjxQualityPolicy.for_motion(motion),
         )
+        mjx_failures = _unique(
+            (*mjx_gate.failures, *_mjx_timing_evidence_failures(mjx_group))
+        )
         replay_failures = _row_evidence_failures(
             replay_group,
             timing_failure="replay_steady_state_wall_time",
@@ -287,8 +290,8 @@ def _build_report(
         motion_results[motion] = {
             "baseline_passed": baseline_gate.passed,
             "baseline_failures": baseline_gate.failures,
-            "mjx_passed": mjx_gate.passed,
-            "mjx_failures": mjx_gate.failures,
+            "mjx_passed": not mjx_failures,
+            "mjx_failures": mjx_failures,
         }
         replay_results[motion] = {
             "passed": replay_passed,
@@ -302,7 +305,7 @@ def _build_report(
         passed = (
             passed
             and baseline_gate.passed
-            and mjx_gate.passed
+            and not mjx_failures
             and replay_passed
             and speed_gate.passed
         )
@@ -389,8 +392,23 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         ),
         "mpc_used_baseline_fallback": mpc.get("used_baseline_fallback") is not False,
         "num_steps": _safe_int(metrics.get("num_steps", -1)),
+        "compile_init_wall_time_sec": mpc.get("compile_init_wall_time_sec"),
+        "jit_warmup_enabled": mpc.get("jit_warmup_enabled"),
+        "jit_warmup_wall_time_sec": mpc.get("jit_warmup_wall_time_sec"),
         "steady_state_wall_time_sec": mpc.get("steady_state_wall_time_sec"),
     }
+
+
+def _mjx_timing_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        if not _valid_timing(_timing_value(row, "compile_init_wall_time_sec")):
+            failures.append("mjx_compile_init_wall_time")
+        if row.get("jit_warmup_enabled") is not True:
+            failures.append("mjx_jit_warmup_enabled")
+        if not _valid_timing(_timing_value(row, "jit_warmup_wall_time_sec")):
+            failures.append("mjx_jit_warmup_wall_time")
+    return _unique(failures)
 
 
 def _row_evidence_failures(
