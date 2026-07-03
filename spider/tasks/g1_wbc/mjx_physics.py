@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
     ACTUATOR_GROUPS,
+    COMMAND_BODY_NAMES,
     DECIMATION,
     MUJOCO_BODY_NAMES,
     MUJOCO_JOINT_NAMES,
@@ -281,6 +282,76 @@ def make_mjx_physics_step_fn(
     return physics_step_fn
 
 
+def make_mjx_command_reference_fn(
+    *,
+    command_body_names: tuple[str, ...] = COMMAND_BODY_NAMES,
+):
+    """Create a batched MJX forward-kinematics function for actor command refs."""
+
+    command_body_names = tuple(command_body_names)
+
+    def command_reference_fn(bundle, command_qpos, command_qvel, *, runtime):
+        if getattr(bundle, "mjx_model", None) is None:
+            raise ValueError("MJX model bundle must include mjx_model")
+        jnp = runtime.jnp
+        command_qpos = _batched_trajectory(
+            "command_qpos",
+            command_qpos,
+            QPOS_DIM,
+            jnp=jnp,
+        )
+        command_qvel = _batched_trajectory(
+            "command_qvel",
+            command_qvel,
+            QVEL_DIM,
+            jnp=jnp,
+        )
+        sample_count = int(command_qpos.shape[0])
+        horizon = int(command_qpos.shape[1])
+        if tuple(int(dim) for dim in command_qvel.shape[:2]) != (
+            sample_count,
+            horizon,
+        ):
+            raise ValueError(
+                "Expected command_qvel batch/horizon "
+                f"{(sample_count, horizon)}, got {command_qvel.shape[:2]}"
+            )
+
+        body_ids = _body_ids_for_names(bundle, command_body_names)
+        body_id_array = jnp.asarray(body_ids)
+        root_body_id = _lookup_body_id(bundle, MUJOCO_BODY_NAMES[0])
+        flat_qpos = command_qpos.reshape((sample_count * horizon, QPOS_DIM))
+        flat_qvel = command_qvel.reshape((sample_count * horizon, QVEL_DIM))
+
+        def forward_one(qpos_one, qvel_one):
+            data = runtime.mjx.make_data(bundle.mjx_model)
+            data = data.replace(qpos=qpos_one, qvel=qvel_one, time=0.0)
+            data = runtime.mjx.forward(bundle.mjx_model, data)
+            body_pos_w = jnp.take(data.xpos, body_id_array, axis=0)
+            body_quat_w = jnp.take(data.xquat, body_id_array, axis=0)
+            body_cvel = jnp.take(data.cvel, body_id_array, axis=0)
+            body_ang_vel_w = body_cvel[..., 0:3]
+            root_subtree_com = data.subtree_com[root_body_id]
+            body_lin_vel_w = body_cvel[..., 3:6] - jnp.cross(
+                body_ang_vel_w,
+                root_subtree_com - body_pos_w,
+            )
+            return {
+                "body_pos_w": body_pos_w,
+                "body_quat_w": body_quat_w,
+                "body_lin_vel_w": body_lin_vel_w,
+                "body_ang_vel_w": body_ang_vel_w,
+            }
+
+        values = runtime.jax.vmap(forward_one)(flat_qpos, flat_qvel)
+        return {
+            name: value.reshape((sample_count, horizon, *value.shape[1:]))
+            for name, value in values.items()
+        }
+
+    return command_reference_fn
+
+
 def reset_forward_step_smoke(
     bundle,
     qpos,
@@ -336,6 +407,17 @@ def _batched_vector(name: str, value, width: int, *, jnp):
         value = jnp.expand_dims(value, axis=0)
     if len(value.shape) != 2 or int(value.shape[-1]) != int(width):
         raise ValueError(f"Expected {name} shape (batch, {width}), got {value.shape}")
+    return value
+
+
+def _batched_trajectory(name: str, value, width: int, *, jnp):
+    value = jnp.asarray(value)
+    if len(value.shape) == 2:
+        value = jnp.expand_dims(value, axis=1)
+    if len(value.shape) != 3 or int(value.shape[-1]) != int(width):
+        raise ValueError(
+            f"Expected {name} shape (batch, horizon, {width}), got {value.shape}"
+        )
     return value
 
 
@@ -437,6 +519,7 @@ __all__ = [
     "foot_contact_geom_groups",
     "foot_contact_indicator_from_contact",
     "joint_order_to_model_ctrl",
+    "make_mjx_command_reference_fn",
     "make_mjx_physics_step_fn",
     "reset_forward_step_smoke",
 ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from spider.tasks.g1_wbc.constants import ACTION_DIM, POLICY_DT, QPOS_DIM
+from spider.tasks.g1_wbc.constants import ACTION_DIM, POLICY_DT, QPOS_DIM, QVEL_DIM
 from spider.tasks.g1_wbc.mjx_obs import (
     JaxObsIndices,
     JaxObsState,
@@ -21,9 +21,15 @@ from spider.tasks.g1_wbc.mjx_scoring import (
 
 
 PhysicsStepFn = Callable[..., tuple[Mapping[str, object], Mapping[str, object]]]
+CommandReferenceFn = Callable[..., Mapping[str, object]]
 
 
-def make_rollout_scorer(*, runtime, physics_step_fn: PhysicsStepFn):
+def make_rollout_scorer(
+    *,
+    runtime,
+    physics_step_fn: PhysicsStepFn,
+    command_reference_fn: CommandReferenceFn | None = None,
+):
     """Bind runtime dependencies into the optimizer's four-argument scorer."""
 
     jitted_by_model_id: dict[int, Callable[..., object]] = {}
@@ -38,6 +44,7 @@ def make_rollout_scorer(*, runtime, physics_step_fn: PhysicsStepFn):
                 model_bundle,
                 runtime=runtime,
                 physics_step_fn=physics_step_fn,
+                command_reference_fn=command_reference_fn,
                 return_metrics=True,
             )
         model_key = id(model_bundle)
@@ -52,6 +59,7 @@ def make_rollout_scorer(*, runtime, physics_step_fn: PhysicsStepFn):
                     model_bundle,
                     runtime=runtime,
                     physics_step_fn=physics_step_fn,
+                    command_reference_fn=command_reference_fn,
                     return_metrics=True,
                 )
 
@@ -139,6 +147,7 @@ def score_candidate_controls(
     *,
     runtime,
     physics_step_fn: PhysicsStepFn,
+    command_reference_fn: CommandReferenceFn | None = None,
     return_metrics: bool = False,
 ):
     """Score sampled high-level controls with a scan-compatible rollout loop."""
@@ -176,7 +185,16 @@ def score_candidate_controls(
         _required(reference, "joint_high"),
         jnp=jnp,
     )
-    commanded_joint_vel = _commanded_joint_velocity(commanded_qpos, jnp=jnp)
+    commanded_qvel = _commanded_qvel(commanded_qpos, jnp=jnp)
+    commanded_joint_vel = commanded_qvel[..., 6:]
+    command_reference = _command_reference(
+        command_reference_fn,
+        model_bundle,
+        commanded_qpos,
+        commanded_qvel,
+        runtime=runtime,
+        jnp=jnp,
+    )
     prev_control = _ensure_batch(
         jnp.asarray(
             reference.get("prev_control", jnp.zeros((sample_count, QPOS_DIM - 1)))
@@ -194,6 +212,7 @@ def score_candidate_controls(
         reference,
         commanded_qpos,
         commanded_joint_vel,
+        command_reference,
     )
 
     scan = _lax_scan(runtime)
@@ -338,6 +357,11 @@ def _score_rollout_step(
     command_qpos = commanded_qpos[:, step_index]
     commanded_joint_vel = _required(reference, "commanded_joint_vel")
     command_joint_vel = commanded_joint_vel[:, step_index]
+    command_reference = _time_slice_command_reference(
+        reference.get("command_reference", {}),
+        step_index,
+        jnp=jnp,
+    )
     obs_reference = _time_slice_reference(
         _required(reference, "obs_reference"),
         step_index,
@@ -348,6 +372,7 @@ def _score_rollout_step(
         obs_reference,
         command_qpos,
         command_joint_vel,
+        command_reference,
     )
     obs, next_obs_state = build_wbc_observation_from_state(
         robot_state=robot_state,
@@ -436,29 +461,84 @@ def _with_commanded_qpos(
     reference: Mapping[str, object],
     commanded_qpos,
     commanded_joint_vel,
+    command_reference,
 ) -> dict[str, object]:
     values = dict(reference)
     values["commanded_qpos"] = commanded_qpos
     values["commanded_joint_vel"] = commanded_joint_vel
+    values["command_reference"] = command_reference
     return values
 
 
-def _commanded_joint_velocity(commanded_qpos, *, jnp):
-    joint_pos = commanded_qpos[..., 7:]
-    if int(joint_pos.shape[1]) <= 1:
-        return jnp.zeros(joint_pos.shape)
-    joint_vel = (joint_pos[:, 1:] - joint_pos[:, :-1]) / POLICY_DT
-    return jnp.concatenate([joint_vel, joint_vel[:, -1:]], axis=1)
+def _command_reference(
+    command_reference_fn: CommandReferenceFn | None,
+    model_bundle,
+    commanded_qpos,
+    commanded_qvel,
+    *,
+    runtime,
+    jnp,
+) -> dict[str, object]:
+    if command_reference_fn is None:
+        return {}
+    values = command_reference_fn(
+        model_bundle,
+        commanded_qpos,
+        commanded_qvel,
+        runtime=runtime,
+    )
+    return {name: jnp.asarray(value) for name, value in values.items()}
+
+
+def _commanded_qvel(commanded_qpos, *, jnp):
+    if int(commanded_qpos.shape[1]) <= 1:
+        return jnp.zeros((*commanded_qpos.shape[:2], QVEL_DIM))
+
+    lin_vel = _differentiate_trajectory(commanded_qpos[..., :3], jnp=jnp)
+    delta_quat = _quat_mul(
+        commanded_qpos[:, 1:, 3:7],
+        _quat_inv(commanded_qpos[:, :-1, 3:7], jnp=jnp),
+        jnp=jnp,
+    )
+    ang_vel = _axis_angle_from_quat(delta_quat, jnp=jnp) / POLICY_DT
+    ang_vel = jnp.concatenate([ang_vel, ang_vel[:, -1:]], axis=1)
+    root_qvel = _world_velocity_to_qvel(
+        commanded_qpos[..., :7],
+        jnp.concatenate([lin_vel, ang_vel], axis=-1),
+        jnp=jnp,
+    )
+    joint_vel = _differentiate_trajectory(commanded_qpos[..., 7:], jnp=jnp)
+    return jnp.concatenate([root_qvel, joint_vel], axis=-1)
+
+
+def _differentiate_trajectory(values, *, jnp):
+    if int(values.shape[1]) <= 1:
+        return jnp.zeros(values.shape)
+    velocity = (values[:, 1:] - values[:, :-1]) / POLICY_DT
+    return jnp.concatenate([velocity, velocity[:, -1:]], axis=1)
+
+
+def _time_slice_command_reference(
+    values: Mapping[str, object],
+    step_index: int,
+    *,
+    jnp,
+) -> dict[str, object]:
+    return {name: jnp.asarray(value)[:, step_index] for name, value in values.items()}
 
 
 def _with_commanded_joint_reference(
     obs_reference: Mapping[str, object],
     command_qpos,
     command_joint_vel,
+    command_reference: Mapping[str, object],
 ) -> dict[str, object]:
     values = dict(obs_reference)
     values["joint_pos"] = command_qpos[:, 7:]
     values["joint_vel"] = command_joint_vel
+    for name in ("body_pos_w", "body_quat_w", "body_ang_vel_w"):
+        if name in command_reference:
+            values[name] = command_reference[name]
     return values
 
 
@@ -671,6 +751,35 @@ def _quat_mul(q1, q2, *, jnp):
     y = qq - yy + (w1 - x1) * (y2 + z2)
     z = qq - zz + (z1 + y1) * (w2 - x2)
     return jnp.stack([w, x, y, z], axis=-1)
+
+
+def _quat_inv(quat, *, jnp):
+    conjugate = jnp.concatenate([quat[..., 0:1], -quat[..., 1:]], axis=-1)
+    return conjugate / jnp.sum(quat * quat, axis=-1, keepdims=True)
+
+
+def _axis_angle_from_quat(quat, *, jnp):
+    quat = quat * (1.0 - 2.0 * (quat[..., 0:1] < 0.0))
+    mag = jnp.sqrt(jnp.sum(quat[..., 1:] * quat[..., 1:], axis=-1))
+    half_angle = jnp.atan2(mag, quat[..., 0])
+    angle = 2.0 * half_angle
+    safe_angle = jnp.where(jnp.abs(angle) > 1.0e-6, angle, 1.0)
+    denom = jnp.where(
+        jnp.abs(angle) > 1.0e-6,
+        jnp.sin(half_angle) / safe_angle,
+        0.5 - angle * angle / 48.0,
+    )
+    return quat[..., 1:4] / jnp.expand_dims(denom, axis=-1)
+
+
+def _world_velocity_to_qvel(qpos, world_vel, *, jnp):
+    return jnp.concatenate(
+        [
+            world_vel[..., :3],
+            _quat_apply_inverse(qpos[..., 3:7], world_vel[..., 3:6], jnp=jnp),
+        ],
+        axis=-1,
+    )
 
 
 def _quat_apply_inverse(quat, vec, *, jnp):

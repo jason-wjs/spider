@@ -8,6 +8,7 @@ from typing import Any
 
 from spider.tasks.g1_wbc.mjx_physics import (
     default_action_scale,
+    make_mjx_command_reference_fn,
     make_mjx_physics_step_fn,
 )
 from spider.tasks.g1_wbc.mjx_reference import (
@@ -25,6 +26,7 @@ class MjxRolloutComponents:
     rollout_scorer: Callable[..., Any]
     rollout_reference_factory: Callable[..., dict[str, object]]
     physics_step_fn: Callable[..., Any]
+    command_reference_fn: Callable[..., Any]
     default_joint_pos: Any
     action_scale: Any
 
@@ -36,6 +38,7 @@ def build_mjx_rollout_components(
     score_weights: JaxScoreWeights | Mapping[str, float] | None = None,
     default_joint_pos_override=None,
     action_scale_override=None,
+    command_reference_fn: Callable[..., Any] | None = None,
 ) -> MjxRolloutComponents:
     """Build explicit MJX rollout scorer/reference components."""
 
@@ -55,9 +58,12 @@ def build_mjx_rollout_components(
             default_joint_pos=default_pos,
             action_scale=scale,
         )
+    if command_reference_fn is None:
+        command_reference_fn = make_mjx_command_reference_fn()
     rollout_scorer = make_rollout_scorer(
         runtime=runtime,
         physics_step_fn=physics_step_fn,
+        command_reference_fn=command_reference_fn,
     )
 
     def rollout_reference_factory(**kwargs):
@@ -73,6 +79,7 @@ def build_mjx_rollout_components(
         rollout_scorer=rollout_scorer,
         rollout_reference_factory=rollout_reference_factory,
         physics_step_fn=physics_step_fn,
+        command_reference_fn=command_reference_fn,
         default_joint_pos=default_pos,
         action_scale=scale,
     )

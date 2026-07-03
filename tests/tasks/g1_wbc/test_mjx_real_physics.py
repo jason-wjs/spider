@@ -19,6 +19,7 @@ from spider.tasks.g1_wbc.mjx_physics import (
     foot_contact_geom_groups,
     foot_contact_indicator_from_contact,
     joint_order_to_model_ctrl,
+    make_mjx_command_reference_fn,
     make_mjx_physics_step_fn,
     reset_forward_step_smoke,
 )
@@ -42,6 +43,82 @@ class _NumpyJnp:
     @staticmethod
     def any(value, axis=None):
         return np.any(value, axis=axis)
+
+
+class _FakeCommandReferenceJnp:
+    @staticmethod
+    def asarray(value):
+        array = np.asarray(value)
+        if array.dtype.kind in {"i", "u"}:
+            return array
+        return array.astype(np.float32)
+
+    @staticmethod
+    def take(value, indices, axis=0):
+        return np.take(value, indices, axis=axis)
+
+    @staticmethod
+    def cross(left, right):
+        return np.cross(left, right)
+
+
+class _FakeCommandReferenceJax:
+    @staticmethod
+    def vmap(fn):
+        def mapped(*values):
+            rows = [
+                fn(*(value[index] for value in values))
+                for index in range(len(values[0]))
+            ]
+            return {
+                name: np.stack([row[name] for row in rows], axis=0)
+                for name in rows[0]
+            }
+
+        return mapped
+
+
+class _FakeCommandReferenceMjx:
+    @staticmethod
+    def make_data(model):
+        return _FakeCommandReferenceData(model["body_count"])
+
+    @staticmethod
+    def forward(model, data):
+        del model
+        body_count = int(data.xpos.shape[0])
+        data.xpos = np.zeros((body_count, 3), dtype=np.float32)
+        data.xpos[:, 0] = data.qpos[0]
+        data.xpos[:, 2] = np.arange(body_count, dtype=np.float32)
+        data.xquat = np.zeros((body_count, 4), dtype=np.float32)
+        data.xquat[:, 0] = 1.0
+        data.cvel = np.zeros((body_count, 6), dtype=np.float32)
+        data.cvel[:, :3] = data.qvel[3:6]
+        data.cvel[:, 3:6] = data.qvel[:3]
+        data.subtree_com = np.zeros((body_count, 3), dtype=np.float32)
+        data.subtree_com[0] = data.qpos[:3]
+        return data
+
+
+class _FakeCommandReferenceData:
+    def __init__(self, body_count: int) -> None:
+        self.qpos = np.zeros(QPOS_DIM, dtype=np.float32)
+        self.qvel = np.zeros(QVEL_DIM, dtype=np.float32)
+        self.xpos = np.zeros((body_count, 3), dtype=np.float32)
+        self.xquat = np.zeros((body_count, 4), dtype=np.float32)
+        self.cvel = np.zeros((body_count, 6), dtype=np.float32)
+        self.subtree_com = np.zeros((body_count, 3), dtype=np.float32)
+
+    def replace(self, **kwargs):
+        for name, value in kwargs.items():
+            setattr(self, name, value)
+        return self
+
+
+class _FakeCommandReferenceRuntime:
+    jnp = _FakeCommandReferenceJnp()
+    jax = _FakeCommandReferenceJax()
+    mjx = _FakeCommandReferenceMjx()
 
 
 class MjxRealPhysicsTest(unittest.TestCase):
@@ -204,6 +281,41 @@ class MjxRealPhysicsTest(unittest.TestCase):
         )
 
         np.testing.assert_allclose(indicator, np.zeros(2, dtype=np.float32))
+
+    def test_command_reference_fn_returns_command_body_kinematics(self) -> None:
+        bundle = SimpleNamespace(
+            mjx_model={"body_count": 3},
+            body_name_to_id={
+                "robot/pelvis": 0,
+                "robot/torso_link": 2,
+            },
+        )
+        qpos = np.zeros((2, 2, QPOS_DIM), dtype=np.float32)
+        qpos[..., 3] = 1.0
+        qpos[1, 1, 0] = 0.4
+        qvel = np.zeros((2, 2, QVEL_DIM), dtype=np.float32)
+        qvel[1, 1, 3:6] = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        command_reference_fn = make_mjx_command_reference_fn(
+            command_body_names=("pelvis", "torso_link"),
+        )
+
+        reference = command_reference_fn(
+            bundle,
+            qpos,
+            qvel,
+            runtime=_FakeCommandReferenceRuntime(),
+        )
+
+        self.assertEqual(reference["body_pos_w"].shape, (2, 2, 2, 3))
+        self.assertEqual(reference["body_quat_w"].shape, (2, 2, 2, 4))
+        self.assertEqual(reference["body_ang_vel_w"].shape, (2, 2, 2, 3))
+        self.assertEqual(reference["body_lin_vel_w"].shape, (2, 2, 2, 3))
+        self.assertAlmostEqual(float(reference["body_pos_w"][1, 1, 0, 0]), 0.4)
+        self.assertAlmostEqual(float(reference["body_pos_w"][1, 1, 1, 2]), 2.0)
+        np.testing.assert_allclose(
+            reference["body_ang_vel_w"][1, 1, 0],
+            [0.1, 0.2, 0.3],
+        )
 
     def test_reset_forward_step_smoke_runs_real_mjx_when_runtime_available(self) -> None:
         if not probe_mjx_runtime().available:

@@ -93,6 +93,10 @@ class _NumpyJnp:
         return np.cos(value)
 
     @staticmethod
+    def atan2(y, x):
+        return np.arctan2(y, x)
+
+    @staticmethod
     def where(condition, x, y):
         return np.where(condition, x, y)
 
@@ -324,6 +328,25 @@ def _command_joint_actor() -> JaxActorParams:
 def _command_joint_velocity_actor() -> JaxActorParams:
     weight = np.zeros((OBS_DIM, ACTION_DIM), dtype=np.float32)
     weight[ACTION_DIM, 0] = 1.0
+    return JaxActorParams(
+        obs_mean=np.zeros((1, OBS_DIM), dtype=np.float32),
+        obs_std=np.ones((1, OBS_DIM), dtype=np.float32),
+        layers=(
+            (
+                weight,
+                np.zeros(ACTION_DIM, dtype=np.float32),
+            ),
+        ),
+    )
+
+
+def _command_body_ang_vel_actor() -> JaxActorParams:
+    weight = np.zeros((OBS_DIM, ACTION_DIM), dtype=np.float32)
+    motion_ref_offset = (
+        int(np.prod(OBS_FIELD_SPECS["command"]))
+        + int(np.prod(OBS_FIELD_SPECS["ref_limb_ee_pose_b"]))
+    )
+    weight[motion_ref_offset, 0] = 1.0
     return JaxActorParams(
         obs_mean=np.zeros((1, OBS_DIM), dtype=np.float32),
         obs_std=np.ones((1, OBS_DIM), dtype=np.float32),
@@ -717,6 +740,111 @@ class MjxRolloutTest(unittest.TestCase):
         np.testing.assert_allclose(actions[0][0, 0], 0.0)
         self.assertAlmostEqual(float(actions[0][1, 0]), 1.0 / 1.01, places=6)
         self.assertGreater(float(scores[0]), float(scores[1]))
+
+    def test_score_candidate_controls_feeds_sampled_body_reference_to_actor(
+        self,
+    ) -> None:
+        samples = np.zeros((2, 2, QPOS_DIM - 1), dtype=np.float32)
+        samples[1, :, 0] = 0.4
+        reference = _rollout_reference(samples=2, horizon=2)
+        reference["score_weights"] = JaxScoreWeights({"root_pos": 1.0})
+        tracking_anchor = _obs_indices().tracking_anchor_index
+        actions: list[np.ndarray] = []
+
+        def command_reference_fn(model_bundle, command_qpos, command_qvel, *, runtime):
+            del model_bundle, command_qvel, runtime
+            sample_count = int(command_qpos.shape[0])
+            horizon = int(command_qpos.shape[1])
+            body_count = len(COMMAND_BODY_NAMES)
+            body_pos = np.zeros((sample_count, horizon, body_count, 3), dtype=np.float32)
+            body_quat = _identity_body_quat((sample_count, horizon, body_count))
+            body_ang_vel = np.zeros(
+                (sample_count, horizon, body_count, 3),
+                dtype=np.float32,
+            )
+            body_ang_vel[:, :, tracking_anchor, 0] = command_qpos[:, :, 0]
+            return {
+                "body_pos_w": body_pos,
+                "body_quat_w": body_quat,
+                "body_ang_vel_w": body_ang_vel,
+            }
+
+        def recording_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            actions.append(np.asarray(action, dtype=np.float32).copy())
+            return _action_root_physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _command_body_ang_vel_actor(),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=recording_step,
+            command_reference_fn=command_reference_fn,
+        )
+
+        self.assertEqual(len(actions), 2)
+        np.testing.assert_allclose(actions[0][0, 0], 0.0)
+        self.assertGreater(float(actions[0][1, 0]), 0.0)
+        self.assertGreater(float(scores[0]), float(scores[1]))
+
+    def test_score_candidate_controls_finite_differences_command_root_qvel(
+        self,
+    ) -> None:
+        samples = np.zeros((1, 2, QPOS_DIM - 1), dtype=np.float32)
+        samples[0, 1, 0] = POLICY_DT
+        samples[0, 1, 3] = POLICY_DT
+        reference = _rollout_reference(samples=1, horizon=2)
+        captured_qvel: list[np.ndarray] = []
+
+        def command_reference_fn(model_bundle, command_qpos, command_qvel, *, runtime):
+            del model_bundle, command_qpos, runtime
+            captured_qvel.append(np.asarray(command_qvel, dtype=np.float32).copy())
+            sample_count = int(command_qvel.shape[0])
+            horizon = int(command_qvel.shape[1])
+            body_count = len(COMMAND_BODY_NAMES)
+            return {
+                "body_pos_w": np.zeros(
+                    (sample_count, horizon, body_count, 3),
+                    dtype=np.float32,
+                ),
+                "body_quat_w": _identity_body_quat(
+                    (sample_count, horizon, body_count)
+                ),
+                "body_ang_vel_w": np.zeros(
+                    (sample_count, horizon, body_count, 3),
+                    dtype=np.float32,
+                ),
+            }
+
+        score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            command_reference_fn=command_reference_fn,
+        )
+
+        self.assertEqual(len(captured_qvel), 1)
+        np.testing.assert_allclose(captured_qvel[0][0, :, 0], [1.0, 1.0], atol=1e-6)
+        np.testing.assert_allclose(captured_qvel[0][0, :, 3], [1.0, 1.0], atol=1e-5)
 
     def test_score_candidate_controls_uses_lax_scan_when_available(self) -> None:
         samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)

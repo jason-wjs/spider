@@ -119,6 +119,7 @@ class MjxComponentsTest(unittest.TestCase):
 
         self.assertTrue(callable(components.rollout_scorer))
         self.assertTrue(callable(components.rollout_reference_factory))
+        self.assertTrue(callable(components.command_reference_fn))
         self.assertEqual(components.default_joint_pos.shape, (ACTION_DIM,))
         self.assertEqual(components.action_scale.shape, (ACTION_DIM,))
 
