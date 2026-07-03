@@ -70,6 +70,8 @@ SWEETPOINT_ARGS = (
     "knot",
     "--mpc-knot-count",
     "8",
+    "--mpc-elite-frac",
+    "0.125",
     "--mpc-temperature",
     "0.7",
     "--mpc-root-pos-sigma",
@@ -78,6 +80,8 @@ SWEETPOINT_ARGS = (
     "0.10",
     "--mpc-joint-sigma",
     "0.18",
+    "--mpc-sigma-decay",
+    "0.75",
     "--mpc-smooth-passes",
     "0",
     "--mpc-command-reg-weight",
@@ -98,6 +102,11 @@ SWEETPOINT_ARGS = (
     "0.35",
     "--mpc-guided-candidate",
     "--mpc-acceptance-gate",
+    "--no-mpc-warm-start",
+    "--mpc-warm-start-source",
+    "best",
+    "--mpc-warm-start-decay",
+    "1.0",
     "--nconmax-per-env",
     "512",
     "--njmax-per-env",
@@ -555,6 +564,8 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
         return None
     if used_baseline_fallback is not False:
         return None
+    if mpc.get("config") != _expected_stage0_mpc_config(command):
+        return None
 
     row: dict[str, Any] = {
         "returncode": 0,
@@ -587,6 +598,100 @@ def _strict_json_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     return value if isinstance(value, int) else None
+
+
+def _expected_stage0_mpc_config(command: Stage0Command) -> dict[str, Any] | None:
+    try:
+        return {
+            "mode": _required_argv_value(command.argv, "--method"),
+            "num_samples": _argv_int(command.argv, "--mpc-samples"),
+            "num_iterations": _argv_int(command.argv, "--mpc-iterations"),
+            "planning_horizon_steps": _argv_int(
+                command.argv,
+                "--mpc-planning-horizon-steps",
+            ),
+            "control_steps": _argv_int(command.argv, "--mpc-control-steps"),
+            "sampling_mode": _required_argv_value(command.argv, "--mpc-sampling-mode"),
+            "knot_count": _argv_int(command.argv, "--mpc-knot-count"),
+            "elite_frac": _argv_float(command.argv, "--mpc-elite-frac"),
+            "temperature": _argv_float(command.argv, "--mpc-temperature"),
+            "root_pos_sigma": _argv_float(command.argv, "--mpc-root-pos-sigma"),
+            "root_rot_sigma": _argv_float(command.argv, "--mpc-root-rot-sigma"),
+            "joint_sigma": _argv_float(command.argv, "--mpc-joint-sigma"),
+            "min_root_pos_sigma": 0.002,
+            "min_root_rot_sigma": 0.004,
+            "min_joint_sigma": 0.008,
+            "sigma_decay": _argv_float(command.argv, "--mpc-sigma-decay"),
+            "smooth_passes": _argv_int(command.argv, "--mpc-smooth-passes"),
+            "command_reg_weight": _argv_float(
+                command.argv,
+                "--mpc-command-reg-weight",
+            ),
+            "command_smooth_weight": _argv_float(
+                command.argv,
+                "--mpc-command-smooth-weight",
+            ),
+            "use_guided_candidate": _argv_bool_optional(
+                command.argv,
+                "--mpc-guided-candidate",
+            ),
+            "guided_root_pos_gain": _argv_float(
+                command.argv,
+                "--mpc-guided-root-pos-gain",
+            ),
+            "guided_root_rot_gain": _argv_float(
+                command.argv,
+                "--mpc-guided-root-rot-gain",
+            ),
+            "guided_joint_gain": _argv_float(command.argv, "--mpc-guided-joint-gain"),
+            "guided_root_pos_clip": _argv_float(
+                command.argv,
+                "--mpc-guided-root-pos-clip",
+            ),
+            "guided_root_rot_clip": _argv_float(
+                command.argv,
+                "--mpc-guided-root-rot-clip",
+            ),
+            "guided_joint_clip": _argv_float(command.argv, "--mpc-guided-joint-clip"),
+            "acceptance_gate": _argv_bool_optional(
+                command.argv,
+                "--mpc-acceptance-gate",
+            ),
+            "seed": _argv_int(command.argv, "--seed"),
+            "freeze_first_frame": True,
+            "use_warm_start": _argv_bool_optional(command.argv, "--mpc-warm-start"),
+            "warm_start_source": _required_argv_value(
+                command.argv,
+                "--mpc-warm-start-source",
+            ),
+            "warm_start_decay": _argv_float(command.argv, "--mpc-warm-start-decay"),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _required_argv_value(argv: list[str], flag: str) -> str:
+    value = _argv_value(argv, flag)
+    if value is None:
+        raise ValueError(f"missing {flag}")
+    return value
+
+
+def _argv_int(argv: list[str], flag: str) -> int:
+    return int(_required_argv_value(argv, flag))
+
+
+def _argv_float(argv: list[str], flag: str) -> float:
+    return float(_required_argv_value(argv, flag))
+
+
+def _argv_bool_optional(argv: list[str], flag: str) -> bool:
+    negative_flag = f"--no-{flag[2:]}"
+    positive = flag in argv
+    negative = negative_flag in argv
+    if positive == negative:
+        raise ValueError(f"expected exactly one of {flag} or {negative_flag}")
+    return positive
 
 
 def _existing_runner_provenance_matches(command: Stage0Command) -> bool:

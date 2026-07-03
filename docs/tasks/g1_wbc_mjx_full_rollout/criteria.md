@@ -110,10 +110,12 @@ Required fixed command properties:
 | control steps | `20` |
 | sampling mode | `knot` |
 | knot count | `8` |
+| elite fraction | `0.125` |
 | temperature | `0.7` |
 | root position sigma | `0.04` |
 | root rotation sigma | `0.10` |
 | joint sigma | `0.18` |
+| sigma decay | `0.75` |
 | smooth passes | `0` |
 | command regularization | `0.0` |
 | command smoothness | `0.0` |
@@ -125,9 +127,20 @@ Required fixed command properties:
 | guided joint clip | `0.35` |
 | guided candidate | enabled |
 | acceptance gate | enabled |
+| warm start | disabled |
+| warm start source | `best` |
+| warm start decay | `1.0` |
 | nconmax per env | `512` |
 | njmax per env | `2048` |
 | save rollout | enabled |
+
+Each baseline row `metrics.json` must include `mpc.config` matching the
+effective legacy `G1WbcMpcConfig` derived from the row argv. That config must
+also record the fixed defaults not exposed as Stage0 argv: `min_root_pos_sigma`
+`0.002`, `min_root_rot_sigma` `0.004`, `min_joint_sigma` `0.008`, and
+`freeze_first_frame` enabled. The config `seed` must equal the row seed.
+`reward_weights` are recorded separately as `reward_weight_source` and
+`reward_weights`, not inside `mpc.config`.
 
 The manifest must use explicit file paths for motion, checkpoint, and reward
 weights. Aliases such as `--checkpoint bc` are not formal acceptance inputs
@@ -144,7 +157,8 @@ Interrupted Stage0 runs may be resumed with `--reuse-existing-ok`, but only for
 rows whose existing `metrics.json`, `rollout.npz`, and `mpc_command.npz` are
 present, report `800` steps, `40` accepted windows, no baseline fallback, and
 match the current command provenance for motion, checkpoint, method, backend,
-and optimizer. Incomplete or provenance-mismatched rows must be rerun.
+optimizer, and effective `mpc.config`. Incomplete or provenance-mismatched rows
+must be rerun.
 
 Historical sweetpoint evidence available in `wbc_results` comes from the
 versioned testbed motion set now stored under

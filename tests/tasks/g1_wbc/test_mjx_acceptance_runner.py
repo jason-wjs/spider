@@ -49,6 +49,7 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         motion=str(motion_path),
                         checkpoint=str(checkpoint),
                         metrics=metrics,
+                        seed=seed,
                     )
                 )
             )
@@ -101,6 +102,8 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         "knot",
                         "--mpc-knot-count",
                         "8",
+                        "--mpc-elite-frac",
+                        "0.125",
                         "--mpc-temperature",
                         "0.7",
                         "--mpc-root-pos-sigma",
@@ -109,6 +112,8 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         "0.10",
                         "--mpc-joint-sigma",
                         "0.18",
+                        "--mpc-sigma-decay",
+                        "0.75",
                         "--mpc-smooth-passes",
                         "0",
                         "--mpc-command-reg-weight",
@@ -129,6 +134,11 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         "0.35",
                         "--mpc-guided-candidate",
                         "--mpc-acceptance-gate",
+                        "--no-mpc-warm-start",
+                        "--mpc-warm-start-source",
+                        "best",
+                        "--mpc-warm-start-decay",
+                        "1.0",
                         "--nconmax-per-env",
                         "512",
                         "--njmax-per-env",
@@ -306,6 +316,7 @@ def _baseline_metrics_payload(
     checkpoint: str,
     metrics: dict[str, float | bool],
     accepted: bool = True,
+    seed: int = 0,
 ) -> dict[str, object]:
     return {
         "method": "g1_wbc_joint_global",
@@ -321,10 +332,48 @@ def _baseline_metrics_payload(
             "accepted_windows": 40,
             "num_windows": 40,
             "used_baseline_fallback": False,
+            "config": _baseline_mpc_config(seed),
             "steady_state_wall_time_sec": 120.0,
             "runtime_visible_devices": ["0"],
             "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
         },
+    }
+
+
+def _baseline_mpc_config(seed: int) -> dict[str, float | int | str | bool | None]:
+    return {
+        "mode": "g1_wbc_joint_global",
+        "num_samples": 512,
+        "num_iterations": 2,
+        "planning_horizon_steps": 40,
+        "control_steps": 20,
+        "sampling_mode": "knot",
+        "knot_count": 8,
+        "elite_frac": 0.125,
+        "temperature": 0.7,
+        "root_pos_sigma": 0.04,
+        "root_rot_sigma": 0.10,
+        "joint_sigma": 0.18,
+        "min_root_pos_sigma": 0.002,
+        "min_root_rot_sigma": 0.004,
+        "min_joint_sigma": 0.008,
+        "sigma_decay": 0.75,
+        "smooth_passes": 0,
+        "command_reg_weight": 0.0,
+        "command_smooth_weight": 0.0,
+        "use_guided_candidate": True,
+        "guided_root_pos_gain": 0.50,
+        "guided_root_rot_gain": 0.50,
+        "guided_joint_gain": 0.50,
+        "guided_root_pos_clip": 0.05,
+        "guided_root_rot_clip": 0.12,
+        "guided_joint_clip": 0.35,
+        "acceptance_gate": True,
+        "seed": int(seed),
+        "freeze_first_frame": True,
+        "use_warm_start": False,
+        "warm_start_source": "best",
+        "warm_start_decay": 1.0,
     }
 
 
@@ -379,6 +428,22 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 optimizer_idx = item.mjx_argv.index("--mpc-optimizer")
                 self.assertEqual(item.mjx_argv[optimizer_idx + 1], "generic")
                 self.assertIn("--mjx-enable-scan", item.mjx_argv)
+                for flag in (
+                    "--mpc-preset",
+                    "--mpc-sampling-mode",
+                    "--mpc-elite-frac",
+                    "--mpc-sigma-decay",
+                    "--mpc-smooth-passes",
+                    "--mpc-command-reg-weight",
+                    "--mpc-command-smooth-weight",
+                    "--mpc-guided-candidate",
+                    "--mpc-acceptance-gate",
+                    "--no-mpc-warm-start",
+                    "--mpc-warm-start-source",
+                    "--mpc-warm-start-decay",
+                ):
+                    self.assertNotIn(flag, item.mjx_argv)
+                    self.assertNotIn(flag, item.replay_argv)
                 replay_backend_idx = item.replay_argv.index("--mpc-backend")
                 self.assertEqual(item.replay_argv[replay_backend_idx + 1], "mujoco_warp")
                 self.assertNotIn("--mjx-enable-scan", item.replay_argv)
@@ -648,6 +713,45 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "baseline_metrics_artifact"):
                 runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_missing_or_mismatched_baseline_mpc_config(
+        self,
+    ) -> None:
+        runner = load_runner()
+        invalid_cases = ("missing", "mismatched")
+        for name in invalid_cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    root = Path(tmp_dir)
+                    manifest_path = _baseline_manifest(root)
+                    manifest = json.loads(manifest_path.read_text())
+                    row = manifest["rows"][0]
+                    metrics_path = Path(row["artifacts"]["metrics_json"])
+                    payload = json.loads(metrics_path.read_text())
+                    if name == "missing":
+                        payload["mpc"].pop("config")
+                    else:
+                        payload["mpc"]["config"]["num_samples"] = 256
+                    metrics_path.write_text(json.dumps(payload))
+                    row["artifact_mtime_ns"]["metrics_json"] = (
+                        metrics_path.stat().st_mtime_ns
+                    )
+                    row["artifact_sha256"]["metrics_json"] = _file_sha256(metrics_path)
+                    manifest_path.write_text(json.dumps(manifest))
+                    args = runner.parse_args(
+                        [
+                            "--baseline-manifest",
+                            str(manifest_path),
+                            "--output-dir",
+                            str(root / "acceptance"),
+                        ]
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "baseline_metrics_artifact",
+                    ):
+                        runner.build_acceptance_plan(args, manifest)
 
     def test_run_command_records_wall_time_for_replay_gate(self) -> None:
         runner = load_runner()

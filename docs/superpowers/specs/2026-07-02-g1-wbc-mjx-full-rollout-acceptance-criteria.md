@@ -62,15 +62,20 @@ planning_horizon_steps: 40
 control_steps: 20
 knot_count: 8
 sampling_mode: knot
+elite_frac: 0.125
 temperature: 0.7
 root_pos_sigma: 0.04
 root_rot_sigma: 0.10
 joint_sigma: 0.18
+sigma_decay: 0.75
 smooth_passes: 0
 command_reg_weight: 0.0
 command_smooth_weight: 0.0
 guided_candidate: true
 acceptance_gate: true
+warm_start: false
+warm_start_source: best
+warm_start_decay: 1.0
 reward_weights: g1_wbc_reward_weights_method_specific_v14_20260612.json
 max_steps: 800
 checkpoint: bc
@@ -177,7 +182,10 @@ runs. A formal manifest has schema version `1`, baseline name
 per-row argv values matching the frozen sweetpoint configuration. The row argv
 must contain explicit existing files for `--motion`, `--checkpoint`, and
 `--mpc-reward-weights`; an alias such as `--checkpoint bc` is not sufficient for
-formal acceptance in this worktree.
+formal acceptance in this worktree. Each row metrics payload must also contain
+`mpc.config` matching the effective legacy `G1WbcMpcConfig` derived from that
+argv, including the row seed and fixed defaults such as minimum sigmas and
+`freeze_first_frame`.
 
 The manifest must contain at least three repeated runs per hard-gate motion,
 using seeds `0`, `1`, and `2`, unless a historical artifact is explicitly

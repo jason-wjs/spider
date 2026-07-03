@@ -72,10 +72,12 @@ FORMAL_STAGE0_ARG_VALUES = {
     "--mpc-control-steps": "20",
     "--mpc-sampling-mode": "knot",
     "--mpc-knot-count": "8",
+    "--mpc-elite-frac": "0.125",
     "--mpc-temperature": "0.7",
     "--mpc-root-pos-sigma": "0.04",
     "--mpc-root-rot-sigma": "0.10",
     "--mpc-joint-sigma": "0.18",
+    "--mpc-sigma-decay": "0.75",
     "--mpc-smooth-passes": "0",
     "--mpc-command-reg-weight": "0.0",
     "--mpc-command-smooth-weight": "0.0",
@@ -85,6 +87,8 @@ FORMAL_STAGE0_ARG_VALUES = {
     "--mpc-guided-root-pos-clip": "0.05",
     "--mpc-guided-root-rot-clip": "0.12",
     "--mpc-guided-joint-clip": "0.35",
+    "--mpc-warm-start-source": "best",
+    "--mpc-warm-start-decay": "1.0",
     "--nconmax-per-env": "512",
     "--njmax-per-env": "2048",
 }
@@ -92,6 +96,32 @@ FORMAL_STAGE0_FLAGS = (
     "--save-rollout",
     "--mpc-guided-candidate",
     "--mpc-acceptance-gate",
+    "--no-mpc-warm-start",
+)
+LEGACY_ONLY_MJX_DROP_ARG_VALUES = (
+    "--mpc-preset",
+    "--mpc-sampling-mode",
+    "--mpc-elite-frac",
+    "--mpc-sigma-decay",
+    "--mpc-smooth-passes",
+    "--mpc-command-reg-weight",
+    "--mpc-command-smooth-weight",
+    "--mpc-guided-root-pos-gain",
+    "--mpc-guided-root-rot-gain",
+    "--mpc-guided-joint-gain",
+    "--mpc-guided-root-pos-clip",
+    "--mpc-guided-root-rot-clip",
+    "--mpc-guided-joint-clip",
+    "--mpc-warm-start-source",
+    "--mpc-warm-start-decay",
+)
+LEGACY_ONLY_MJX_DROP_FLAGS = (
+    "--mpc-guided-candidate",
+    "--no-mpc-guided-candidate",
+    "--mpc-acceptance-gate",
+    "--no-mpc-acceptance-gate",
+    "--mpc-warm-start",
+    "--no-mpc-warm-start",
 )
 MJX_CONTACT_SATURATION_FIELDS = (
     "contact_saturated",
@@ -1022,6 +1052,8 @@ def _baseline_metrics_artifact_matches(
         return False
     if mpc.get("mpc_optimizer") != _argv_value(argv, "--mpc-optimizer"):
         return False
+    if mpc.get("config") != _expected_stage0_mpc_config(argv):
+        return False
     row_timing = row.get("steady_state_wall_time_sec")
     if row_timing is not None and not _numeric_values_equivalent(
         parsed.get("steady_state_wall_time_sec"),
@@ -1056,6 +1088,79 @@ def _numeric_values_equivalent(left: Any, right: Any) -> bool:
     return math.isclose(float(left), float(right), rel_tol=1e-12, abs_tol=1e-12)
 
 
+def _expected_stage0_mpc_config(argv: list[str]) -> dict[str, Any] | None:
+    try:
+        return {
+            "mode": _required_argv_value(argv, "--method"),
+            "num_samples": _argv_int(argv, "--mpc-samples"),
+            "num_iterations": _argv_int(argv, "--mpc-iterations"),
+            "planning_horizon_steps": _argv_int(
+                argv,
+                "--mpc-planning-horizon-steps",
+            ),
+            "control_steps": _argv_int(argv, "--mpc-control-steps"),
+            "sampling_mode": _required_argv_value(argv, "--mpc-sampling-mode"),
+            "knot_count": _argv_int(argv, "--mpc-knot-count"),
+            "elite_frac": _argv_float(argv, "--mpc-elite-frac"),
+            "temperature": _argv_float(argv, "--mpc-temperature"),
+            "root_pos_sigma": _argv_float(argv, "--mpc-root-pos-sigma"),
+            "root_rot_sigma": _argv_float(argv, "--mpc-root-rot-sigma"),
+            "joint_sigma": _argv_float(argv, "--mpc-joint-sigma"),
+            "min_root_pos_sigma": 0.002,
+            "min_root_rot_sigma": 0.004,
+            "min_joint_sigma": 0.008,
+            "sigma_decay": _argv_float(argv, "--mpc-sigma-decay"),
+            "smooth_passes": _argv_int(argv, "--mpc-smooth-passes"),
+            "command_reg_weight": _argv_float(argv, "--mpc-command-reg-weight"),
+            "command_smooth_weight": _argv_float(argv, "--mpc-command-smooth-weight"),
+            "use_guided_candidate": _argv_bool_optional(
+                argv,
+                "--mpc-guided-candidate",
+            ),
+            "guided_root_pos_gain": _argv_float(argv, "--mpc-guided-root-pos-gain"),
+            "guided_root_rot_gain": _argv_float(argv, "--mpc-guided-root-rot-gain"),
+            "guided_joint_gain": _argv_float(argv, "--mpc-guided-joint-gain"),
+            "guided_root_pos_clip": _argv_float(argv, "--mpc-guided-root-pos-clip"),
+            "guided_root_rot_clip": _argv_float(argv, "--mpc-guided-root-rot-clip"),
+            "guided_joint_clip": _argv_float(argv, "--mpc-guided-joint-clip"),
+            "acceptance_gate": _argv_bool_optional(argv, "--mpc-acceptance-gate"),
+            "seed": _argv_int(argv, "--seed"),
+            "freeze_first_frame": True,
+            "use_warm_start": _argv_bool_optional(argv, "--mpc-warm-start"),
+            "warm_start_source": _required_argv_value(
+                argv,
+                "--mpc-warm-start-source",
+            ),
+            "warm_start_decay": _argv_float(argv, "--mpc-warm-start-decay"),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _required_argv_value(argv: list[str], flag: str) -> str:
+    value = _argv_value(argv, flag)
+    if value is None:
+        raise ValueError(f"missing {flag}")
+    return value
+
+
+def _argv_int(argv: list[str], flag: str) -> int:
+    return int(_required_argv_value(argv, flag))
+
+
+def _argv_float(argv: list[str], flag: str) -> float:
+    return float(_required_argv_value(argv, flag))
+
+
+def _argv_bool_optional(argv: list[str], flag: str) -> bool:
+    negative_flag = f"--no-{flag[2:]}"
+    positive = flag in argv
+    negative = negative_flag in argv
+    if positive == negative:
+        raise ValueError(f"expected exactly one of {flag} or {negative_flag}")
+    return positive
+
+
 def _mjx_argv_from_baseline_row(
     row: dict[str, Any],
     python_executable: str,
@@ -1068,6 +1173,10 @@ def _mjx_argv_from_baseline_row(
     argv = _set_arg(argv, "--mpc-optimizer", "generic")
     argv = _set_arg(argv, "--output-dir", str(output_dir))
     argv = _set_arg(argv, "--device", str(device))
+    for flag in LEGACY_ONLY_MJX_DROP_ARG_VALUES:
+        argv = _drop_arg_with_value(argv, flag)
+    for flag in LEGACY_ONLY_MJX_DROP_FLAGS:
+        argv = _drop_flag(argv, flag)
     if "--mjx-enable-scan" not in argv:
         argv.append("--mjx-enable-scan")
     if "--save-rollout" not in argv:

@@ -41,25 +41,30 @@ planning_horizon_steps: 40
 control_steps: 20
 knot_count: 8
 sampling_mode: knot
+elite_frac: 0.125
 temperature: 0.7
 root_pos_sigma: 0.04
 root_rot_sigma: 0.10
 joint_sigma: 0.18
+sigma_decay: 0.75
 smooth_passes: 0
 command_reg_weight: 0.0
 command_smooth_weight: 0.0
 guided_candidate: true
 acceptance_gate: true
+warm_start: false
+warm_start_source: best
+warm_start_decay: 1.0
 reward_weights: g1_wbc_reward_weights_method_specific_v14_20260612.json
 max_steps: 800
 ```
 
 The manifest records the exact per-motion command, seed, metrics, wall time,
-commit, model path, checkpoint, reward weights, GPU, driver, MuJoCo,
-MuJoCo-Warp, Torch, JAX, and MJX versions. If existing project artifacts prove a
-different promoted sweetpoint for `walk`, Stage 0 records that per-motion
-baseline explicitly before MJX work proceeds. Later gates compare only against
-the frozen manifest.
+commit, model path, checkpoint, reward weights, effective legacy `mpc.config`,
+GPU, driver, MuJoCo, MuJoCo-Warp, Torch, JAX, and MJX versions. If existing
+project artifacts prove a different promoted sweetpoint for `walk`, Stage 0
+records that per-motion baseline explicitly before MJX work proceeds. Later
+gates compare only against the frozen manifest.
 
 The historical `8192/h80` packaged baseline remains a reference for quality and
 smoothness context, but it is not the speed denominator for the first MJX

@@ -118,18 +118,41 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 optimizer_index = command.argv.index("--mpc-optimizer")
                 self.assertEqual(command.argv[optimizer_index + 1], "legacy")
                 for flag, value in (
+                    ("--mpc-samples", "512"),
+                    ("--mpc-iterations", "2"),
+                    ("--mpc-planning-horizon-steps", "40"),
+                    ("--mpc-control-steps", "20"),
+                    ("--mpc-sampling-mode", "knot"),
+                    ("--mpc-knot-count", "8"),
+                    ("--mpc-elite-frac", "0.125"),
+                    ("--mpc-temperature", "0.7"),
+                    ("--mpc-root-pos-sigma", "0.04"),
+                    ("--mpc-root-rot-sigma", "0.10"),
+                    ("--mpc-joint-sigma", "0.18"),
+                    ("--mpc-sigma-decay", "0.75"),
+                    ("--mpc-smooth-passes", "0"),
+                    ("--mpc-command-reg-weight", "0.0"),
+                    ("--mpc-command-smooth-weight", "0.0"),
                     ("--mpc-guided-root-pos-gain", "0.50"),
                     ("--mpc-guided-root-rot-gain", "0.50"),
                     ("--mpc-guided-joint-gain", "0.50"),
                     ("--mpc-guided-root-pos-clip", "0.05"),
                     ("--mpc-guided-root-rot-clip", "0.12"),
                     ("--mpc-guided-joint-clip", "0.35"),
+                    ("--mpc-warm-start-source", "best"),
+                    ("--mpc-warm-start-decay", "1.0"),
                     ("--nconmax-per-env", "512"),
                     ("--njmax-per-env", "2048"),
                 ):
                     self.assertIn(flag, command.argv)
                     flag_index = command.argv.index(flag)
                     self.assertEqual(command.argv[flag_index + 1], value)
+                for flag in (
+                    "--mpc-guided-candidate",
+                    "--mpc-acceptance-gate",
+                    "--no-mpc-warm-start",
+                ):
+                    self.assertIn(flag, command.argv)
 
     def test_main_fails_fast_when_stage0_input_paths_are_missing(self) -> None:
         runner = load_runner()
@@ -596,6 +619,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                                 "accepted": True,
                                 "accepted_windows": 40,
                                 "used_baseline_fallback": False,
+                                "config": _stage0_mpc_config(command),
                                 "steady_state_wall_time_sec": 120.0,
                                 "runtime_visible_devices": ["0"],
                                 "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
@@ -696,6 +720,70 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
             row = runner.load_existing_ok_row(command)
 
         self.assertIsNone(row)
+
+    def test_existing_row_reuse_rejects_missing_or_mismatched_mpc_config(self) -> None:
+        runner = load_runner()
+        invalid_cases = ("missing", "mismatched")
+        for name in invalid_cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    root = Path(tmp_dir)
+                    args = runner.parse_args(
+                        [
+                            "--jump-motion",
+                            str(root / "jump.npz"),
+                            "--walk-motion",
+                            str(root / "walk.npz"),
+                            "--checkpoint",
+                            str(root / "model.pt"),
+                            "--reward-weights",
+                            str(root / "reward.json"),
+                            "--output-dir",
+                            str(root / "stage0"),
+                            "--reuse-existing-ok",
+                        ]
+                    )
+                    command = next(
+                        command
+                        for command in runner.build_stage0_commands(args)
+                        if command.motion_name == "jump" and command.seed == 0
+                    )
+                    output_dir = Path(command.output_dir)
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    mpc = {
+                        "mpc_backend": "mujoco_warp",
+                        "mpc_optimizer": "legacy",
+                        "reward_weight_source": str((root / "reward.json").resolve()),
+                        "accepted": True,
+                        "accepted_windows": 40,
+                        "used_baseline_fallback": False,
+                    }
+                    if name == "mismatched":
+                        mpc["config"] = {
+                            **_stage0_mpc_config(command),
+                            "num_samples": 256,
+                        }
+                    (output_dir / "metrics.json").write_text(
+                        json.dumps(
+                            {
+                                "motion": command.motion,
+                                "motion_type": "isaaclab",
+                                "checkpoint": str(root / "model.pt"),
+                                "device": "cuda:0",
+                                "method": "g1_wbc_joint_global",
+                                "max_steps": 800,
+                                "metrics": _passing_metrics(),
+                                "mpc": mpc,
+                            }
+                        )
+                    )
+                    (output_dir / "rollout.npz").write_text("{}")
+                    (output_dir / "mpc_command.npz").write_text("{}")
+                    runner.write_stage0_runner_provenance(command)
+
+                    row = runner.load_existing_ok_row(command)
+
+                self.assertIsNone(row)
 
     def test_existing_row_reuse_rejects_stale_stage0_runner_argv_provenance(self) -> None:
         runner = load_runner()
@@ -1348,6 +1436,43 @@ def _passing_metrics() -> dict[str, float | bool]:
         "control_delta_mean": 0.01,
         "joint_acc_mean": 1.0,
         "joint_jerk_mean": 1.0,
+    }
+
+
+def _stage0_mpc_config(command) -> dict[str, float | int | str | bool | None]:
+    return {
+        "mode": "g1_wbc_joint_global",
+        "num_samples": 512,
+        "num_iterations": 2,
+        "planning_horizon_steps": 40,
+        "control_steps": 20,
+        "sampling_mode": "knot",
+        "knot_count": 8,
+        "elite_frac": 0.125,
+        "temperature": 0.7,
+        "root_pos_sigma": 0.04,
+        "root_rot_sigma": 0.10,
+        "joint_sigma": 0.18,
+        "min_root_pos_sigma": 0.002,
+        "min_root_rot_sigma": 0.004,
+        "min_joint_sigma": 0.008,
+        "sigma_decay": 0.75,
+        "smooth_passes": 0,
+        "command_reg_weight": 0.0,
+        "command_smooth_weight": 0.0,
+        "use_guided_candidate": True,
+        "guided_root_pos_gain": 0.50,
+        "guided_root_rot_gain": 0.50,
+        "guided_joint_gain": 0.50,
+        "guided_root_pos_clip": 0.05,
+        "guided_root_rot_clip": 0.12,
+        "guided_joint_clip": 0.35,
+        "acceptance_gate": True,
+        "seed": int(command.seed),
+        "freeze_first_frame": True,
+        "use_warm_start": False,
+        "warm_start_source": "best",
+        "warm_start_decay": 1.0,
     }
 
 

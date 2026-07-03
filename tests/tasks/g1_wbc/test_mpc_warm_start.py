@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ruff: noqa: D101,D102
 import io
+import json
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -80,6 +81,7 @@ class G1WbcMpcWarmStartTest(unittest.TestCase):
             accepted_windows=2,
         )
 
+        stdout = io.StringIO()
         with patch.object(sys, "argv", argv), \
             patch.object(
                 evaluate,
@@ -92,7 +94,7 @@ class G1WbcMpcWarmStartTest(unittest.TestCase):
             patch.object(evaluate, "compute_rollout_metrics", return_value={"num_steps": 40}), \
             patch.object(evaluate, "optimize_mpc_command", return_value=legacy_result) as legacy, \
             patch.object(evaluate, "run_g1_wbc_sampling_mpc") as generic, \
-            redirect_stdout(io.StringIO()):
+            redirect_stdout(stdout):
             evaluate.main()
 
         legacy.assert_called_once()
@@ -100,6 +102,13 @@ class G1WbcMpcWarmStartTest(unittest.TestCase):
         mpc_config = legacy.call_args.args[3]
         self.assertEqual(mpc_config.num_samples, 512)
         self.assertEqual(mpc_config.sampling_mode, "knot")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["mpc"]["config"]["num_samples"], 512)
+        self.assertEqual(payload["mpc"]["config"]["sampling_mode"], "knot")
+        self.assertEqual(payload["mpc"]["config"]["planning_horizon_steps"], 40)
+        self.assertEqual(payload["mpc"]["config"]["control_steps"], 20)
+        self.assertEqual(payload["mpc"]["config"]["root_pos_sigma"], 0.04)
+        self.assertNotIn("reward_weights", payload["mpc"]["config"])
 
     def test_config_defaults_preserve_disabled_warm_start(self) -> None:
         config = mpc.G1WbcMpcConfig()

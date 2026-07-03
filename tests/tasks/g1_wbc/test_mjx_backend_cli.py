@@ -98,6 +98,27 @@ class MjxBackendCliTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requires an MPC method"):
             evaluate._validate_backend_args(args)
 
+    def test_generic_optimizer_rejects_legacy_only_mpc_knobs(self) -> None:
+        argv = [
+            "evaluate.py",
+            "--motion",
+            "/tmp/motion.npz",
+            "--method",
+            "g1_wbc_joint_global",
+            "--mpc-optimizer",
+            "generic",
+            "--mpc-guided-candidate",
+            "--mpc-acceptance-gate",
+            "--mpc-guided-joint-gain",
+            "0.50",
+        ]
+
+        with mock.patch("sys.argv", argv):
+            args = evaluate._parse_args()
+
+        with self.assertRaisesRegex(ValueError, "legacy optimizer"):
+            evaluate._validate_backend_args(args)
+
     def test_file_sha256_hashes_saved_command_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             command = Path(tmp_dir) / "mpc_command.npz"

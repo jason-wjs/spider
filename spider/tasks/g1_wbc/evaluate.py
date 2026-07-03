@@ -42,6 +42,25 @@ from spider.tasks.g1_wbc.rollout import (
 )
 
 MPC_METHODS = ("g1_wbc_ee", "g1_wbc_joint", "g1_wbc_joint_global")
+LEGACY_ONLY_MPC_FLAGS = {
+    "mpc_sampling_mode": "--mpc-sampling-mode",
+    "mpc_elite_frac": "--mpc-elite-frac",
+    "mpc_sigma_decay": "--mpc-sigma-decay",
+    "mpc_smooth_passes": "--mpc-smooth-passes",
+    "mpc_warm_start": "--mpc-warm-start/--no-mpc-warm-start",
+    "mpc_warm_start_source": "--mpc-warm-start-source",
+    "mpc_warm_start_decay": "--mpc-warm-start-decay",
+    "mpc_command_reg_weight": "--mpc-command-reg-weight",
+    "mpc_command_smooth_weight": "--mpc-command-smooth-weight",
+    "mpc_guided_candidate": "--mpc-guided-candidate/--no-mpc-guided-candidate",
+    "mpc_acceptance_gate": "--mpc-acceptance-gate/--no-mpc-acceptance-gate",
+    "mpc_guided_root_pos_gain": "--mpc-guided-root-pos-gain",
+    "mpc_guided_root_rot_gain": "--mpc-guided-root-rot-gain",
+    "mpc_guided_joint_gain": "--mpc-guided-joint-gain",
+    "mpc_guided_root_pos_clip": "--mpc-guided-root-pos-clip",
+    "mpc_guided_root_rot_clip": "--mpc-guided-root-rot-clip",
+    "mpc_guided_joint_clip": "--mpc-guided-joint-clip",
+}
 
 
 def main() -> None:
@@ -189,6 +208,7 @@ def main() -> None:
                     args.method,
                     legacy_config.reward_weights,
                 ),
+                "config": _legacy_mpc_config_payload(legacy_config),
                 "history": [asdict(info) for info in legacy_result.history],
                 "final_scores_mean": _safe_tensor_stat(legacy_result.scores, "mean"),
                 "final_scores_max": _safe_tensor_stat(legacy_result.scores, "max"),
@@ -542,6 +562,25 @@ def _validate_backend_args(args: argparse.Namespace) -> None:
         raise ValueError("--mpc-backend mjx requires --mpc-optimizer generic.")
     if args.mpc_optimizer == "legacy" and args.method not in MPC_METHODS:
         raise ValueError("--mpc-optimizer legacy requires an MPC method.")
+    if args.mpc_optimizer != "legacy":
+        legacy_only_flags = _configured_legacy_only_mpc_flags(args)
+        if legacy_only_flags:
+            flags = ", ".join(legacy_only_flags)
+            raise ValueError(
+                "Legacy MPC options require the legacy optimizer "
+                "(--mpc-optimizer legacy): "
+                f"{flags}"
+            )
+
+
+def _configured_legacy_only_mpc_flags(args: argparse.Namespace) -> tuple[str, ...]:
+    flags: list[str] = []
+    if args.mpc_preset != "aggressive":
+        flags.append("--mpc-preset")
+    for name, flag in LEGACY_ONLY_MPC_FLAGS.items():
+        if getattr(args, name) is not None:
+            flags.append(flag)
+    return tuple(flags)
 
 
 def _mjx_physics_scan_enabled(args: argparse.Namespace) -> bool:
@@ -643,6 +682,12 @@ def _build_mpc_config(args: argparse.Namespace) -> G1WbcMpcConfig:
     if args.mpc_reward_weights is not None:
         config.reward_weights = load_reward_weights(args.mpc_reward_weights, args.method)
     return config
+
+
+def _legacy_mpc_config_payload(config: G1WbcMpcConfig) -> dict[str, Any]:
+    payload = asdict(config)
+    payload.pop("reward_weights", None)
+    return payload
 
 
 def _load_method_reward_weights(args: argparse.Namespace) -> dict[str, float] | None:
