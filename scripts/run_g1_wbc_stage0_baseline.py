@@ -17,13 +17,24 @@ from pathlib import Path
 from typing import Any
 
 SPIDER_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = SPIDER_ROOT.parent
-TESTBED_PACKAGE_ROOT = WORKSPACE_ROOT / "g1_wbc_testbed_motion_package_20260617"
-DEFAULT_JUMP_MOTION = TESTBED_PACKAGE_ROOT / "input_motions" / "jump" / "motion.npz"
-DEFAULT_WALK_MOTION = TESTBED_PACKAGE_ROOT / "input_motions" / "walk" / "motion.npz"
+MODEL_BASED_ROOT = next(
+    (
+        candidate
+        for candidate in (SPIDER_ROOT, *SPIDER_ROOT.parents)
+        if (candidate / "wbc_results" / "assets").is_dir()
+    ),
+    SPIDER_ROOT.parent,
+)
+WBC_RESULTS_ROOT = MODEL_BASED_ROOT / "wbc_results"
+DEFAULT_JUMP_MOTION = WBC_RESULTS_ROOT / "assets" / "motion_data" / "jump" / "motion.npz"
+DEFAULT_WALK_MOTION = WBC_RESULTS_ROOT / "assets" / "motion_data" / "walk" / "motion.npz"
+DEFAULT_CHECKPOINT = WBC_RESULTS_ROOT / "assets" / "checkpoints" / "model_8000.pt"
 DEFAULT_REWARD_WEIGHTS = (
-    TESTBED_PACKAGE_ROOT
-    / "metadata"
+    WBC_RESULTS_ROOT
+    / "g1_body_tracking_wbc"
+    / "spider"
+    / "2026-06-23-mechanism-quality-speed-wjs"
+    / "configs"
     / "g1_wbc_reward_weights_method_specific_v14_20260612.json"
 )
 DEFAULT_PYTHON_EXECUTABLE = (
@@ -34,18 +45,15 @@ DEFAULT_PYTHON_EXECUTABLE = (
 BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
 MOTIONS = ("jump", "walk")
 SEEDS = (0, 1, 2)
-REJECTED_STAGE0_MOTION_SHA256 = {
-    "jump": "07b3b8e1bf9ba3f94dfbe552819cd792f81a06a3c4ff6e5029b55b2897b7c544",
-    "walk": "a9baaa714d61da19c6114077cf0c919c965ad6802f770cc83ed695396c4c8c9f",
-}
-REJECTED_STAGE0_MOTION_DOC = (
-    "docs/tasks/g1_wbc_mjx_full_rollout/stage0_input_diagnosis_20260703.md"
-)
 SWEETPOINT_ARGS = (
     "--method",
     "g1_wbc_joint_global",
     "--mpc-backend",
     "mujoco_warp",
+    "--mpc-optimizer",
+    "legacy",
+    "--mpc-preset",
+    "aggressive",
     "--save-rollout",
     "--max-steps",
     "800",
@@ -75,8 +83,24 @@ SWEETPOINT_ARGS = (
     "0.0",
     "--mpc-command-smooth-weight",
     "0.0",
+    "--mpc-guided-root-pos-gain",
+    "0.50",
+    "--mpc-guided-root-rot-gain",
+    "0.50",
+    "--mpc-guided-joint-gain",
+    "0.50",
+    "--mpc-guided-root-pos-clip",
+    "0.05",
+    "--mpc-guided-root-rot-clip",
+    "0.12",
+    "--mpc-guided-joint-clip",
+    "0.35",
     "--mpc-guided-candidate",
     "--mpc-acceptance-gate",
+    "--nconmax-per-env",
+    "512",
+    "--njmax-per-env",
+    "2048",
 )
 
 
@@ -101,7 +125,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--motion-type", default="isaaclab")
     parser.add_argument(
         "--checkpoint",
-        default="bc",
+        default=str(DEFAULT_CHECKPOINT),
         help="Checkpoint alias, directory, or .pt file passed to evaluate.py.",
     )
     parser.add_argument(
@@ -185,33 +209,6 @@ def validate_input_paths(args: argparse.Namespace) -> tuple[str, ...]:
             "(expected an existing .pt file or directory with model_*.pt)"
         )
     return tuple(missing)
-
-
-def validate_stage0_motion_inputs(args: argparse.Namespace) -> tuple[str, ...]:
-    """Reject motion hashes already proven not to be Stage 0 sweetpoint inputs."""
-
-    rejected_by_sha = {
-        sha256: motion_name
-        for motion_name, sha256 in REJECTED_STAGE0_MOTION_SHA256.items()
-    }
-    errors: list[str] = []
-    for motion_name, path in (
-        ("jump", args.jump_motion.expanduser().resolve()),
-        ("walk", args.walk_motion.expanduser().resolve()),
-    ):
-        digest = file_sha256(path)
-        rejected_name = rejected_by_sha.get(digest)
-        if rejected_name is None:
-            continue
-        errors.append(
-            f"{motion_name} motion: known rejected Stage0 candidate "
-            f"sha256={digest} ({rejected_name} asset motion). "
-            "This file failed the sweetpoint baseline gate; see "
-            f"{REJECTED_STAGE0_MOTION_DOC}. Restore the historical "
-            "g1_wbc_testbed_motion_package_20260617 inputs or use a new "
-            "motion package that first passes Stage0."
-        )
-    return tuple(errors)
 
 
 def validate_runtime_environment(args: argparse.Namespace) -> tuple[str, ...]:
@@ -472,11 +469,6 @@ def main(argv: list[str] | None = None) -> int:
     if missing_inputs:
         for missing in missing_inputs:
             print(f"missing input: {missing}", file=sys.stderr)
-        return 2
-    motion_input_errors = validate_stage0_motion_inputs(args)
-    if motion_input_errors:
-        for error in motion_input_errors:
-            print(f"invalid input: {error}", file=sys.stderr)
         return 2
     runtime_errors = validate_runtime_environment(args)
     if runtime_errors:

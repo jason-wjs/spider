@@ -1,12 +1,16 @@
-# Stage0 Input Diagnosis 2026-07-03
+# Stage0 Reproduction Diagnosis 2026-07-03
 
 ## Summary
 
-The 2026-07-03 H100 Stage0 attempt showed that the current
-`wbc_results/assets/motion_data/{jump,walk}` motion files cannot be treated as
-the frozen sweetpoint baseline inputs. They are valid motion files, but they do
-not match the historical motion package that produced the current jump/walk
-sweetpoint quality gates.
+The 2026-07-03 H100 Stage0 attempt failed to reproduce the historical
+MuJoCo-Warp sweetpoint quality on `jump`, but the attempted motion files are
+not rejected Stage0 inputs. They are the official versioned copies of the
+historical testbed motion package inputs according to
+`/data_team/junsong/model-based/wbc_results/assets/motion_data/README.md`.
+
+This diagnosis is therefore a current-code reproduction failure record. It is
+not proof that `wbc_results/assets/motion_data/{jump,walk}/motion.npz` are the
+wrong motions.
 
 The run was stopped after `jump/seed_0` and `jump/seed_1` because the jump group
 was already mathematically unable to pass Stage0 eligibility. Continuing to
@@ -43,11 +47,23 @@ Jump Stage0 caps are score mean `>= -2.12`, root mean `<= 0.065`, body mean
 perfect `jump/seed_2` would leave root/body/EE means above the caps. The run was
 therefore stopped before generating a full formal manifest.
 
-## Root Cause
+## Corrected Input Provenance
 
-The historical jump/walk sweetpoint evidence came from
-`g1_wbc_testbed_motion_package_20260617/input_motions/{jump,walk}/motion.npz`.
-Examples:
+`wbc_results/assets/motion_data/README.md` records these motion assets as the
+migrated shared testbed inputs:
+
+| Motion | Asset SHA256 | Recorded source |
+| --- | --- | --- |
+| jump | `07b3b8e1bf9ba3f94dfbe552819cd792f81a06a3c4ff6e5029b55b2897b7c544` | `../g1_wbc_testbed_motion_package_20260617/input_motions/jump/motion.npz` |
+| walk | `a9baaa714d61da19c6114077cf0c919c965ad6802f770cc83ed695396c4c8c9f` | `../g1_wbc_testbed_motion_package_20260617/input_motions/walk/motion.npz` |
+
+The earlier conclusion that these hashes were known-bad non-sweetpoint inputs
+was incorrect. The Stage0 runner must not reject them by hash.
+
+## Historical Sweetpoint Evidence
+
+The historical jump/walk sweetpoint evidence came from the same testbed motion
+package lineage:
 
 - `2026-06-17-testbed-motion-baselines-xwj/primary_metrics.csv` reports
   `jump/g1_wbc_joint_global` at score `-2.0780`, root mean `0.0425`, body mean
@@ -57,35 +73,68 @@ Examples:
   `walk/g1_wbc_joint_global` at score `-1.0360`, root mean `0.0432`, body mean
   `0.0453`, EE mean `0.0471`, contact mismatch `0.1344`, control delta
   `0.1489`, and joint acc `84.32`.
-- `2026-06-23-mechanism-quality-speed-wjs` and
-  `2026-06-23-fast-quality-pareto-wjs` continue to reference the same testbed
-  motion package in their command text and reference metrics.
+- `2026-06-23-mechanism-quality-speed-wjs` repeats the sweetpoint family with
+  explicit `aggressive`, knot, guided-candidate, and contact-buffer parameters
+  in command artifacts.
 
-The rejected `wbc_results/assets/motion_data/jump/motion.npz` file is a much
-longer motion with 12,224 frames. The historical single-motion sweetpoint
-reference `homejrhangmr` has 345 frames and is a different trajectory:
+The historical single-motion `homejrhangmr` sweetpoint reference is a different
+trajectory and remains useful only for a separate single-motion milestone.
 
-| Motion file | Frames | Root range after loader | SHA256 |
-| --- | ---: | --- | --- |
-| rejected jump candidate | 12,224 | `[8.6073, 5.5045, 0.3546]` | `07b3b8e1bf9ba3f94dfbe552819cd792f81a06a3c4ff6e5029b55b2897b7c544` |
-| rejected walk candidate | 12,332 | `[9.0360, 5.3269, 0.7610]` | `a9baaa714d61da19c6114077cf0c919c965ad6802f770cc83ed695396c4c8c9f` |
-| `homejrhangmr` sweetpoint reference | 345 | `[2.3553, 2.0781, 0.4948]` | `1fa518f5b80b675e3a89ff8aad501e031b64cd7ab9c0b5a1a9e2cd36331ff829` |
+## Current Root Cause
 
-The first 345 loaded frames of the rejected jump candidate differ from
-`homejrhangmr` by root RMS `1.786m` and joint RMS `0.588`, so this is not a
-byte-level packaging change of the same benchmark.
+The strongest current-code difference is optimizer routing. The failed
+2026-07-03 attempt ran `--mpc-backend mujoco_warp`, but the current
+`evaluate.py` MuJoCo-Warp path was using SPIDER's generic sampled MPC optimizer
+metadata (`spider.optimizers.sampling`, `control_update_mode=weighted_mean`).
+The historical sweetpoint artifacts use the legacy `G1WbcMpcConfig` optimizer
+semantics, including guided-candidate insertion, acceptance-gate fallback,
+command regularization, per-window zero-delta comparisons, and legacy
+`mpc_*` metadata.
+
+The historical flags were accepted by the CLI, but before this repair many of
+them did not affect the generic optimizer path. Making those flags explicit in
+the runner was necessary for auditability but not sufficient for quality
+reproduction.
+
+The Stage0 runner now emits `--mpc-optimizer legacy`, and `evaluate.py` routes
+that mode to `spider.tasks.g1_wbc.mpc.optimize_mpc_command()`. The runner also
+defaults to the versioned asset checkpoint instead of the worktree-dependent
+`bc` alias.
+
+## Post-Repair Smoke Evidence
+
+A 40-step single-GPU H100 smoke run on `jump/seed_1` after the legacy optimizer
+repair succeeded:
+
+`/data_team/junsong/model-based/g1_wbc_mjx_runs/stage0_legacy_smoke_20260703_jump_seed1_40`
+
+| Steps | Optimizer | Root mean | Body mean | EE mean | Contact mismatch | Control delta | GPU visibility | GPU |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 40 | `legacy` | `0.0126` | `0.0161` | `0.0188` | `0.0000` | `0.1027` | `["1"]` | `NVIDIA H100 80GB HBM3` |
+
+The smoke also wrote `metrics.json`, `rollout.npz`, and `mpc_command.npz` with
+consistent 41-frame command/rollout qpos arrays. This is not a formal Stage0
+baseline because it used only 40 steps and one seed, but it supports the
+optimizer-routing root cause and justifies rerunning the full six-row Stage0
+baseline through the corrected runner.
+
+## Remaining Reproduction Hypotheses
+
+If the corrected legacy Stage0 path still fails, investigate:
+
+- MuJoCo/MuJoCo-Warp model, XML, contact, or loader drift.
+- Evaluation code drift after the historical `wbc_results` runs were produced.
+- Environment or dependency drift on the current H100 machine.
+
+A new full Stage0 manifest is still required before MJX formal acceptance can
+launch.
 
 ## Decision
 
-Do not launch formal MJX acceptance from the rejected `wbc_results/assets`
-motion candidates. A valid next Stage0 attempt must use one of these routes:
+Do not launch formal MJX acceptance until a six-row Stage0 MuJoCo-Warp run on
+the official `wbc_results/assets` jump/walk motions produces passing
+`baseline_envelopes` and `promoted_seeds`.
 
-1. Restore the historical `g1_wbc_testbed_motion_package_20260617` input motions
-   and run the six-row Stage0 baseline against those files.
-2. Promote a new motion package only after a full six-row Stage0 run produces
-   passing `baseline_envelopes` and `promoted_seeds`.
-3. Use the `homejrhangmr` single-motion sweetpoint only for a separate
-   single-motion milestone, not as proof for the jump/walk Stage0 gate.
-
-The quality gate remains unchanged; the rejected inputs failed the gate rather
-than proving the gate too strict.
+If the corrected Stage0 runner still fails, continue diagnosis by comparing
+current `evaluate.py` inputs and runtime artifacts against the historical
+command artifacts, checkpoint payload, XML/model assets, and archived metrics.

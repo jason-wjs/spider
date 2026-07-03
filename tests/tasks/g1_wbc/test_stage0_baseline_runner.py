@@ -26,6 +26,33 @@ def load_runner():
 
 
 class Stage0BaselineRunnerTest(unittest.TestCase):
+    def test_parse_args_defaults_to_versioned_wbc_results_assets(self) -> None:
+        runner = load_runner()
+
+        args = runner.parse_args(["--output-dir", "/tmp/stage0", "--dry-run"])
+
+        self.assertEqual(
+            args.jump_motion,
+            runner.WBC_RESULTS_ROOT / "assets" / "motion_data" / "jump" / "motion.npz",
+        )
+        self.assertEqual(
+            args.walk_motion,
+            runner.WBC_RESULTS_ROOT / "assets" / "motion_data" / "walk" / "motion.npz",
+        )
+        self.assertEqual(
+            args.reward_weights,
+            runner.WBC_RESULTS_ROOT
+            / "g1_body_tracking_wbc"
+            / "spider"
+            / "2026-06-23-mechanism-quality-speed-wjs"
+            / "configs"
+            / "g1_wbc_reward_weights_method_specific_v14_20260612.json",
+        )
+        self.assertEqual(
+            args.checkpoint,
+            str(runner.WBC_RESULTS_ROOT / "assets" / "checkpoints" / "model_8000.pt"),
+        )
+
     def test_parse_args_accepts_stage0_inputs(self) -> None:
         runner = load_runner()
 
@@ -84,6 +111,25 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 self.assertIn("--save-rollout", command.argv)
                 motion_type_index = command.argv.index("--motion-type")
                 self.assertEqual(command.argv[motion_type_index + 1], "isaaclab")
+                self.assertIn("--mpc-preset", command.argv)
+                preset_index = command.argv.index("--mpc-preset")
+                self.assertEqual(command.argv[preset_index + 1], "aggressive")
+                self.assertIn("--mpc-optimizer", command.argv)
+                optimizer_index = command.argv.index("--mpc-optimizer")
+                self.assertEqual(command.argv[optimizer_index + 1], "legacy")
+                for flag, value in (
+                    ("--mpc-guided-root-pos-gain", "0.50"),
+                    ("--mpc-guided-root-rot-gain", "0.50"),
+                    ("--mpc-guided-joint-gain", "0.50"),
+                    ("--mpc-guided-root-pos-clip", "0.05"),
+                    ("--mpc-guided-root-rot-clip", "0.12"),
+                    ("--mpc-guided-joint-clip", "0.35"),
+                    ("--nconmax-per-env", "512"),
+                    ("--njmax-per-env", "2048"),
+                ):
+                    self.assertIn(flag, command.argv)
+                    flag_index = command.argv.index(flag)
+                    self.assertEqual(command.argv[flag_index + 1], value)
 
     def test_main_fails_fast_when_stage0_input_paths_are_missing(self) -> None:
         runner = load_runner()
@@ -143,68 +189,6 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
         self.assertIn("missing input: checkpoint", stderr.getvalue())
-        self.assertFalse((output_root / "baseline_manifest.json").exists())
-
-    def test_main_rejects_known_non_sweetpoint_motion_hashes(self) -> None:
-        import torch
-
-        runner = load_runner()
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
-            output_root = root / "stage0"
-            jump_motion = root / "jump.npz"
-            walk_motion = root / "walk.npz"
-            checkpoint = root / "model.pt"
-            reward_weights = root / "reward.json"
-            jump_motion.write_text("jump")
-            walk_motion.write_text("walk")
-            reward_weights.write_text("{}")
-            torch.save(
-                {
-                    "actor_state_dict": {
-                        "obs_normalizer._mean": torch.zeros(1, 886),
-                        "obs_normalizer._std": torch.ones(1, 886),
-                        "mlp.0.weight": torch.zeros(1, 1),
-                    }
-                },
-                checkpoint,
-            )
-
-            with mock.patch.object(
-                runner,
-                "file_sha256",
-                side_effect=lambda path: {
-                    jump_motion.resolve(): runner.REJECTED_STAGE0_MOTION_SHA256[
-                        "jump"
-                    ],
-                    walk_motion.resolve(): runner.REJECTED_STAGE0_MOTION_SHA256[
-                        "walk"
-                    ],
-                    checkpoint.resolve(): "0" * 64,
-                    reward_weights.resolve(): "1" * 64,
-                }[Path(path).resolve()],
-            ):
-                stderr = io.StringIO()
-                with redirect_stderr(stderr):
-                    exit_code = runner.main(
-                        [
-                            "--jump-motion",
-                            str(jump_motion),
-                            "--walk-motion",
-                            str(walk_motion),
-                            "--checkpoint",
-                            str(checkpoint),
-                            "--reward-weights",
-                            str(reward_weights),
-                            "--output-dir",
-                            str(output_root),
-                            "--dry-run",
-                        ]
-                    )
-
-        self.assertEqual(exit_code, 2)
-        self.assertIn("invalid input: jump motion", stderr.getvalue())
-        self.assertIn("known rejected Stage0 candidate", stderr.getvalue())
         self.assertFalse((output_root / "baseline_manifest.json").exists())
 
     def test_main_fails_fast_when_real_cuda_run_has_multiple_visible_gpus(self) -> None:

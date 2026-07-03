@@ -35,6 +35,11 @@ The default backend for existing commands must remain MuJoCo-Warp. MJX must be
 an explicit backend path and must fail loudly when its runtime or parity
 requirements are unavailable.
 
+The Stage0 sweetpoint denominator is narrower than the generic MuJoCo-Warp
+backend: it must use `--mpc-optimizer legacy` so the historical
+`G1WbcMpcConfig` guided candidate, acceptance gate, regularization, and
+per-window metadata semantics are actually active.
+
 ## Hardware Rules
 
 - One motion inference command may use only one visible GPU.
@@ -89,6 +94,8 @@ Required fixed command properties:
 | --- | --- |
 | method | `g1_wbc_joint_global` |
 | backend | `mujoco_warp` |
+| optimizer | `legacy` |
+| preset | `aggressive` |
 | max steps | `800` |
 | samples | `512` |
 | iterations | `2` |
@@ -103,8 +110,16 @@ Required fixed command properties:
 | smooth passes | `0` |
 | command regularization | `0.0` |
 | command smoothness | `0.0` |
+| guided root position gain | `0.50` |
+| guided root rotation gain | `0.50` |
+| guided joint gain | `0.50` |
+| guided root position clip | `0.05` |
+| guided root rotation clip | `0.12` |
+| guided joint clip | `0.35` |
 | guided candidate | enabled |
 | acceptance gate | enabled |
+| nconmax per env | `512` |
+| njmax per env | `2048` |
 | save rollout | enabled |
 
 The manifest must use explicit file paths for motion, checkpoint, and reward
@@ -119,13 +134,13 @@ after the real `baseline_manifest.json` contains passing `baseline_envelopes`
 and `promoted_seeds`.
 
 Historical sweetpoint evidence available in `wbc_results` comes from the
-packaged testbed motion set
-`g1_wbc_testbed_motion_package_20260617/input_motions/{jump,walk}/motion.npz`
-and from the single-motion `homejrhangmr` run recorded under
-`2026-06-26-homejrhangmr-three-way-wjs`. If those exact testbed input motions
-are unavailable in the current filesystem, they must be restored or replaced
-by a newly generated motion package that passes Stage0 before MJX acceptance
-can launch.
+versioned testbed motion set now stored under
+`wbc_results/assets/motion_data/{jump,walk}/motion.npz` and from the
+single-motion `homejrhangmr` run recorded under
+`2026-06-26-homejrhangmr-three-way-wjs`. These motion assets are the official
+migrated copies of the historical testbed package inputs, but a file path and
+hash still are not enough to accept Stage0; the current code must reproduce the
+six-row MuJoCo-Warp sweetpoint manifest and pass the gates below.
 
 Current input status in this worktree on 2026-07-03:
 
@@ -133,16 +148,17 @@ Current input status in this worktree on 2026-07-03:
 | --- | --- | --- | --- |
 | WBC MLP checkpoint | `/data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt` | `98738b9214d12146dc7f4669cb65dfde9d835f4a133e5f2cbaef4e60b1e5b88f` | accepted checkpoint input |
 | reward weights | `/data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json` | `bb0490a71a27a29480f13ce77bc00c13a900845f0f52641b5ec20d51ebaa535d` | accepted reward input |
-| jump motion candidate | `/data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz` | `07b3b8e1bf9ba3f94dfbe552819cd792f81a06a3c4ff6e5029b55b2897b7c544` | rejected as Stage0 sweetpoint input until a full Stage0 manifest passes |
-| walk motion candidate | `/data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz` | `a9baaa714d61da19c6114077cf0c919c965ad6802f770cc83ed695396c4c8c9f` | rejected as Stage0 sweetpoint input until a full Stage0 manifest passes |
+| jump motion | `/data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz` | `07b3b8e1bf9ba3f94dfbe552819cd792f81a06a3c4ff6e5029b55b2897b7c544` | official migrated testbed input; current-code Stage0 reproduction still must pass |
+| walk motion | `/data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz` | `a9baaa714d61da19c6114077cf0c919c965ad6802f770cc83ed695396c4c8c9f` | official migrated testbed input; current-code Stage0 reproduction still must pass |
 
-The rejected motion candidates above are long `wbc_results/assets` motions, not
-the historical packaged testbed motions used to derive the current jump/walk
-sweetpoint quality gates. The 2026-07-03 diagnostic run
+The 2026-07-03 diagnostic run
 `/data_team/junsong/model-based/g1_wbc_mjx_runs/stage0_baseline_wbc_mlp_20260703_h100_gpu1`
 completed `jump/seed_0` and `jump/seed_1`; those two rows alone made the jump
 group mathematically unable to pass (`root_pos_error_mean` of `0.567` and
-`0.134` versus the group mean cap `0.065`). See
+`0.134` versus the group mean cap `0.065`). Because the motion files are now
+confirmed to be official migrated testbed inputs, that run is treated as a
+current-code Stage0 reproduction failure, not as evidence that the assets are
+invalid. See
 `docs/tasks/g1_wbc_mjx_full_rollout/stage0_input_diagnosis_20260703.md`.
 
 Historical single-motion sweetpoint reference:
@@ -171,8 +187,8 @@ Verified Stage0 dry-run command:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. ./.venv/bin/python scripts/run_g1_wbc_stage0_baseline.py \
-  --jump-motion /ABS/PATH/TO/g1_wbc_testbed_motion_package_20260617/input_motions/jump/motion.npz \
-  --walk-motion /ABS/PATH/TO/g1_wbc_testbed_motion_package_20260617/input_motions/walk/motion.npz \
+  --jump-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz \
+  --walk-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz \
   --motion-type isaaclab \
   --checkpoint /data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt \
   --reward-weights /data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json \

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from dataclasses import replace
+import os
+import time
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ from spider.tasks.g1_wbc.metrics import compute_rollout_metrics
 from spider.tasks.g1_wbc.mpc import (
     G1WbcMpcConfig,
     mpc_config_from_preset,
+    optimize_mpc_command,
 )
 from spider.tasks.g1_wbc.spider_task import (
     G1WbcSamplingTask,
@@ -130,12 +133,12 @@ def main() -> None:
         rollout = run_no_mpc_rollout(motion, actor, config)
     else:
         assert actor is not None
-        spider_config = _build_sampling_config(args)
         reward_weights = _load_method_reward_weights(args)
         total_steps = motion.num_frames - 1
         if args.max_steps is not None:
             total_steps = min(total_steps, int(args.max_steps))
         if args.mpc_backend == "mjx":
+            spider_config = _build_sampling_config(args)
             from spider.tasks.g1_wbc.mjx_backend import run_g1_wbc_mjx_mpc
 
             effective_reward_weights = _effective_reward_weights(args.method, reward_weights)
@@ -151,7 +154,50 @@ def main() -> None:
                 seed=int(args.seed),
                 enable_physics_scan=bool(args.mjx_enable_scan),
             )
+        elif args.mpc_optimizer == "legacy":
+            legacy_config = _build_mpc_config(args)
+            _synchronize_rollout_device(config)
+            steady_start = time.perf_counter()
+            legacy_result = optimize_mpc_command(
+                motion,
+                actor,
+                config,
+                legacy_config,
+            )
+            _synchronize_rollout_device(config)
+            steady_state_wall_time_sec = time.perf_counter() - steady_start
+            rollout = legacy_result.rollout
+            mpc_result = legacy_result
+            mpc_payload = {
+                "backend": "spider.tasks.g1_wbc.mpc.optimize_mpc_command",
+                "mpc_backend": args.mpc_backend,
+                "mpc_optimizer": "legacy",
+                "mpc_preset": args.mpc_preset,
+                "reward_weight_source": (
+                    str(Path(args.mpc_reward_weights).expanduser().resolve())
+                    if args.mpc_reward_weights is not None
+                    else "default"
+                ),
+                "reward_weights": _effective_reward_weights(
+                    args.method,
+                    legacy_config.reward_weights,
+                ),
+                "history": [asdict(info) for info in legacy_result.history],
+                "final_scores_mean": _safe_tensor_stat(legacy_result.scores, "mean"),
+                "final_scores_max": _safe_tensor_stat(legacy_result.scores, "max"),
+                "num_windows": int(legacy_result.num_windows),
+                "accepted": bool(legacy_result.accepted),
+                "accepted_windows": int(legacy_result.accepted_windows),
+                "used_baseline_fallback": bool(legacy_result.used_baseline_fallback),
+                "final_candidate_score": float(legacy_result.final_candidate_score),
+                "final_baseline_score": float(legacy_result.final_baseline_score),
+                "steady_state_wall_time_sec": steady_state_wall_time_sec,
+                "runtime_visible_devices": _runtime_visible_devices(),
+                "runtime_gpu_name": _runtime_gpu_name(config),
+                "serial_execute_warp_launches": bool(args.serial_execute_warp_launches),
+            }
         else:
+            spider_config = _build_sampling_config(args)
             task = G1WbcSamplingTask(
                 motion,
                 actor,
@@ -165,31 +211,33 @@ def main() -> None:
                 task,
                 total_steps=total_steps,
             )
-        receding_result = mpc_run.receding
-        mpc_result = mpc_run.result
-        rollout = mpc_result.rollout
-        mpc_payload = {
-            **mpc_run.metadata,
-            "mpc_backend": args.mpc_backend,
-            "reward_weight_source": (
-                str(Path(args.mpc_reward_weights).expanduser().resolve())
-                if args.mpc_reward_weights is not None
-                else "default"
-            ),
-            "reward_weights": _effective_reward_weights(args.method, reward_weights),
-            "history": _jsonable_infos(receding_result.infos),
-            "final_scores_mean": _safe_tensor_stat(mpc_result.scores, "mean"),
-            "final_scores_max": _safe_tensor_stat(mpc_result.scores, "max"),
-            "num_windows": mpc_result.num_windows,
-            "accepted": bool(mpc_run.metadata.get("accepted", True)),
-            "accepted_windows": int(
-                mpc_run.metadata.get("accepted_windows", mpc_result.num_windows)
-            ),
-            "used_baseline_fallback": bool(
-                mpc_run.metadata.get("used_baseline_fallback", False)
-            ),
-            "serial_execute_warp_launches": bool(args.serial_execute_warp_launches),
-        }
+        if mpc_payload is None:
+            receding_result = mpc_run.receding
+            mpc_result = mpc_run.result
+            rollout = mpc_result.rollout
+            mpc_payload = {
+                **mpc_run.metadata,
+                "mpc_backend": args.mpc_backend,
+                "mpc_optimizer": args.mpc_optimizer,
+                "reward_weight_source": (
+                    str(Path(args.mpc_reward_weights).expanduser().resolve())
+                    if args.mpc_reward_weights is not None
+                    else "default"
+                ),
+                "reward_weights": _effective_reward_weights(args.method, reward_weights),
+                "history": _jsonable_infos(receding_result.infos),
+                "final_scores_mean": _safe_tensor_stat(mpc_result.scores, "mean"),
+                "final_scores_max": _safe_tensor_stat(mpc_result.scores, "max"),
+                "num_windows": mpc_result.num_windows,
+                "accepted": bool(mpc_run.metadata.get("accepted", True)),
+                "accepted_windows": int(
+                    mpc_run.metadata.get("accepted_windows", mpc_result.num_windows)
+                ),
+                "used_baseline_fallback": bool(
+                    mpc_run.metadata.get("used_baseline_fallback", False)
+                ),
+                "serial_execute_warp_launches": bool(args.serial_execute_warp_launches),
+            }
     metrics = compute_rollout_metrics(motion, rollout)
 
     payload = {
@@ -376,6 +424,15 @@ def _parse_args() -> argparse.Namespace:
             "--mpc-backend mjx. Without this flag MJX stays fail-closed."
         ),
     )
+    parser.add_argument(
+        "--mpc-optimizer",
+        choices=("generic", "legacy"),
+        default="generic",
+        help=(
+            "MuJoCo-Warp MPC optimizer implementation. The default generic "
+            "path is unchanged; Stage0 sweetpoint baselines use legacy."
+        ),
+    )
     parser.add_argument("--mpc-samples", type=int, default=None)
     parser.add_argument("--mpc-rollout-batch-size", type=int, default=0)
     parser.add_argument("--mpc-iterations", type=int, default=None)
@@ -469,6 +526,10 @@ def _parse_args() -> argparse.Namespace:
 def _validate_backend_args(args: argparse.Namespace) -> None:
     if args.mpc_backend == "mjx" and args.method not in MPC_METHODS:
         raise ValueError("--mpc-backend mjx requires an MPC method.")
+    if args.mpc_backend == "mjx" and args.mpc_optimizer != "generic":
+        raise ValueError("--mpc-backend mjx requires --mpc-optimizer generic.")
+    if args.mpc_optimizer == "legacy" and args.method not in MPC_METHODS:
+        raise ValueError("--mpc-optimizer legacy requires an MPC method.")
 
 
 def _build_sampling_config(args: argparse.Namespace) -> Config:
@@ -734,6 +795,27 @@ def _resolve_replay_control_steps(args: argparse.Namespace) -> int:
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 pass
     return 20
+
+
+def _synchronize_rollout_device(config: WbcRolloutConfig) -> None:
+    torch_device = torch.device(config.device)
+    if torch_device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(torch_device)
+
+
+def _runtime_visible_devices() -> tuple[str, ...]:
+    return tuple(
+        value.strip()
+        for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if value.strip()
+    )
+
+
+def _runtime_gpu_name(config: WbcRolloutConfig) -> str | None:
+    torch_device = torch.device(config.device)
+    if torch_device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    return str(torch.cuda.get_device_name(torch_device))
 
 
 def _cpu_np(value: torch.Tensor) -> np.ndarray:
