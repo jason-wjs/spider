@@ -1515,7 +1515,7 @@ Run on one H100:
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. ./.venv/bin/python scripts/run_g1_wbc_stage0_baseline.py \
   --jump-motion /ABS/PATH/jump.npz \
   --walk-motion /ABS/PATH/walk.npz \
-  --checkpoint /data_team/junsong/general_controller/ScaleTrack-mj/ScaleTrack/logs/rsl_rl/mjlab_g1_bfm_transformer_tracking_exp/mjlab_myrsl_g1_global_transformer_sparse_tracking/model_11800.pt \
+  --checkpoint /data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt \
   --reward-weights /ABS/PATH/g1_wbc_reward_weights_method_specific_v14_20260612.json \
   --output-dir /data_team/junsong/model-based/g1_wbc_mjx_runs/stage0_baseline \
   --device cuda:0
