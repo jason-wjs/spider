@@ -137,7 +137,7 @@ Required fields:
 - commit hash
 - worktree path
 - model path
-- checkpoint path or alias
+- resolved checkpoint file path and hash
 - reward weight path and hash
 - MuJoCo, MuJoCo-Warp, Torch, CUDA, driver, JAX, and MJX versions when available
 - GPU model and visible GPU ids
@@ -162,6 +162,14 @@ output directories with stale baseline files.
 The runner also records `artifact_sha256` for each baseline artifact, and
 acceptance recomputes those hashes. Any missing or mismatched baseline artifact
 hash is an invalid benchmark, not a quality regression.
+Formal manifests must also include `provenance.worktree_path`,
+`provenance.git_commit`, and `input_sha256` for `jump_motion`, `walk_motion`,
+`checkpoint`, and `reward_weights`. `provenance.git_status_short` is recorded
+for reproducibility but a dirty worktree is not automatically rejected, because
+local environment files such as `uv.lock` may be dirty without changing the
+benchmark code path. Acceptance recomputes the input hashes from the baseline
+row argv paths before launching MJX. Input hashes must be canonical lowercase
+SHA256 hex strings as produced by `hashlib.hexdigest()`.
 
 The acceptance runner must also reject non-formal manifests before launching MJX
 runs. A formal manifest has schema version `1`, baseline name

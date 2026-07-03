@@ -112,6 +112,39 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertIn("missing input: jump motion", stderr.getvalue())
         self.assertFalse((output_root / "baseline_manifest.json").exists())
 
+    def test_main_fails_fast_when_checkpoint_alias_is_unresolved(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, reward_weights):
+                path.write_text("{}")
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                exit_code = runner.main(
+                    [
+                        "--jump-motion",
+                        str(jump_motion),
+                        "--walk-motion",
+                        str(walk_motion),
+                        "--checkpoint",
+                        "bc",
+                        "--reward-weights",
+                        str(reward_weights),
+                        "--output-dir",
+                        str(output_root),
+                        "--dry-run",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("missing input: checkpoint", stderr.getvalue())
+        self.assertFalse((output_root / "baseline_manifest.json").exists())
+
     def test_main_fails_fast_when_real_cuda_run_has_multiple_visible_gpus(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -302,15 +335,28 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertIsInstance(row["command_start_time_ns"], int)
 
     def test_main_writes_ok_status_for_successful_real_run(self) -> None:
+        import torch
+
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             output_root = Path(tmp_dir) / "stage0"
             jump_motion = root / "jump.npz"
             walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
             reward_weights = root / "reward.json"
             for path in (jump_motion, walk_motion, reward_weights):
                 path.write_text("{}")
+            torch.save(
+                {
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": torch.zeros(1, 886),
+                        "obs_normalizer._std": torch.ones(1, 886),
+                        "mlp.0.weight": torch.zeros(1, 1),
+                    }
+                },
+                checkpoint,
+            )
 
             def fake_run_command(command):
                 output_dir = Path(command.output_dir)
@@ -335,7 +381,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 "--walk-motion",
                 str(walk_motion),
                 "--checkpoint",
-                "model.pt",
+                str(checkpoint),
                 "--reward-weights",
                 str(reward_weights),
                 "--output-dir",
@@ -353,6 +399,114 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertEqual(
             {row["steady_state_wall_time_sec"] for row in manifest["rows"]},
             {120.0},
+        )
+
+    def test_main_resolves_checkpoint_directory_to_file_in_manifest(self) -> None:
+        import torch
+
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint_dir = root / "checkpoints"
+            checkpoint_dir.mkdir()
+            checkpoint = checkpoint_dir / "model_20.pt"
+            reward_weights = root / "reward.json"
+            jump_motion.write_text("jump")
+            walk_motion.write_text("walk")
+            reward_weights.write_text("{}")
+            torch.save(
+                {
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": torch.zeros(1, 886),
+                        "obs_normalizer._std": torch.ones(1, 886),
+                        "mlp.0.weight": torch.zeros(1, 1),
+                    }
+                },
+                checkpoint,
+            )
+
+            exit_code = runner.main(
+                [
+                    "--jump-motion",
+                    str(jump_motion),
+                    "--walk-motion",
+                    str(walk_motion),
+                    "--checkpoint",
+                    str(checkpoint_dir),
+                    "--reward-weights",
+                    str(reward_weights),
+                    "--output-dir",
+                    str(output_root),
+                    "--dry-run",
+                ]
+            )
+            manifest = json.loads((output_root / "baseline_manifest.json").read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(manifest["input_paths"]["checkpoint"], str(checkpoint.resolve()))
+        self.assertTrue(
+            all(
+                row["argv"][row["argv"].index("--checkpoint") + 1]
+                == str(checkpoint.resolve())
+                for row in manifest["rows"]
+            )
+        )
+
+    def test_main_dry_run_records_manifest_provenance_and_input_hashes(self) -> None:
+        import torch
+
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            jump_motion.write_text("jump")
+            walk_motion.write_text("walk")
+            reward_weights.write_text("{}")
+            torch.save(
+                {
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": torch.zeros(1, 886),
+                        "obs_normalizer._std": torch.ones(1, 886),
+                        "mlp.0.weight": torch.zeros(1, 1),
+                    }
+                },
+                checkpoint,
+            )
+
+            exit_code = runner.main(
+                [
+                    "--jump-motion",
+                    str(jump_motion),
+                    "--walk-motion",
+                    str(walk_motion),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--reward-weights",
+                    str(reward_weights),
+                    "--output-dir",
+                    str(output_root),
+                    "--dry-run",
+                ]
+            )
+            manifest = json.loads((output_root / "baseline_manifest.json").read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(manifest["provenance"]["worktree_path"], str(runner.SPIDER_ROOT))
+        self.assertIsInstance(manifest["provenance"]["git_commit"], str)
+        self.assertTrue(manifest["provenance"]["git_commit"])
+        self.assertEqual(
+            set(manifest["input_sha256"]),
+            {"jump_motion", "walk_motion", "checkpoint", "reward_weights"},
+        )
+        self.assertTrue(
+            all(len(value) == 64 for value in manifest["input_sha256"].values())
         )
 
 

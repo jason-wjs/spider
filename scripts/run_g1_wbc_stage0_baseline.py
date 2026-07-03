@@ -171,11 +171,12 @@ def validate_input_paths(args: argparse.Namespace) -> tuple[str, ...]:
     ):
         if not Path(path).expanduser().is_file():
             missing.append(f"{label}: {Path(path).expanduser()}")
-    checkpoint = str(args.checkpoint)
-    checkpoint_path = Path(checkpoint).expanduser()
-    if checkpoint_path.is_absolute() or checkpoint_path.exists():
-        if not checkpoint_path.is_file() and not checkpoint_path.is_dir():
-            missing.append(f"checkpoint: {checkpoint_path}")
+    if resolve_checkpoint_file(args.checkpoint) is None:
+        missing.append(
+            "checkpoint: "
+            f"{Path(str(args.checkpoint)).expanduser()} "
+            "(expected an existing .pt file or directory with model_*.pt)"
+        )
     return tuple(missing)
 
 
@@ -206,13 +207,8 @@ def validate_runtime_environment(args: argparse.Namespace) -> tuple[str, ...]:
 def validate_checkpoint_format(args: argparse.Namespace) -> tuple[str, ...]:
     """Return errors for explicit checkpoints incompatible with the WBC actor."""
 
-    checkpoint = Path(str(args.checkpoint)).expanduser()
-    if checkpoint.is_dir():
-        candidates = sorted(checkpoint.glob("model_*.pt"))
-        if not candidates:
-            return (f"checkpoint format: no model_*.pt checkpoint found under {checkpoint}",)
-        checkpoint = candidates[-1]
-    elif not checkpoint.exists():
+    checkpoint = resolve_checkpoint_file(args.checkpoint)
+    if checkpoint is None:
         return ()
     if checkpoint.suffix != ".pt":
         return ()
@@ -283,6 +279,64 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def build_manifest_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    """Build reproducibility metadata for the Stage 0 baseline manifest."""
+
+    jump_motion = args.jump_motion.expanduser().resolve()
+    walk_motion = args.walk_motion.expanduser().resolve()
+    reward_weights = args.reward_weights.expanduser().resolve()
+    checkpoint = resolve_checkpoint_file(args.checkpoint)
+    input_paths = {
+        "jump_motion": str(jump_motion),
+        "walk_motion": str(walk_motion),
+        "checkpoint": str(checkpoint) if checkpoint is not None else str(args.checkpoint),
+        "reward_weights": str(reward_weights),
+    }
+    input_hashes = {
+        "jump_motion": file_sha256(jump_motion),
+        "walk_motion": file_sha256(walk_motion),
+        "checkpoint": file_sha256(checkpoint) if checkpoint is not None else None,
+        "reward_weights": file_sha256(reward_weights),
+    }
+    return {
+        "provenance": {
+            "worktree_path": str(SPIDER_ROOT),
+            "git_commit": _git_output("rev-parse", "HEAD"),
+            "git_status_short": _git_output("status", "--short"),
+            "python_executable": str(Path(args.python_executable).expanduser()),
+            "device": str(args.device),
+        },
+        "input_paths": input_paths,
+        "input_sha256": input_hashes,
+        "versions": {
+            "python": sys.version.split()[0],
+        },
+    }
+
+
+def resolve_checkpoint_file(checkpoint: str | Path) -> Path | None:
+    path = Path(str(checkpoint)).expanduser()
+    if path.is_dir():
+        candidates = sorted(path.glob("model_*.pt"))
+        return candidates[-1].resolve() if candidates else None
+    if path.is_file():
+        return path.resolve()
+    return None
+
+
+def _git_output(*args: str) -> str | None:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=SPIDER_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
 def run_command(command: Stage0Command) -> dict[str, Any]:
     """Run one Stage 0 command and return captured subprocess metadata."""
 
@@ -323,7 +377,12 @@ def run_command(command: Stage0Command) -> dict[str, Any]:
     return row
 
 
-def write_manifest(output_dir: Path, rows: list[dict[str, Any]]) -> Path:
+def write_manifest(
+    output_dir: Path,
+    rows: list[dict[str, Any]],
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> Path:
     """Write baseline_manifest.json and return its path."""
 
     output_dir = output_dir.expanduser().resolve()
@@ -336,6 +395,8 @@ def write_manifest(output_dir: Path, rows: list[dict[str, Any]]) -> Path:
         "seeds": list(SEEDS),
         "rows": rows,
     }
+    if metadata:
+        payload.update(metadata)
     manifest_path = output_dir / "baseline_manifest.json"
     manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return manifest_path
@@ -361,6 +422,10 @@ def main(argv: list[str] | None = None) -> int:
         for error in checkpoint_errors:
             print(f"invalid input: {error}", file=sys.stderr)
         return 2
+    checkpoint = resolve_checkpoint_file(args.checkpoint)
+    if checkpoint is not None:
+        args = argparse.Namespace(**vars(args))
+        args.checkpoint = str(checkpoint)
     commands = build_stage0_commands(args)
     rows: list[dict[str, Any]] = []
     worst_returncode = 0
@@ -378,7 +443,11 @@ def main(argv: list[str] | None = None) -> int:
                 worst_returncode = int(execution["returncode"])
         rows.append(attach_artifact_paths(row))
 
-    manifest_path = write_manifest(output_dir, rows)
+    manifest_path = write_manifest(
+        output_dir,
+        rows,
+        metadata=build_manifest_metadata(args),
+    )
     print(str(manifest_path))
     return worst_returncode
 

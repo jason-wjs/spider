@@ -125,6 +125,17 @@ def _baseline_manifest(tmp_path: Path) -> Path:
         "baseline_name": "g1_wbc_stage0_mujoco_warp_sweetpoint",
         "motions": ["jump", "walk"],
         "seeds": [0, 1, 2],
+        "provenance": {
+            "worktree_path": str(Path(__file__).resolve().parents[3]),
+            "git_commit": "0123456789abcdef",
+            "git_status_short": "",
+        },
+        "input_sha256": {
+            "jump_motion": _file_sha256(tmp_path / "jump.npz"),
+            "walk_motion": _file_sha256(tmp_path / "walk.npz"),
+            "checkpoint": _file_sha256(checkpoint),
+            "reward_weights": _file_sha256(reward_weights),
+        },
         "rows": rows,
     }
     path = tmp_path / "baseline_manifest.json"
@@ -225,6 +236,83 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "run matrix"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_missing_manifest_provenance(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest.pop("provenance")
+            manifest.pop("input_sha256")
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "provenance"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_missing_manifest_input_hashes(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest.pop("input_sha256")
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "manifest_input_sha256"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_noncanonical_manifest_input_hashes(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["input_sha256"]["checkpoint"] = "A" * 64
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "manifest_input_sha256"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_manifest_input_hash_mismatch(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["input_sha256"]["checkpoint"] = "0" * 64
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "manifest_input_sha256"):
                 runner.build_acceptance_plan(args, manifest)
 
     def test_build_acceptance_plan_rejects_extra_matrix_rows(self) -> None:

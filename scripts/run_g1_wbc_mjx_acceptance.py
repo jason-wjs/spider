@@ -42,6 +42,12 @@ ARTIFACT_FRESHNESS_TOLERANCE_NS = 2_000_000_000
 FORMAL_BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
 TARGET_H100_SPEEDUP = "h100_speedup"
 TARGET_4090_REALTIME = "4090_realtime"
+REQUIRED_INPUT_SHA256_FIELDS = (
+    "jump_motion",
+    "walk_motion",
+    "checkpoint",
+    "reward_weights",
+)
 FORMAL_STAGE0_ARG_VALUES = {
     "--motion-type": "isaaclab",
     "--method": "g1_wbc_joint_global",
@@ -301,6 +307,7 @@ def _validate_formal_baseline_manifest(
         seeds = ()
     if seeds != SEEDS:
         failures.append("seeds")
+    failures.extend(_formal_manifest_provenance_failures(manifest, matrix))
 
     for (motion, seed), row in matrix.items():
         failures.extend(_formal_stage0_row_failures(row, motion=motion, seed=seed))
@@ -311,6 +318,69 @@ def _validate_formal_baseline_manifest(
             "Baseline manifest is not a formal Stage 0 sweetpoint: "
             + ", ".join(unique_failures)
         )
+
+
+def _formal_manifest_provenance_failures(
+    manifest: dict[str, Any],
+    matrix: dict[tuple[str, int], dict[str, Any]],
+) -> list[str]:
+    failures: list[str] = []
+    provenance = manifest.get("provenance")
+    if not isinstance(provenance, dict):
+        failures.append("manifest_provenance")
+    else:
+        for field in ("worktree_path", "git_commit"):
+            value = provenance.get(field)
+            if not isinstance(value, str) or not value.strip():
+                failures.append("manifest_provenance")
+        status = provenance.get("git_status_short")
+        if status is not None and not isinstance(status, str):
+            failures.append("manifest_provenance")
+    input_hashes = manifest.get("input_sha256")
+    if not isinstance(input_hashes, dict):
+        failures.append("manifest_input_sha256")
+    else:
+        for field in REQUIRED_INPUT_SHA256_FIELDS:
+            if not _is_sha256_hex(input_hashes.get(field)):
+                failures.append("manifest_input_sha256")
+        if not _manifest_input_hashes_match(input_hashes, matrix):
+            failures.append("manifest_input_sha256")
+    return failures
+
+
+def _manifest_input_hashes_match(
+    input_hashes: dict[str, Any],
+    matrix: dict[tuple[str, int], dict[str, Any]],
+) -> bool:
+    observed: dict[str, set[str]] = {
+        field: set()
+        for field in REQUIRED_INPUT_SHA256_FIELDS
+    }
+    for (motion, _seed), row in matrix.items():
+        argv = row.get("argv")
+        if not isinstance(argv, list):
+            continue
+        _record_file_hash(observed, f"{motion}_motion", _argv_value(argv, "--motion"))
+        _record_file_hash(observed, "checkpoint", _argv_value(argv, "--checkpoint"))
+        _record_file_hash(
+            observed,
+            "reward_weights",
+            _argv_value(argv, "--mpc-reward-weights"),
+        )
+    for field in REQUIRED_INPUT_SHA256_FIELDS:
+        if observed[field] != {input_hashes.get(field)}:
+            return False
+    return True
+
+
+def _record_file_hash(
+    observed: dict[str, set[str]],
+    field: str,
+    path: str | None,
+) -> None:
+    if field not in observed or not _is_existing_file(path):
+        return
+    observed[field].add(_file_sha256(Path(str(path)).expanduser()))
 
 
 def _formal_stage0_row_failures(
@@ -343,7 +413,7 @@ def _formal_stage0_row_failures(
     if not _is_existing_file(motion_path):
         failures.append("motion_file")
     checkpoint_path = _argv_value(argv, "--checkpoint")
-    if not _is_existing_file_or_dir(checkpoint_path):
+    if not _is_existing_file(checkpoint_path):
         failures.append("checkpoint")
     reward_path = _argv_value(argv, "--mpc-reward-weights")
     if not _is_existing_file(reward_path):
@@ -1402,11 +1472,12 @@ def _is_existing_file(path: str | None) -> bool:
     return isinstance(path, str) and Path(path).expanduser().is_file()
 
 
-def _is_existing_file_or_dir(path: str | None) -> bool:
-    if not isinstance(path, str):
-        return False
-    expanded = Path(path).expanduser()
-    return expanded.is_file() or expanded.is_dir()
+def _is_sha256_hex(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 def _set_arg(argv: list[str], flag: str, value: str) -> list[str]:
