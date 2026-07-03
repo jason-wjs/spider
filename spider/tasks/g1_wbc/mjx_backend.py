@@ -233,6 +233,7 @@ def run_g1_wbc_mjx_mpc(
         infos=infos,
         rollout=rollout,
     )
+    physics_step_metadata = _physics_step_count_metadata(infos)
     from spider.optimizers.receding import RecedingHorizonResult
     final_controls = _validated_controls(controls, horizon=horizon, device=device)
     receding = RecedingHorizonResult(
@@ -272,6 +273,7 @@ def run_g1_wbc_mjx_mpc(
                 getattr(getattr(runtime, "status", None), "visible_devices", ())
             ),
             "runtime_gpu_name": _runtime_gpu_name(device),
+            **physics_step_metadata,
             **contact_metadata,
         },
     )
@@ -493,6 +495,26 @@ def _require_physics_scan_evidence(
             "Accepted MJX windows require physics scan evidence covering the "
             f"{int(horizon)}-step planning horizon"
         )
+
+
+def _physics_step_count_metadata(infos: list[dict[str, Any]]) -> dict[str, int]:
+    counts: list[int] = []
+    for info in infos:
+        if _window_accepted(info):
+            count = _optional_nonnegative_int(info.get("physics_step_count"))
+            if count is not None:
+                counts.append(int(count))
+    if not counts:
+        return {
+            "physics_step_count_min": 0,
+            "physics_step_count_max": 0,
+            "physics_step_count_windows": 0,
+        }
+    return {
+        "physics_step_count_min": min(counts),
+        "physics_step_count_max": max(counts),
+        "physics_step_count_windows": len(counts),
+    }
 
 
 def _rollout_active_contact_count(rollout) -> int:

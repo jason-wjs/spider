@@ -425,7 +425,14 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                     "first_candidate_max_abs": float(np.max(np.abs(sample_array[0]))),
                 }
             )
-            return np.arange(int(sample_array.shape[0]), dtype=np.float32)
+            return {
+                "score": np.arange(int(sample_array.shape[0]), dtype=np.float32),
+                "physics_step_count": np.full(
+                    int(sample_array.shape[0]),
+                    40,
+                    dtype=np.float32,
+                ),
+            }
 
         result = _run_with_fakes(
             optimizer=None,
@@ -453,6 +460,9 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(calls[1]["first_candidate_max_abs"], 0.0)
         self.assertTrue(result.metadata["jit_warmup_enabled"])
         self.assertGreaterEqual(result.metadata["jit_warmup_wall_time_sec"], 0.0)
+        self.assertEqual(result.metadata["physics_step_count_min"], 40)
+        self.assertEqual(result.metadata["physics_step_count_max"], 40)
+        self.assertEqual(result.metadata["physics_step_count_windows"], 40)
 
     def test_default_optimizer_uses_explicit_rollout_reference_factory(self) -> None:
         references: list[dict[str, object]] = []

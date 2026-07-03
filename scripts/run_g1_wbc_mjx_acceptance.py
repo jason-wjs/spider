@@ -1486,6 +1486,12 @@ def _acceptance_row_metrics_provenance_failures(
             and _row_value(row, "physics_scan_enabled") is not True
         ):
             failures.append("mjx_physics_scan_enabled")
+        if (
+            kind == "mjx"
+            and "--mjx-enable-scan" in argv
+            and _mjx_physics_step_count_failure(row, argv)
+        ):
+            failures.append("mjx_physics_step_count")
         if not _acceptance_metrics_provenance_matches_argv(
             argv,
             kind=kind,
@@ -1493,6 +1499,22 @@ def _acceptance_row_metrics_provenance_failures(
         ):
             failures.append(failure)
     return _unique(failures)
+
+
+def _mjx_physics_step_count_failure(row: dict[str, Any], argv: list[str]) -> bool:
+    expected_horizon = _safe_int(_argv_value(argv, "--mpc-planning-horizon-steps"))
+    if expected_horizon is None or expected_horizon <= 0:
+        return True
+    count_min = _safe_int(_row_value(row, "physics_step_count_min"))
+    if count_min is None or count_min < expected_horizon:
+        return True
+    count_windows = _safe_int(_row_value(row, "physics_step_count_windows"))
+    accepted_windows = _safe_int(_row_value(row, "accepted_windows"))
+    return (
+        count_windows is None
+        or accepted_windows is None
+        or count_windows != accepted_windows
+    )
 
 
 def _replay_provenance_failures(
@@ -1657,6 +1679,7 @@ def _has_invalid_benchmark_failure(
         "mjx_jit_warmup_wall_time",
         "mjx_metrics_provenance",
         "mjx_physics_scan_enabled",
+        "mjx_physics_step_count",
         "mjx_runtime_visible_devices",
         "mjx_runtime_gpu_name",
         "mjx_required_gpu",
@@ -1970,6 +1993,9 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "jit_warmup_enabled": mpc.get("jit_warmup_enabled"),
         "jit_warmup_wall_time_sec": mpc.get("jit_warmup_wall_time_sec"),
         "physics_scan_enabled": mpc.get("physics_scan_enabled"),
+        "physics_step_count_min": mpc.get("physics_step_count_min"),
+        "physics_step_count_max": mpc.get("physics_step_count_max"),
+        "physics_step_count_windows": mpc.get("physics_step_count_windows"),
         "runtime_visible_devices": mpc.get("runtime_visible_devices"),
         "runtime_gpu_name": mpc.get("runtime_gpu_name"),
         "steady_state_wall_time_sec": mpc.get("steady_state_wall_time_sec"),
