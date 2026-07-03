@@ -48,6 +48,7 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                     _baseline_metrics_payload(
                         motion=str(motion_path),
                         checkpoint=str(checkpoint),
+                        reward_weight_source=str(reward_weights),
                         metrics=metrics,
                         seed=seed,
                     )
@@ -314,6 +315,7 @@ def _baseline_metrics_payload(
     *,
     motion: str,
     checkpoint: str,
+    reward_weight_source: str,
     metrics: dict[str, float | bool],
     accepted: bool = True,
     seed: int = 0,
@@ -321,6 +323,7 @@ def _baseline_metrics_payload(
     return {
         "method": "g1_wbc_joint_global",
         "motion": motion,
+        "motion_type": "isaaclab",
         "device": "cuda:0",
         "checkpoint": checkpoint,
         "max_steps": 800,
@@ -332,6 +335,7 @@ def _baseline_metrics_payload(
             "accepted_windows": 40,
             "num_windows": 40,
             "used_baseline_fallback": False,
+            "reward_weight_source": reward_weight_source,
             "config": _baseline_mpc_config(seed),
             "steady_state_wall_time_sec": 120.0,
             "runtime_visible_devices": ["0"],
@@ -679,6 +683,38 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "formal Stage 0 sweetpoint"):
                 runner.build_acceptance_plan(args, manifest)
 
+    def test_build_acceptance_plan_rejects_duplicate_formal_stage0_argv_flags(
+        self,
+    ) -> None:
+        runner = load_runner()
+        invalid_cases = (
+            ("motion_type", ["--motion-type", "mujoco"]),
+            ("samples", ["--mpc-samples", "128"]),
+            ("guided_candidate", ["--mpc-guided-candidate"]),
+            ("warm_start_conflict", ["--mpc-warm-start"]),
+        )
+        for name, duplicate in invalid_cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    root = Path(tmp_dir)
+                    manifest_path = _baseline_manifest(root)
+                    manifest = json.loads(manifest_path.read_text())
+                    manifest["rows"][0]["argv"].extend(duplicate)
+                    args = runner.parse_args(
+                        [
+                            "--baseline-manifest",
+                            str(manifest_path),
+                            "--output-dir",
+                            str(root / "acceptance"),
+                        ]
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "formal Stage 0 sweetpoint",
+                    ):
+                        runner.build_acceptance_plan(args, manifest)
+
     def test_build_acceptance_plan_rejects_baseline_metrics_artifact_mismatch(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -694,6 +730,9 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     _baseline_metrics_payload(
                         motion=row["motion"],
                         checkpoint=row["argv"][row["argv"].index("--checkpoint") + 1],
+                        reward_weight_source=row["argv"][
+                            row["argv"].index("--mpc-reward-weights") + 1
+                        ],
                         metrics=bad_metrics,
                         accepted=False,
                     )
@@ -713,6 +752,58 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "baseline_metrics_artifact"):
                 runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_baseline_metrics_provenance_mismatch(
+        self,
+    ) -> None:
+        runner = load_runner()
+        invalid_cases = (
+            ("missing_motion_type", ("motion_type", None)),
+            ("mismatched_motion_type", ("motion_type", "mujoco")),
+            ("missing_reward_source", ("reward_weight_source", None)),
+            ("mismatched_reward_source", ("reward_weight_source", "stale_reward.json")),
+        )
+        for name, (field, value) in invalid_cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    root = Path(tmp_dir)
+                    manifest_path = _baseline_manifest(root)
+                    manifest = json.loads(manifest_path.read_text())
+                    row = manifest["rows"][0]
+                    metrics_path = Path(row["artifacts"]["metrics_json"])
+                    payload = json.loads(metrics_path.read_text())
+                    if field == "motion_type":
+                        if value is None:
+                            payload.pop("motion_type")
+                        else:
+                            payload["motion_type"] = value
+                    else:
+                        if value is None:
+                            payload["mpc"].pop("reward_weight_source")
+                        else:
+                            stale_reward = root / value
+                            stale_reward.write_text("{}")
+                            payload["mpc"]["reward_weight_source"] = str(stale_reward)
+                    metrics_path.write_text(json.dumps(payload))
+                    row["artifact_mtime_ns"]["metrics_json"] = (
+                        metrics_path.stat().st_mtime_ns
+                    )
+                    row["artifact_sha256"]["metrics_json"] = _file_sha256(metrics_path)
+                    manifest_path.write_text(json.dumps(manifest))
+                    args = runner.parse_args(
+                        [
+                            "--baseline-manifest",
+                            str(manifest_path),
+                            "--output-dir",
+                            str(root / "acceptance"),
+                        ]
+                    )
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "baseline_metrics_artifact",
+                    ):
+                        runner.build_acceptance_plan(args, manifest)
 
     def test_build_acceptance_plan_rejects_missing_or_mismatched_baseline_mpc_config(
         self,

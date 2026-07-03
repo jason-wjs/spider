@@ -98,6 +98,19 @@ FORMAL_STAGE0_FLAGS = (
     "--mpc-acceptance-gate",
     "--no-mpc-warm-start",
 )
+FORMAL_STAGE0_DYNAMIC_ARG_FLAGS = (
+    "--motion",
+    "--checkpoint",
+    "--device",
+    "--output-dir",
+    "--seed",
+    "--mpc-reward-weights",
+)
+FORMAL_STAGE0_FORBIDDEN_FLAGS = (
+    "--no-mpc-guided-candidate",
+    "--no-mpc-acceptance-gate",
+    "--mpc-warm-start",
+)
 LEGACY_ONLY_MJX_DROP_ARG_VALUES = (
     "--mpc-preset",
     "--mpc-sampling-mode",
@@ -961,12 +974,18 @@ def _formal_stage0_row_failures(
     if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
         return ["argv"]
 
+    for flag in (*FORMAL_STAGE0_ARG_VALUES, *FORMAL_STAGE0_DYNAMIC_ARG_FLAGS):
+        if argv.count(flag) != 1:
+            failures.append(flag)
     for flag, expected in FORMAL_STAGE0_ARG_VALUES.items():
         value = _argv_value(argv, flag)
         if value != expected:
             failures.append(flag)
     for flag in FORMAL_STAGE0_FLAGS:
-        if flag not in argv:
+        if argv.count(flag) != 1:
+            failures.append(flag)
+    for flag in FORMAL_STAGE0_FORBIDDEN_FLAGS:
+        if flag in argv:
             failures.append(flag)
 
     if _argv_value(argv, "--seed") != str(seed):
@@ -1039,6 +1058,8 @@ def _baseline_metrics_artifact_matches(
         return False
     if not _same_path(payload.get("checkpoint"), _argv_value(argv, "--checkpoint")):
         return False
+    if payload.get("motion_type") != _argv_value(argv, "--motion-type"):
+        return False
     if payload.get("method") != _argv_value(argv, "--method"):
         return False
     if payload.get("device") != _argv_value(argv, "--device"):
@@ -1051,6 +1072,11 @@ def _baseline_metrics_artifact_matches(
     if mpc.get("mpc_backend") != _argv_value(argv, "--mpc-backend"):
         return False
     if mpc.get("mpc_optimizer") != _argv_value(argv, "--mpc-optimizer"):
+        return False
+    if not _same_path(
+        mpc.get("reward_weight_source"),
+        _argv_value(argv, "--mpc-reward-weights"),
+    ):
         return False
     if mpc.get("config") != _expected_stage0_mpc_config(argv):
         return False
