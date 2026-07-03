@@ -525,15 +525,33 @@ def _acceptance_metrics_provenance_matches(
     parsed: dict[str, Any],
 ) -> bool:
     argv = planned.mjx_argv if kind == "mjx" else planned.replay_argv
+    parsed = dict(parsed)
+    parsed["metrics_checkpoint"] = payload.get("checkpoint")
+    parsed["metrics_max_steps"] = payload.get("max_steps")
+    return _acceptance_metrics_provenance_matches_argv(
+        argv,
+        kind=kind,
+        parsed=parsed,
+    )
+
+
+def _acceptance_metrics_provenance_matches_argv(
+    argv: list[str],
+    *,
+    kind: str,
+    parsed: dict[str, Any],
+) -> bool:
     if parsed.get("metrics_method") != _argv_value(argv, "--method"):
         return False
     if not _same_path(parsed.get("metrics_motion"), _argv_value(argv, "--motion")):
         return False
     if parsed.get("metrics_device") != _argv_value(argv, "--device"):
         return False
-    if not _same_path(payload.get("checkpoint"), _argv_value(argv, "--checkpoint")):
+    if not _same_path(parsed.get("metrics_checkpoint"), _argv_value(argv, "--checkpoint")):
         return False
-    if _safe_int(payload.get("max_steps")) != _safe_int(_argv_value(argv, "--max-steps")):
+    if _safe_int(parsed.get("metrics_max_steps")) != _safe_int(
+        _argv_value(argv, "--max-steps")
+    ):
         return False
     metrics = parsed.get("metrics")
     mpc = parsed.get("mpc")
@@ -1107,6 +1125,10 @@ def _build_report(
         mjx_failures = _unique(
             (
                 *mjx_gate.failures,
+                *_acceptance_row_metrics_provenance_failures(
+                    mjx_group,
+                    kind="mjx",
+                ),
                 *_mjx_timing_evidence_failures(mjx_group),
                 *_mjx_runtime_evidence_failures(
                     mjx_group,
@@ -1438,6 +1460,27 @@ def _replay_quality_row(row: dict[str, Any]) -> dict[str, Any]:
     return quality_row
 
 
+def _acceptance_row_metrics_provenance_failures(
+    rows: list[dict[str, Any]],
+    *,
+    kind: str,
+) -> tuple[str, ...]:
+    if kind not in {"mjx", "replay"}:
+        raise ValueError(f"Unsupported acceptance row kind: {kind!r}")
+    argv_field = "mjx_argv" if kind == "mjx" else "replay_argv"
+    failure = f"{kind}_metrics_provenance"
+    failures: list[str] = []
+    for row in rows:
+        argv = row.get(argv_field)
+        if not isinstance(argv, list) or not _acceptance_metrics_provenance_matches_argv(
+            argv,
+            kind=kind,
+            parsed=row,
+        ):
+            failures.append(failure)
+    return _unique(failures)
+
+
 def _replay_provenance_failures(
     rows: list[dict[str, Any]],
     mjx_rows: list[dict[str, Any]],
@@ -1598,6 +1641,7 @@ def _has_invalid_benchmark_failure(
         "mjx_contact_diagnostics",
         "mjx_jit_warmup_enabled",
         "mjx_jit_warmup_wall_time",
+        "mjx_metrics_provenance",
         "mjx_runtime_visible_devices",
         "mjx_runtime_gpu_name",
         "mjx_required_gpu",
@@ -1895,6 +1939,8 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "metrics_method": payload.get("method"),
         "metrics_motion": payload.get("motion"),
         "metrics_device": payload.get("device"),
+        "metrics_checkpoint": payload.get("checkpoint"),
+        "metrics_max_steps": payload.get("max_steps"),
         "mpc_accepted": mpc.get("accepted") is True,
         "accepted_windows": _safe_int(
             mpc.get("accepted_windows", mpc.get("num_windows", -1))
