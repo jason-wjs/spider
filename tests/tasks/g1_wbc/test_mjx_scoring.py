@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from spider.tasks.g1_wbc.constants import POLICY_DT
 from spider.tasks.g1_wbc.mjx_scoring import (
     ACCUMULATOR_KEYS,
     JaxScoreWeights,
@@ -90,8 +91,11 @@ def _expected_terms(step_state, reference_state) -> dict[str, float]:
         np.linalg.norm(step_state["ee_pos"] - reference_state["ee_pos"], axis=-1)
     )
     contact_error = np.mean(np.abs(step_state["contact"] - reference_state["contact"]))
-    control_delta = np.mean((step_state["control"] - step_state["prev_control"]) ** 2)
-    joint_acc = np.mean((step_state["joint_vel"] - step_state["prev_joint_vel"]) ** 2)
+    control_delta = np.linalg.norm(step_state["control"] - step_state["prev_control"])
+    joint_acc = (
+        np.linalg.norm(step_state["joint_vel"] - step_state["prev_joint_vel"])
+        / POLICY_DT
+    )
     return {
         "root_pos_error_mean": float(root_error),
         "body_global_pos_error_mean": float(body_error),

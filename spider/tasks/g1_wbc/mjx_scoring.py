@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from spider.tasks.g1_wbc.constants import POLICY_DT
+
 try:
     from jax import tree_util as _jax_tree_util
 except Exception:
@@ -126,7 +128,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     )
-    control_delta = _mean_squared(
+    control_delta = _mean_l2_delta(
         step_state["control"],
         step_state["prev_control"],
         batch_shape=batch_shape,
@@ -140,12 +142,12 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     )
-    joint_acc = _mean_squared(
+    joint_acc = _mean_l2_delta(
         step_state["joint_vel"],
         step_state["prev_joint_vel"],
         batch_shape=batch_shape,
         jnp=jnp,
-    )
+    ) / POLICY_DT
 
     terms["root_pos_error_sum"] = terms["root_pos_error_sum"] + root_error
     terms["root_rot_error_sum"] = terms["root_rot_error_sum"] + root_rot_error
