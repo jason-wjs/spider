@@ -96,23 +96,28 @@ def optimize_window(
         control_score = scores[0]
         best_score = scores[best_index]
         score_improvement = best_score - control_score
-        score_accepted = _positive_score_improvement(score_improvement)
-        control_delta_max = 0.0
-        iteration_accepted = False
-        candidate_controls = updated_controls
-        if score_accepted:
-            temperature = max(float(config.temperature), 1.0e-6)
-            weights = runtime.jax.nn.softmax(scores / temperature)
-            candidate_controls = jnp.sum(samples * weights[:, None, None], axis=0)
-            control_delta_max = _max_abs_delta(
-                candidate_controls,
-                updated_controls,
-                jnp=jnp,
-            )
-            iteration_accepted = _positive_control_delta(control_delta_max)
-        if iteration_accepted:
-            accepted_iterations += 1
-            updated_controls = candidate_controls
+        temperature = max(float(config.temperature), 1.0e-6)
+        weights = runtime.jax.nn.softmax(scores / temperature)
+        candidate_controls = jnp.sum(samples * weights[:, None, None], axis=0)
+        control_delta_max = _max_abs_delta(
+            candidate_controls,
+            updated_controls,
+            jnp=jnp,
+        )
+        iteration_accepted = _accepted_candidate(
+            score_improvement,
+            control_delta_max,
+            jnp=jnp,
+        )
+        accepted_iterations = accepted_iterations + _accepted_iteration_increment(
+            iteration_accepted
+        )
+        updated_controls = _where_controls(
+            iteration_accepted,
+            candidate_controls,
+            updated_controls,
+            jnp=jnp,
+        )
         info = {
             "best_index": best_index,
             "best_score": best_score,
@@ -242,14 +247,6 @@ def _all_finite(value, *, jnp) -> bool:
         return False
 
 
-def _positive_score_improvement(value) -> bool:
-    try:
-        improvement = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    return math.isfinite(improvement) and improvement > 1.0e-9
-
-
 def _max_abs_delta(candidate, previous, *, jnp):
     delta = candidate - previous
     abs_fn = getattr(jnp, "abs", None)
@@ -261,12 +258,27 @@ def _max_abs_delta(candidate, previous, *, jnp):
     return value_max() if callable(value_max) else max(delta)
 
 
-def _positive_control_delta(value) -> bool:
-    try:
-        delta = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return False
-    return math.isfinite(delta) and delta > 1.0e-9
+def _accepted_candidate(score_improvement, control_delta_max, *, jnp):
+    score_ok = score_improvement > 1.0e-9
+    delta_ok = control_delta_max > 1.0e-9
+    logical_and = getattr(jnp, "logical_and", None)
+    if callable(logical_and):
+        return logical_and(score_ok, delta_ok)
+    return score_ok and delta_ok
+
+
+def _accepted_iteration_increment(iteration_accepted):
+    astype = getattr(iteration_accepted, "astype", None)
+    if callable(astype):
+        return astype("int32")
+    return int(bool(iteration_accepted))
+
+
+def _where_controls(condition, candidate, previous, *, jnp):
+    where = getattr(jnp, "where", None)
+    if callable(where):
+        return where(condition, candidate, previous)
+    return candidate if bool(condition) else previous
 
 
 def _prng_key(key, *, runtime):
