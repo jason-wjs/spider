@@ -114,6 +114,8 @@ def compute_rollout_metrics(
 
     metrics: dict[str, float | bool] = {
         "num_steps": float(rollout.num_steps),
+        "control_dt_sec": float(rollout.dt),
+        "evaluated_motion_duration_sec": float(rollout.num_steps) * float(rollout.dt),
         "root_pos_error_mean": _mean(root_pos_err),
         "root_pos_error_max": _max(root_pos_err),
         "root_rot_error_mean": _mean(root_rot_err),

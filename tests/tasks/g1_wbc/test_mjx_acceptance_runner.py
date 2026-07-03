@@ -157,6 +157,14 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _rewrite_baseline_gpu(manifest_path: Path, gpu_name: str) -> None:
+    manifest = json.loads(manifest_path.read_text())
+    for row in manifest["rows"]:
+        row["runtime_gpu_name"] = gpu_name
+        row["runtime_visible_devices"] = ["0"]
+    manifest_path.write_text(json.dumps(manifest))
+
+
 class MjxAcceptanceRunnerTest(unittest.TestCase):
     def test_build_acceptance_plan_covers_mjx_and_replay_backends(self) -> None:
         runner = load_runner()
@@ -1360,6 +1368,159 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             },
         )
 
+    def test_4090_target_reports_realtime_pass_classification(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            _rewrite_baseline_gpu(manifest_path, "NVIDIA GeForce RTX 4090")
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row.update(_replay_evidence(argv))
+                else:
+                    row.update(
+                        {
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "runtime_visible_devices": ("0",),
+                            "steady_state_wall_time_sec": 8.0,
+                            "control_dt_sec": 0.02,
+                            "evaluated_motion_duration_sec": 16.0,
+                            **_mjx_contact_evidence(),
+                            "runtime_gpu_name": "NVIDIA GeForce RTX 4090",
+                        }
+                    )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--target",
+                        "4090_realtime",
+                        "--required-gpu-name-fragment",
+                        "4090",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["target"], "4090_realtime")
+        self.assertEqual(report["classification"], "pass_4090_realtime")
+        self.assertEqual(report["realtime_results"]["jump"]["motion_duration_sec"], 16.0)
+        self.assertEqual(report["realtime_results"]["jump"]["real_time_factor"], 2.0)
+
+    def test_4090_target_fails_when_realtime_factor_is_below_target(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            _rewrite_baseline_gpu(manifest_path, "NVIDIA GeForce RTX 4090")
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row.update(_replay_evidence(argv))
+                else:
+                    row.update(
+                        {
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "runtime_visible_devices": ("0",),
+                            "steady_state_wall_time_sec": 20.0,
+                            "control_dt_sec": 0.02,
+                            "evaluated_motion_duration_sec": 16.0,
+                            **_mjx_contact_evidence(),
+                            "runtime_gpu_name": "NVIDIA GeForce RTX 4090",
+                        }
+                    )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--target",
+                        "4090_realtime",
+                        "--required-gpu-name-fragment",
+                        "4090",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "speed_regression")
+        self.assertIn("real_time_factor", report["realtime_results"]["jump"]["failures"])
+
+    def test_realtime_gate_requires_explicit_duration_evidence_when_strict(self) -> None:
+        runner = load_runner()
+        rows = [
+            {
+                "metrics": _metrics(success=True),
+                "num_steps": 800,
+                "steady_state_wall_time_sec": 8.0,
+            }
+            for _ in range(3)
+        ]
+
+        gate = runner._realtime_gate_for_motion(
+            rows,
+            min_realtime_factor=1.0,
+            require_explicit_duration=True,
+        )
+
+        self.assertFalse(gate["passed"])
+        self.assertIn("control_dt_sec", gate["failures"])
+        self.assertIn("evaluated_motion_duration_sec", gate["failures"])
+
     def test_metrics_parser_extracts_compile_and_warmup_timing(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1367,7 +1528,11 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             path.write_text(
                 json.dumps(
                     {
-                        "metrics": _metrics(success=True),
+                        "metrics": {
+                            **_metrics(success=True),
+                            "control_dt_sec": 0.02,
+                            "evaluated_motion_duration_sec": 16.0,
+                        },
                         "mpc": {
                             "accepted": True,
                             "accepted_windows": 40,
@@ -1390,6 +1555,8 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(row["jit_warmup_wall_time_sec"], 1.5)
         self.assertEqual(row["runtime_visible_devices"], ["0"])
         self.assertEqual(row["runtime_gpu_name"], "NVIDIA H100 80GB HBM3")
+        self.assertEqual(row["control_dt_sec"], 0.02)
+        self.assertEqual(row["evaluated_motion_duration_sec"], 16.0)
         self.assertFalse(row["contact_saturated"])
         self.assertEqual(row["max_contact_points"], 512)
         self.assertEqual(row["active_contact_count"], 3)

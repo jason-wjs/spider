@@ -424,8 +424,18 @@ For the RTX 4090 final deployment target:
 - same quality gates
 - same one-GPU rule
 - no H100-only code path
-- report real-time factor against the motion duration
+- report real-time factor against the evaluated rollout duration, not the full
+  source motion file duration
 - target is at least `1.0x` real-time end-to-end steady-state inference
+- each MJX row must include `control_dt_sec` and
+  `evaluated_motion_duration_sec`; for the formal 800-step runs this is expected
+  to be `800 * 0.02 = 16.0 s`
+
+The formal RTX 4090 command must use:
+
+```bash
+--target 4090_realtime --required-gpu-name-fragment 4090
+```
 
 The H100 milestone can pass before the RTX 4090 target passes, but it must not
 be described as desktop real-time readiness.

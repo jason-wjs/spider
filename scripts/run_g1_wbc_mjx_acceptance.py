@@ -25,6 +25,7 @@ from spider.tasks.g1_wbc.acceptance import (
     evaluate_mjx_group,
     evaluate_speed_gate,
 )
+from spider.tasks.g1_wbc.constants import POLICY_DT
 
 SPIDER_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PYTHON_EXECUTABLE = (
@@ -35,9 +36,12 @@ DEFAULT_PYTHON_EXECUTABLE = (
 MOTIONS = ("jump", "walk")
 SEEDS = (0, 1, 2)
 MIN_SPEEDUP = 12.0
+MIN_REALTIME_FACTOR = 1.0
 DEFAULT_REQUIRED_GPU_NAME_FRAGMENT = "H100"
 ARTIFACT_FRESHNESS_TOLERANCE_NS = 2_000_000_000
 FORMAL_BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
+TARGET_H100_SPEEDUP = "h100_speedup"
+TARGET_4090_REALTIME = "4090_realtime"
 FORMAL_STAGE0_ARG_VALUES = {
     "--motion-type": "isaaclab",
     "--method": "g1_wbc_joint_global",
@@ -95,7 +99,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--python-executable", default=str(DEFAULT_PYTHON_EXECUTABLE))
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--target",
+        choices=(TARGET_H100_SPEEDUP, TARGET_4090_REALTIME),
+        default=TARGET_H100_SPEEDUP,
+        help=(
+            "Formal acceptance target. The H100 target gates on baseline-relative "
+            "speedup; the 4090 target gates on real-time factor."
+        ),
+    )
     parser.add_argument("--min-speedup", type=float, default=MIN_SPEEDUP)
+    parser.add_argument(
+        "--min-realtime-factor",
+        type=float,
+        default=MIN_REALTIME_FACTOR,
+        help="Minimum motion-duration / MJX steady-state wall-time for the 4090 target.",
+    )
     parser.add_argument(
         "--required-gpu-name-fragment",
         default=DEFAULT_REQUIRED_GPU_NAME_FRAGMENT,
@@ -226,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         mjx_rows=mjx_rows,
         replay_rows=replay_rows,
         min_speedup=float(args.min_speedup),
+        target=str(args.target),
+        min_realtime_factor=float(args.min_realtime_factor),
         required_gpu_name_fragment=str(args.required_gpu_name_fragment),
     )
     report["planned_runs"] = [asdict(item) for item in plan]
@@ -376,11 +397,14 @@ def _build_report(
     mjx_rows: list[dict[str, Any]],
     replay_rows: list[dict[str, Any]],
     min_speedup: float,
+    target: str,
+    min_realtime_factor: float,
     required_gpu_name_fragment: str,
 ) -> dict[str, Any]:
     motion_results = {}
     replay_results = {}
     speed_results = {}
+    realtime_results = {}
     passed = True
     for motion in MOTIONS:
         baseline_group = [row for row in baseline_rows if row.get("motion_name") == motion]
@@ -469,17 +493,30 @@ def _build_report(
             "speedup": speed_gate.speedup,
             "failures": speed_gate.failures,
         }
+        realtime_gate = _realtime_gate_for_motion(
+            mjx_group,
+            min_realtime_factor=min_realtime_factor,
+            require_explicit_duration=target == TARGET_4090_REALTIME,
+        )
+        realtime_results[motion] = realtime_gate
+        target_speed_passed = (
+            bool(realtime_gate["passed"])
+            if target == TARGET_4090_REALTIME
+            else speed_gate.passed
+        )
         passed = (
             passed
             and not baseline_failures
             and not mjx_failures
             and replay_passed
-            and speed_gate.passed
+            and target_speed_passed
         )
     classification = _classify_report(
         motion_results=motion_results,
         replay_results=replay_results,
         speed_results=speed_results,
+        realtime_results=realtime_results,
+        target=target,
         passed=passed,
     )
     return {
@@ -487,11 +524,14 @@ def _build_report(
         "backend": "mjx_canonical",
         "baseline_manifest": str(baseline_manifest),
         "classification": classification,
+        "target": target,
         "min_speedup": float(min_speedup),
+        "min_realtime_factor": float(min_realtime_factor),
         "required_gpu_name_fragment": required_gpu_name_fragment,
         "motion_results": motion_results,
         "replay_results": replay_results,
         "speed_results": speed_results,
+        "realtime_results": realtime_results,
         "timing_summary": _timing_summary(
             baseline_rows=baseline_rows,
             mjx_rows=mjx_rows,
@@ -639,11 +679,22 @@ def _classify_report(
     motion_results: dict[str, dict[str, Any]],
     replay_results: dict[str, dict[str, Any]],
     speed_results: dict[str, dict[str, Any]],
+    realtime_results: dict[str, dict[str, Any]],
+    target: str,
     passed: bool,
 ) -> str:
     if passed:
-        return "pass_h100_milestone"
-    if _has_invalid_benchmark_failure(motion_results, replay_results, speed_results):
+        return (
+            "pass_4090_realtime"
+            if target == TARGET_4090_REALTIME
+            else "pass_h100_milestone"
+        )
+    if _has_invalid_benchmark_failure(
+        motion_results,
+        replay_results,
+        speed_results,
+        realtime_results,
+    ):
         return "invalid_benchmark"
     if any(not result.get("passed") for result in replay_results.values()):
         return "parity_failure"
@@ -652,7 +703,8 @@ def _classify_report(
         for result in motion_results.values()
     ):
         return "quality_regression"
-    if any(not result.get("passed") for result in speed_results.values()):
+    target_results = realtime_results if target == TARGET_4090_REALTIME else speed_results
+    if any(not result.get("passed") for result in target_results.values()):
         return "speed_regression"
     return "invalid_benchmark"
 
@@ -741,6 +793,7 @@ def _has_invalid_benchmark_failure(
     motion_results: dict[str, dict[str, Any]],
     replay_results: dict[str, dict[str, Any]],
     speed_results: dict[str, dict[str, Any]],
+    realtime_results: dict[str, dict[str, Any]],
 ) -> bool:
     invalid_markers = {
         "accepted_windows",
@@ -767,6 +820,9 @@ def _has_invalid_benchmark_failure(
         "mjx_required_gpu",
         "mjx_single_visible_gpu",
         "mjx_steady_state_wall_time",
+        "control_dt_sec",
+        "evaluated_motion_duration_sec",
+        "motion_duration_sec",
         "mpc_accepted",
         "mpc_command_npz",
         "mpc_command_npz_hash",
@@ -793,6 +849,10 @@ def _has_invalid_benchmark_failure(
         if any(failure in invalid_markers for failure in result.get("failures", ())):
             return True
     for result in speed_results.values():
+        failures = result.get("failures", ())
+        if any(failure in invalid_markers for failure in failures):
+            return True
+    for result in realtime_results.values():
         failures = result.get("failures", ())
         if any(failure in invalid_markers for failure in failures):
             return True
@@ -826,6 +886,140 @@ def _speed_gate_for_motion(
     if failures:
         return SpeedGateResult(False, gate.speedup, failures)
     return gate
+
+
+def _realtime_gate_for_motion(
+    mjx_rows: list[dict[str, Any]],
+    *,
+    min_realtime_factor: float,
+    require_explicit_duration: bool = False,
+) -> dict[str, Any]:
+    duration, duration_failures = _mean_motion_duration_strict(
+        mjx_rows,
+        expected_count=len(SEEDS),
+        require_explicit_duration=require_explicit_duration,
+    )
+    mjx_time, mjx_failures = _mean_timing_strict(
+        mjx_rows,
+        "steady_state_wall_time_sec",
+        expected_count=len(SEEDS),
+        failure="mjx_steady_state_wall_time",
+    )
+    failures = list(_unique((*duration_failures, *mjx_failures)))
+    real_time_factor = float("nan")
+    if not failures:
+        real_time_factor = duration / mjx_time
+        if real_time_factor < float(min_realtime_factor):
+            failures.append("real_time_factor")
+    return {
+        "passed": not failures,
+        "motion_duration_sec": duration,
+        "mjx_steady_state_wall_time_sec": mjx_time,
+        "real_time_factor": real_time_factor,
+        "min_realtime_factor": float(min_realtime_factor),
+        "failures": _unique(failures),
+    }
+
+
+def _mean_motion_duration_strict(
+    rows: list[dict[str, Any]],
+    *,
+    expected_count: int,
+    require_explicit_duration: bool,
+) -> tuple[float, tuple[str, ...]]:
+    values = []
+    failures: list[str] = []
+    for row in rows:
+        value, row_failures = _motion_duration_sec(
+            row,
+            require_explicit_duration=require_explicit_duration,
+        )
+        failures.extend(row_failures)
+        if (
+            not row_failures
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and float(value) > 0.0
+        ):
+            values.append(float(value))
+        else:
+            failures.append("motion_duration_sec")
+    if len(values) != int(expected_count):
+        failures.append("motion_duration_sec")
+    if failures:
+        return float("nan"), _unique(failures)
+    return sum(values) / len(values), ()
+
+
+def _motion_duration_sec(
+    row: dict[str, Any],
+    *,
+    require_explicit_duration: bool = False,
+) -> tuple[float | None, tuple[str, ...]]:
+    metrics = row.get("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+    control_dt = _positive_float(
+        row.get("control_dt_sec", metrics.get("control_dt_sec"))
+    )
+    evaluated_duration = _positive_float(
+        row.get(
+            "evaluated_motion_duration_sec",
+            metrics.get("evaluated_motion_duration_sec"),
+        )
+    )
+    steps = _safe_int(row.get("num_steps", metrics.get("num_steps")))
+
+    failures: list[str] = []
+    if require_explicit_duration:
+        if control_dt is None:
+            failures.append("control_dt_sec")
+        if evaluated_duration is None:
+            failures.append("evaluated_motion_duration_sec")
+        if steps is None or steps <= 0:
+            failures.append("num_steps")
+        if (
+            control_dt is not None
+            and evaluated_duration is not None
+            and steps is not None
+            and steps > 0
+        ):
+            expected = float(steps) * float(control_dt)
+            if not math.isclose(
+                evaluated_duration,
+                expected,
+                rel_tol=1.0e-6,
+                abs_tol=1.0e-6,
+            ):
+                failures.append("evaluated_motion_duration_sec")
+        if failures:
+            return None, _unique(failures)
+        return evaluated_duration, ()
+
+    if evaluated_duration is not None:
+        return evaluated_duration, ()
+    for candidate in (
+        row.get("motion_duration_sec"),
+        metrics.get("motion_duration_sec"),
+        metrics.get("duration_sec"),
+    ):
+        value = _positive_float(candidate)
+        if value is not None:
+            return value, ()
+    steps = _safe_int(row.get("num_steps", metrics.get("num_steps")))
+    if steps is None or steps <= 0:
+        return None, ("motion_duration_sec",)
+    return float(steps) * float(POLICY_DT), ()
+
+
+def _positive_float(value: Any) -> float | None:
+    if (
+        isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0.0
+    ):
+        return float(value)
+    return None
 
 
 def _mean_timing_strict(
@@ -873,6 +1067,8 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "runtime_visible_devices": mpc.get("runtime_visible_devices"),
         "runtime_gpu_name": mpc.get("runtime_gpu_name"),
         "steady_state_wall_time_sec": mpc.get("steady_state_wall_time_sec"),
+        "control_dt_sec": metrics.get("control_dt_sec"),
+        "evaluated_motion_duration_sec": metrics.get("evaluated_motion_duration_sec"),
         "contact_saturated": mpc.get("contact_saturated"),
         "max_contact_points_saturated": mpc.get("max_contact_points_saturated"),
         "max_geom_pairs_saturated": mpc.get("max_geom_pairs_saturated"),
