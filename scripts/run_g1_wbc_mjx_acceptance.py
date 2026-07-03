@@ -34,6 +34,7 @@ DEFAULT_PYTHON_EXECUTABLE = (
 MOTIONS = ("jump", "walk")
 SEEDS = (0, 1, 2)
 MIN_SPEEDUP = 12.0
+DEFAULT_REQUIRED_GPU_NAME_FRAGMENT = "H100"
 FORMAL_BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
 FORMAL_STAGE0_ARG_VALUES = {
     "--motion-type": "isaaclab",
@@ -93,6 +94,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--python-executable", default=str(DEFAULT_PYTHON_EXECUTABLE))
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--min-speedup", type=float, default=MIN_SPEEDUP)
+    parser.add_argument(
+        "--required-gpu-name-fragment",
+        default=DEFAULT_REQUIRED_GPU_NAME_FRAGMENT,
+        help=(
+            "Substring required in MJX runtime GPU names for this acceptance "
+            "milestone. Use an empty value to disable the model-name check."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -213,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         mjx_rows=mjx_rows,
         replay_rows=replay_rows,
         min_speedup=float(args.min_speedup),
+        required_gpu_name_fragment=str(args.required_gpu_name_fragment),
     )
     report["planned_runs"] = [asdict(item) for item in plan]
     report_path = write_report(output_dir, report)
@@ -362,6 +372,7 @@ def _build_report(
     mjx_rows: list[dict[str, Any]],
     replay_rows: list[dict[str, Any]],
     min_speedup: float,
+    required_gpu_name_fragment: str,
 ) -> dict[str, Any]:
     motion_results = {}
     replay_results = {}
@@ -388,7 +399,10 @@ def _build_report(
             (
                 *mjx_gate.failures,
                 *_mjx_timing_evidence_failures(mjx_group),
-                *_mjx_runtime_evidence_failures(mjx_group),
+                *_mjx_runtime_evidence_failures(
+                    mjx_group,
+                    required_gpu_name_fragment=required_gpu_name_fragment,
+                ),
                 *_mjx_contact_evidence_failures(mjx_group),
             )
         )
@@ -449,6 +463,7 @@ def _build_report(
         "baseline_manifest": str(baseline_manifest),
         "classification": classification,
         "min_speedup": float(min_speedup),
+        "required_gpu_name_fragment": required_gpu_name_fragment,
         "motion_results": motion_results,
         "replay_results": replay_results,
         "speed_results": speed_results,
@@ -498,6 +513,12 @@ def _timing_summary(
                 "num_windows": _timing_stats(_window_count_values(mjx_group)),
                 "runtime_visible_devices": [
                     [str(value) for value in row.get("runtime_visible_devices", ())]
+                    for row in mjx_group
+                ],
+                "runtime_gpu_names": [
+                    row.get("runtime_gpu_name")
+                    if isinstance(row.get("runtime_gpu_name"), str)
+                    else None
                     for row in mjx_group
                 ],
             },
@@ -673,6 +694,8 @@ def _has_invalid_benchmark_failure(
         "mjx_jit_warmup_enabled",
         "mjx_jit_warmup_wall_time",
         "mjx_runtime_visible_devices",
+        "mjx_runtime_gpu_name",
+        "mjx_required_gpu",
         "mjx_single_visible_gpu",
         "mjx_steady_state_wall_time",
         "mpc_accepted",
@@ -770,6 +793,7 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "jit_warmup_enabled": mpc.get("jit_warmup_enabled"),
         "jit_warmup_wall_time_sec": mpc.get("jit_warmup_wall_time_sec"),
         "runtime_visible_devices": mpc.get("runtime_visible_devices"),
+        "runtime_gpu_name": mpc.get("runtime_gpu_name"),
         "steady_state_wall_time_sec": mpc.get("steady_state_wall_time_sec"),
         "contact_saturated": mpc.get("contact_saturated"),
         "max_contact_points_saturated": mpc.get("max_contact_points_saturated"),
@@ -793,8 +817,13 @@ def _mjx_timing_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]
     return _unique(failures)
 
 
-def _mjx_runtime_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+def _mjx_runtime_evidence_failures(
+    rows: list[dict[str, Any]],
+    *,
+    required_gpu_name_fragment: str,
+) -> tuple[str, ...]:
     failures: list[str] = []
+    required = str(required_gpu_name_fragment)
     for row in rows:
         devices = row.get("runtime_visible_devices")
         if not isinstance(devices, (list, tuple)) or not devices:
@@ -803,6 +832,11 @@ def _mjx_runtime_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...
         visible = tuple(str(value) for value in devices if str(value))
         if len(visible) != 1:
             failures.append("mjx_single_visible_gpu")
+        gpu_name = row.get("runtime_gpu_name")
+        if not isinstance(gpu_name, str) or not gpu_name.strip():
+            failures.append("mjx_runtime_gpu_name")
+        elif required and required not in gpu_name:
+            failures.append("mjx_required_gpu")
     return _unique(failures)
 
 

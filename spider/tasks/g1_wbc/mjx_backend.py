@@ -261,6 +261,7 @@ def run_g1_wbc_mjx_mpc(
             "runtime_visible_devices": tuple(
                 getattr(getattr(runtime, "status", None), "visible_devices", ())
             ),
+            "runtime_gpu_name": _runtime_gpu_name(device),
             **contact_metadata,
         },
     )
@@ -540,6 +541,12 @@ def _validate_single_gpu_runtime(runtime, *, device: torch.device) -> None:
                 "MJX backend requires single GPU visibility per motion; "
                 f"jax.devices() reports {accelerator_count} accelerators."
             )
+
+
+def _runtime_gpu_name(device: torch.device) -> str | None:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    return str(torch.cuda.get_device_name(device))
 
 
 def _window_reference(

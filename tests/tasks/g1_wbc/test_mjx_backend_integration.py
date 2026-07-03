@@ -270,6 +270,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(result.result.scores.shape, (40,))
         self.assertTrue(torch.allclose(result.result.scores, torch.full((40,), 1.25)))
         self.assertEqual(result.receding.executed_steps, 800)
+        self.assertIn("runtime_gpu_name", result.metadata)
+        self.assertIsNone(result.metadata["runtime_gpu_name"])
         self.assertIn("model:wxy_parity", calls)
         self.assertIn("policy", calls)
 

@@ -781,6 +781,74 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["motion_results"]["jump"]["mjx_failures"],
         )
 
+    def test_missing_or_non_h100_mjx_gpu_name_fails_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row["command_wall_time_sec"] = 1.0
+                    return row
+                row.update(
+                    {
+                        "mpc_accepted": True,
+                        "accepted_windows": 40,
+                        "mpc_used_baseline_fallback": False,
+                        "compile_init_wall_time_sec": 2.0,
+                        "jit_warmup_enabled": True,
+                        "jit_warmup_wall_time_sec": 1.5,
+                        "runtime_visible_devices": ("0",),
+                        "steady_state_wall_time_sec": 1.0,
+                        **_mjx_contact_evidence(),
+                    }
+                )
+                if argv[argv.index("--seed") + 1] == "1":
+                    row["runtime_gpu_name"] = "NVIDIA GeForce RTX 4090"
+                elif argv[argv.index("--seed") + 1] == "2":
+                    row.pop("runtime_gpu_name")
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "mjx_runtime_gpu_name",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+        self.assertIn(
+            "mjx_required_gpu",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+
     def test_missing_or_saturated_mjx_contact_diagnostics_fail_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -969,6 +1037,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertTrue(row["jit_warmup_enabled"])
         self.assertEqual(row["jit_warmup_wall_time_sec"], 1.5)
         self.assertEqual(row["runtime_visible_devices"], ["0"])
+        self.assertEqual(row["runtime_gpu_name"], "NVIDIA H100 80GB HBM3")
         self.assertFalse(row["contact_saturated"])
         self.assertEqual(row["max_contact_points"], 512)
         self.assertEqual(row["active_contact_count"], 3)
@@ -1010,8 +1079,9 @@ def _mjx_contact_evidence(
     max_geom_pairs: int = 1024,
     contact_pair_count: int = 0,
     active_contact_count: int = 0,
-) -> dict[str, int | bool]:
+) -> dict[str, int | bool | str]:
     return {
+        "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
         "contact_saturated": contact_saturated,
         "max_contact_points_saturated": max_contact_points_saturated,
         "max_geom_pairs_saturated": max_geom_pairs_saturated,
