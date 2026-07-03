@@ -16,6 +16,7 @@ class JaxWindowOptimizerConfig:
     root_pos_sigma: float
     root_rot_sigma: float
     joint_sigma: float
+    iterations: int = 1
 
 
 @dataclass(frozen=True)
@@ -64,21 +65,31 @@ def optimize_window(
     _validate_config(config)
     jnp = runtime.jnp
     rollout_fn = state["rollout_fn"]
-    samples = sample_residual_controls(config, controls, key, runtime=runtime)
-    rollout_result = rollout_fn(samples, reference, actor_params, model_bundle)
-    scores = _rollout_scores(rollout_result, jnp=jnp)
-    _validate_scores(scores, config)
-    best_index = jnp.argmax(scores)
-    temperature = max(float(config.temperature), 1.0e-6)
-    weights = runtime.jax.nn.softmax(scores / temperature)
-    updated_controls = jnp.sum(samples * weights[:, None, None], axis=0)
+    updated_controls = controls
+    info: dict[str, object] = {}
+    for iteration in range(int(config.iterations)):
+        samples = sample_residual_controls(
+            config,
+            updated_controls,
+            _iteration_key(key, iteration, config=config),
+            runtime=runtime,
+        )
+        rollout_result = rollout_fn(samples, reference, actor_params, model_bundle)
+        scores = _rollout_scores(rollout_result, jnp=jnp)
+        _validate_scores(scores, config)
+        best_index = jnp.argmax(scores)
+        temperature = max(float(config.temperature), 1.0e-6)
+        weights = runtime.jax.nn.softmax(scores / temperature)
+        updated_controls = jnp.sum(samples * weights[:, None, None], axis=0)
+        info = {
+            "best_index": best_index,
+            "best_score": scores[best_index],
+            "mean_score": jnp.mean(scores),
+            "iteration": int(iteration),
+            "iterations": int(config.iterations),
+        }
+        info.update(_rollout_diagnostics(rollout_result, jnp=jnp))
     execute_chunk = updated_controls[: int(config.control_steps) + 1]
-    info = {
-        "best_index": best_index,
-        "best_score": scores[best_index],
-        "mean_score": jnp.mean(scores),
-    }
-    info.update(_rollout_diagnostics(rollout_result, jnp=jnp))
     return JaxWindowResult(
         updated_controls=updated_controls,
         execute_chunk=execute_chunk,
@@ -132,6 +143,8 @@ def _validate_config(config: JaxWindowOptimizerConfig) -> None:
         raise ValueError("JAX window optimizer control_steps must be non-negative")
     if int(config.control_steps) >= int(config.horizon_steps):
         raise ValueError("control_steps must be smaller than horizon_steps")
+    if int(config.iterations) < 1:
+        raise ValueError("JAX window optimizer iterations must be positive")
 
 
 def _validate_scores(scores, config: JaxWindowOptimizerConfig) -> None:
@@ -157,6 +170,16 @@ def _prng_key(key, *, runtime):
         return prng
     if isinstance(key, int):
         return random.PRNGKey(int(key))
+    return key
+
+
+def _iteration_key(key, iteration: int, *, config: JaxWindowOptimizerConfig):
+    if int(config.iterations) == 1:
+        return key
+    if isinstance(key, tuple):
+        return (*key, int(iteration))
+    if isinstance(key, int):
+        return (int(key), int(iteration))
     return key
 
 

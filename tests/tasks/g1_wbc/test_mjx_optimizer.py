@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -94,6 +95,18 @@ class _StrictRuntime:
     jax = _StrictJax()
 
 
+class _UnitStepRandom:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def normal(self, key, shape):
+        del key
+        self.calls += 1
+        noise = np.zeros(shape, dtype=np.float32)
+        noise[1:] = 1.0
+        return noise
+
+
 def _config() -> JaxWindowOptimizerConfig:
     return JaxWindowOptimizerConfig(
         samples=4,
@@ -174,6 +187,51 @@ class MjxOptimizerTest(unittest.TestCase):
         np.testing.assert_allclose(result.execute_chunk, expected[:3], rtol=1.0e-6)
         self.assertEqual(float(result.info["best_index"]), 2.0)
         self.assertEqual(float(result.info["best_score"]), 3.0)
+
+    def test_optimize_window_runs_configured_iterations(self) -> None:
+        random = _UnitStepRandom()
+        runtime = SimpleNamespace(
+            jnp=_NumpyJnp(),
+            jax=SimpleNamespace(random=random, nn=_FakeNN()),
+        )
+        config = JaxWindowOptimizerConfig(
+            samples=3,
+            horizon_steps=5,
+            control_steps=2,
+            knot_count=3,
+            temperature=0.5,
+            root_pos_sigma=1.0,
+            root_rot_sigma=1.0,
+            joint_sigma=1.0,
+            iterations=3,
+        )
+        first_candidates: list[np.ndarray] = []
+
+        def rollout_fn(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            first_candidates.append(np.asarray(samples[0], dtype=np.float32).copy())
+            return np.array([0.0, 100.0, 100.0], dtype=np.float32)
+
+        result = optimize_window(
+            config,
+            {"rollout_fn": rollout_fn},
+            np.zeros((5, 8), dtype=np.float32),
+            reference={"unused": True},
+            actor_params=None,
+            model_bundle=None,
+            key=(0, 11),
+            runtime=runtime,
+        )
+
+        self.assertEqual(random.calls, 3)
+        self.assertEqual(len(first_candidates), 3)
+        np.testing.assert_allclose(first_candidates[0], 0.0)
+        self.assertGreater(float(np.mean(first_candidates[1])), 0.9)
+        self.assertGreater(
+            float(np.mean(first_candidates[2])),
+            float(np.mean(first_candidates[1])) + 0.9,
+        )
+        self.assertGreater(float(np.mean(result.updated_controls)), 2.9)
 
     def test_optimize_window_propagates_rollout_diagnostics(self) -> None:
         config = _config()

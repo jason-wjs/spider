@@ -277,6 +277,7 @@ def _window_config_from_spider(spider_config) -> JaxWindowOptimizerConfig:
         root_pos_sigma=float(spider_config.pos_noise_scale),
         root_rot_sigma=float(spider_config.rot_noise_scale),
         joint_sigma=float(spider_config.joint_noise_scale),
+        iterations=int(spider_config.max_num_iterations),
     )
 
 
