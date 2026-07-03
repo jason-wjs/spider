@@ -1648,6 +1648,18 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(len(report["mjx_rows"]), 6)
         self.assertEqual(len(report["replay_rows"]), 6)
         self.assertEqual(report["classification"], "pass_h100_milestone")
+        for row in report["mjx_rows"]:
+            with self.subTest(kind="mjx_hashes", motion=row["motion"], seed=row["seed"]):
+                self.assertEqual(
+                    set(row["artifact_sha256"]),
+                    {"metrics_json", "rollout_npz", "mpc_command_npz"},
+                )
+        for row in report["replay_rows"]:
+            with self.subTest(kind="replay_hashes", motion=row["motion"], seed=row["seed"]):
+                self.assertEqual(
+                    set(row["artifact_sha256"]),
+                    {"metrics_json", "rollout_npz"},
+                )
         jump_timing = report["timing_summary"]["jump"]
         self.assertEqual(
             jump_timing["baseline"]["steady_state_wall_time_sec"]["values"],
@@ -1677,6 +1689,96 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 "max_geom_pairs_saturated": [False, False, False],
             },
         )
+
+    def test_mismatched_mjx_artifact_hash_fails_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows = []
+            replay_rows = []
+            for motion in ("jump", "walk"):
+                for seed in (0, 1, 2):
+                    output_dir = root / "acceptance" / motion / f"seed_{seed}" / "mjx"
+                    replay_output_dir = root / "acceptance" / motion / f"seed_{seed}" / "replay"
+                    _write_artifacts(output_dir)
+                    _write_artifacts(replay_output_dir, include_command=False)
+                    mjx_artifacts = {
+                        "metrics_json": str(output_dir / "metrics.json"),
+                        "rollout_npz": str(output_dir / "rollout.npz"),
+                        "mpc_command_npz": str(output_dir / "mpc_command.npz"),
+                    }
+                    replay_artifacts = {
+                        "metrics_json": str(replay_output_dir / "metrics.json"),
+                        "rollout_npz": str(replay_output_dir / "rollout.npz"),
+                    }
+                    mjx_hashes = {
+                        key: _file_sha256(Path(path))
+                        for key, path in mjx_artifacts.items()
+                    }
+                    replay_hashes = {
+                        key: _file_sha256(Path(path))
+                        for key, path in replay_artifacts.items()
+                    }
+                    if motion == "jump" and seed == 1:
+                        mjx_hashes["metrics_json"] = "0" * 64
+                    mjx_rows.append(
+                        {
+                            "motion": motion,
+                            "seed": seed,
+                            "status": "ok",
+                            "returncode": 0,
+                            "metrics": _metrics(success=True),
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "num_steps": 800,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "runtime_visible_devices": ("0",),
+                            "steady_state_wall_time_sec": 1.0,
+                            "artifacts": mjx_artifacts,
+                            "artifact_sha256": mjx_hashes,
+                            **_mjx_contact_evidence(),
+                        }
+                    )
+                    replay_rows.append(
+                        {
+                            "motion": motion,
+                            "seed": seed,
+                            "status": "ok",
+                            "returncode": 0,
+                            "metrics": _metrics(success=True),
+                            "num_steps": 800,
+                            "artifacts": replay_artifacts,
+                            "artifact_sha256": replay_hashes,
+                            **_replay_evidence(
+                                [
+                                    "python",
+                                    "--saved-command",
+                                    str(output_dir / "mpc_command.npz"),
+                                ]
+                            ),
+                        }
+                    )
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn("metrics_json_hash", report["motion_results"]["jump"]["mjx_failures"])
 
     def test_4090_target_reports_realtime_pass_classification(self) -> None:
         runner = load_runner()

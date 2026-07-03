@@ -609,6 +609,10 @@ def _build_report(
                     mjx_group,
                     artifact_fields=REQUIRED_ARTIFACT_FIELDS,
                 ),
+                *_artifact_hash_failures(
+                    mjx_group,
+                    artifact_fields=REQUIRED_ARTIFACT_FIELDS,
+                ),
             )
         )
         replay_failures = _row_evidence_failures(
@@ -623,6 +627,10 @@ def _build_report(
                 *replay_failures,
                 *_replay_provenance_failures(replay_group),
                 *_artifact_freshness_failures(
+                    replay_group,
+                    artifact_fields=("metrics_json", "rollout_npz"),
+                ),
+                *_artifact_hash_failures(
                     replay_group,
                     artifact_fields=("metrics_json", "rollout_npz"),
                 ),
@@ -1527,6 +1535,11 @@ def _attach_artifacts(row: dict[str, Any], output_dir: str | Path) -> dict[str, 
     row["artifact_mtime_ns"] = {
         key: path.stat().st_mtime_ns if path.exists() else None
         for key, path in artifact_paths.items()
+    }
+    row["artifact_sha256"] = {
+        key: _file_sha256(path)
+        for key, path in artifact_paths.items()
+        if path.exists()
     }
     return row
 
