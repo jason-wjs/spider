@@ -404,6 +404,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 "contact_false_positive": 1.5,
                 "contact_false_negative": 0.4,
                 "action_delta": 0.6,
+                "joint_jerk": 0.0012,
             },
         )
 
@@ -411,6 +412,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(weights["contact_false_positive"], 1.5)
         self.assertEqual(weights["contact_false_negative"], 0.4)
         self.assertEqual(weights["action_delta"], 0.6)
+        self.assertEqual(weights["joint_jerk"], 0.0012)
 
     def test_mjx_backend_emits_contact_capacity_metadata(self) -> None:
         def optimizer(**kwargs):
@@ -894,6 +896,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         tracer_references: list[dict[str, object]] = []
         live_obs_state = SimpleNamespace(history={"sentinel": object()}, last_action="last")
         live_prev_control = np.full((1, QPOS_DIM - 1), 0.33, dtype=np.float32)
+        live_prev_joint_acc = np.full((1, ACTION_DIM), 0.21, dtype=np.float32)
 
         def optimizer(**kwargs):
             optimizer_references.append(dict(kwargs["reference"]["kwargs"]))
@@ -933,6 +936,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 },
                 "final_obs_state": live_obs_state,
                 "final_prev_control": live_prev_control,
+                "final_prev_joint_acc": live_prev_joint_acc,
             }
 
         _run_with_fakes(
@@ -958,6 +962,10 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertIs(second_reference["obs_state"], live_obs_state)
         self.assertTrue(second_reference["obs_initialized"])
         np.testing.assert_allclose(second_reference["prev_control"], live_prev_control)
+        np.testing.assert_allclose(
+            second_reference["prev_joint_acc"],
+            live_prev_joint_acc,
+        )
 
     def test_mjx_backend_accepts_jax_optimizer_arrays(self) -> None:
         try:

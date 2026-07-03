@@ -48,6 +48,7 @@ ACCUMULATOR_KEYS = (
     "control_delta_sum",
     "action_delta_sum",
     "joint_acc_sum",
+    "joint_jerk_sum",
     "count",
     "active_contact_count",
     "contact_pair_count",
@@ -142,12 +143,25 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     )
-    joint_acc = _mean_l2_delta(
-        step_state["joint_vel"],
-        step_state["prev_joint_vel"],
+    joint_acc_delta = jnp.asarray(step_state["joint_vel"]) - jnp.asarray(
+        step_state["prev_joint_vel"]
+    )
+    joint_acc = _mean_l2(
+        joint_acc_delta,
         batch_shape=batch_shape,
         jnp=jnp,
     ) / POLICY_DT
+    if "prev_joint_acc" in step_state:
+        joint_jerk = _mean_l2_delta(
+            joint_acc_delta,
+            step_state["prev_joint_acc"],
+            batch_shape=batch_shape,
+            jnp=jnp,
+        ) / POLICY_DT
+    elif _weight(weights, "joint_jerk") != 0.0:
+        raise KeyError("Missing score field 'prev_joint_acc'")
+    else:
+        joint_jerk = jnp.zeros(batch_shape)
 
     terms["root_pos_error_sum"] = terms["root_pos_error_sum"] + root_error
     terms["root_rot_error_sum"] = terms["root_rot_error_sum"] + root_rot_error
@@ -167,6 +181,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
     terms["control_delta_sum"] = terms["control_delta_sum"] + control_delta
     terms["action_delta_sum"] = terms["action_delta_sum"] + action_delta
     terms["joint_acc_sum"] = terms["joint_acc_sum"] + joint_acc
+    terms["joint_jerk_sum"] = terms["joint_jerk_sum"] + joint_jerk
     terms["count"] = terms["count"] + 1.0
     terms["active_contact_count"] = jnp.maximum(
         terms["active_contact_count"],
@@ -191,6 +206,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         + _weight(weights, "control_delta") * control_delta
         + _weight(weights, "action_delta") * action_delta
         + _weight(weights, "joint_acc") * joint_acc
+        + _weight(weights, "joint_jerk") * joint_jerk
     )
     terms["score_sum"] = terms["score_sum"] - penalty
     return terms
@@ -214,6 +230,7 @@ def finalize_score(accumulator, *, jnp):
     control_delta = terms["control_delta_sum"] / count
     action_delta = terms["action_delta_sum"] / count
     joint_acc = terms["joint_acc_sum"] / count
+    joint_jerk = terms["joint_jerk_sum"] / count
     return {
         "score": score,
         "root_pos_error_mean": root_pos_error,
@@ -228,6 +245,7 @@ def finalize_score(accumulator, *, jnp):
         "control_delta_mean": control_delta,
         "action_delta_mean": action_delta,
         "joint_acc_mean": joint_acc,
+        "joint_jerk_mean": joint_jerk,
         "root_pos_error": root_pos_error,
         "root_rot_error": root_rot_error,
         "body_global_pos_error": body_global_pos_error,
@@ -240,6 +258,7 @@ def finalize_score(accumulator, *, jnp):
         "control_delta": control_delta,
         "action_delta": action_delta,
         "joint_acc": joint_acc,
+        "joint_jerk": joint_jerk,
         "active_contact_count": terms["active_contact_count"],
         "contact_pair_count": terms["contact_pair_count"],
     }
@@ -252,7 +271,12 @@ def _mean_squared(actual, expected, *, batch_shape: tuple[int, ...], jnp):
 
 def _mean_l2_delta(actual, expected, *, batch_shape: tuple[int, ...], jnp):
     delta = jnp.asarray(actual) - jnp.asarray(expected)
-    norm = jnp.sqrt(jnp.sum(delta * delta, axis=-1))
+    return _mean_l2(delta, batch_shape=batch_shape, jnp=jnp)
+
+
+def _mean_l2(value, *, batch_shape: tuple[int, ...], jnp):
+    value = jnp.asarray(value)
+    norm = jnp.sqrt(jnp.sum(value * value, axis=-1))
     return _mean_feature_axes(norm, batch_shape=batch_shape, jnp=jnp)
 
 

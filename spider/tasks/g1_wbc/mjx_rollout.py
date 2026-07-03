@@ -203,6 +203,7 @@ def score_candidate_controls(
         jnp=jnp,
     )
     prev_joint_vel = _joint_vel(robot_state)
+    prev_joint_acc = _initial_prev_joint_acc(reference, sample_count, jnp=jnp)
     weights = reference.get("score_weights", JaxScoreWeights({}))
     if not isinstance(weights, JaxScoreWeights):
         weights = JaxScoreWeights(dict(weights))
@@ -224,6 +225,7 @@ def score_candidate_controls(
             obs_state.last_action,
             prev_control,
             prev_joint_vel,
+            prev_joint_acc,
             accumulator,
         )
 
@@ -234,6 +236,7 @@ def score_candidate_controls(
                 last_action,
                 prev_control,
                 prev_joint_vel,
+                prev_joint_acc,
                 accumulator,
             ) = carry
             next_values = _score_rollout_step(
@@ -242,6 +245,7 @@ def score_candidate_controls(
                 obs_state=JaxObsState(history=obs_history, last_action=last_action),
                 prev_control=prev_control,
                 prev_joint_vel=prev_joint_vel,
+                prev_joint_acc=prev_joint_acc,
                 accumulator=accumulator,
                 samples=samples,
                 reference=step_reference,
@@ -265,6 +269,7 @@ def score_candidate_controls(
                 next_values["obs_state"].last_action,
                 next_values["prev_control"],
                 next_values["prev_joint_vel"],
+                next_values["prev_joint_acc"],
                 next_values["accumulator"],
             ), None
 
@@ -287,6 +292,7 @@ def score_candidate_controls(
             obs_state=obs_state,
             prev_control=prev_control,
             prev_joint_vel=prev_joint_vel,
+            prev_joint_acc=prev_joint_acc,
             accumulator=accumulator,
             samples=samples,
             reference=step_reference,
@@ -304,6 +310,7 @@ def score_candidate_controls(
         obs_state = next_values["obs_state"]
         prev_control = next_values["prev_control"]
         prev_joint_vel = next_values["prev_joint_vel"]
+        prev_joint_acc = next_values["prev_joint_acc"]
         accumulator = next_values["accumulator"]
 
     metrics = finalize_score(accumulator, jnp=jnp)
@@ -380,6 +387,7 @@ def rollout_candidate_controls(
         jnp=jnp,
     )
     prev_joint_vel = _joint_vel(robot_state)
+    prev_joint_acc = _initial_prev_joint_acc(reference, sample_count, jnp=jnp)
     obs_initialized = reference.get("obs_initialized", False)
     step_reference = _with_commanded_qpos(
         reference,
@@ -397,6 +405,7 @@ def rollout_candidate_controls(
             obs_state=obs_state,
             prev_control=prev_control,
             prev_joint_vel=prev_joint_vel,
+            prev_joint_acc=prev_joint_acc,
             samples=samples,
             reference=step_reference,
             obs_indices=obs_indices,
@@ -412,6 +421,7 @@ def rollout_candidate_controls(
         obs_state = next_values["obs_state"]
         prev_control = next_values["prev_control"]
         prev_joint_vel = next_values["prev_joint_vel"]
+        prev_joint_acc = next_values["prev_joint_acc"]
         qpos_trace.append(robot_state["qpos"])
         qvel_trace.append(robot_state["qvel"])
 
@@ -422,6 +432,7 @@ def rollout_candidate_controls(
         "final_obs_state": obs_state,
         "final_prev_control": prev_control,
         "final_prev_joint_vel": prev_joint_vel,
+        "final_prev_joint_acc": prev_joint_acc,
     }
 
 
@@ -447,6 +458,7 @@ def _score_rollout_step(
     obs_state: JaxObsState,
     prev_control,
     prev_joint_vel,
+    prev_joint_acc,
     accumulator,
     samples,
     reference: Mapping[str, object],
@@ -503,12 +515,15 @@ def _score_rollout_step(
     robot_state = _batched_robot_state(robot_state, sample_count, jnp=jnp)
     step_control = samples[:, step_index]
     step_state = dict(physics_score_state)
+    current_joint_vel = _joint_vel(robot_state)
+    current_joint_acc = current_joint_vel - prev_joint_vel
     step_state.setdefault("action", action)
     step_state.setdefault("prev_action", obs_state.last_action)
     step_state.setdefault("control", step_control)
     step_state.setdefault("prev_control", prev_control)
-    step_state.setdefault("joint_vel", _joint_vel(robot_state))
+    step_state.setdefault("joint_vel", current_joint_vel)
     step_state.setdefault("prev_joint_vel", prev_joint_vel)
+    step_state.setdefault("prev_joint_acc", prev_joint_acc)
     score_reference = _time_slice_reference(
         _required(reference, "score_reference"),
         step_index,
@@ -526,7 +541,8 @@ def _score_rollout_step(
         "robot_state": robot_state,
         "obs_state": JaxObsState(history=next_obs_state.history, last_action=action),
         "prev_control": step_control,
-        "prev_joint_vel": _joint_vel(robot_state),
+        "prev_joint_vel": current_joint_vel,
+        "prev_joint_acc": current_joint_acc,
         "accumulator": accumulator,
     }
 
@@ -538,6 +554,7 @@ def _rollout_trace_step(
     obs_state: JaxObsState,
     prev_control,
     prev_joint_vel,
+    prev_joint_acc,
     samples,
     reference: Mapping[str, object],
     obs_indices: JaxObsIndices,
@@ -591,11 +608,14 @@ def _rollout_trace_step(
     )
     robot_state = _batched_robot_state(robot_state, sample_count, jnp=jnp)
     step_control = samples[:, step_index]
+    current_joint_vel = _joint_vel(robot_state)
+    current_joint_acc = current_joint_vel - prev_joint_vel
     return {
         "robot_state": robot_state,
         "obs_state": JaxObsState(history=next_obs_state.history, last_action=action),
         "prev_control": step_control,
-        "prev_joint_vel": _joint_vel(robot_state),
+        "prev_joint_vel": current_joint_vel,
+        "prev_joint_acc": current_joint_acc,
     }
 
 
@@ -830,6 +850,16 @@ def _initial_obs_state(reference: Mapping[str, object], sample_count: int, *, jn
             jnp=jnp,
         ),
     )
+
+
+def _initial_prev_joint_acc(reference: Mapping[str, object], sample_count: int, *, jnp):
+    value = reference.get("prev_joint_acc")
+    if value is None:
+        return jnp.zeros((sample_count, ACTION_DIM))
+    value = jnp.asarray(value)
+    if tuple(int(dim) for dim in value.shape) == (ACTION_DIM,):
+        return _broadcast_batch(value, sample_count, jnp=jnp)
+    return _ensure_batch(value, sample_count, jnp=jnp)
 
 
 def _time_slice_reference(

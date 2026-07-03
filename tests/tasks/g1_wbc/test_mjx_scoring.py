@@ -67,6 +67,7 @@ def _step_state(offset: float = 0.0) -> dict[str, np.ndarray]:
         "prev_control": np.array([0.1, 0.5, 0.3], dtype=np.float32),
         "joint_vel": np.array([-0.2, 0.1, 0.3], dtype=np.float32),
         "prev_joint_vel": np.array([-0.1, 0.0, 0.5], dtype=np.float32),
+        "prev_joint_acc": np.array([0.05, -0.1, 0.2], dtype=np.float32),
     }
 
 
@@ -92,9 +93,10 @@ def _expected_terms(step_state, reference_state) -> dict[str, float]:
     )
     contact_error = np.mean(np.abs(step_state["contact"] - reference_state["contact"]))
     control_delta = np.linalg.norm(step_state["control"] - step_state["prev_control"])
-    joint_acc = (
-        np.linalg.norm(step_state["joint_vel"] - step_state["prev_joint_vel"])
-        / POLICY_DT
+    joint_acc_delta = step_state["joint_vel"] - step_state["prev_joint_vel"]
+    joint_acc = np.linalg.norm(joint_acc_delta) / POLICY_DT
+    joint_jerk = (
+        np.linalg.norm(joint_acc_delta - step_state["prev_joint_acc"]) / POLICY_DT
     )
     return {
         "root_pos_error_mean": float(root_error),
@@ -103,6 +105,7 @@ def _expected_terms(step_state, reference_state) -> dict[str, float]:
         "contact_mismatch_rate": float(contact_error),
         "control_delta_mean": float(control_delta),
         "joint_acc_mean": float(joint_acc),
+        "joint_jerk_mean": float(joint_jerk),
     }
 
 
@@ -144,6 +147,32 @@ class MjxScoringTest(unittest.TestCase):
             + 0.25 * expected["joint_acc_mean"]
         )
         self.assertAlmostEqual(float(metrics["score"]), -expected_penalty, places=6)
+
+    def test_score_step_accumulates_joint_jerk_from_previous_joint_acc(self) -> None:
+        step_state = {
+            **_step_state(),
+            "joint_vel": np.array([0.3, -0.2, 0.5], dtype=np.float32),
+            "prev_joint_vel": np.array([0.1, -0.2, 0.1], dtype=np.float32),
+            "prev_joint_acc": np.array([0.05, 0.0, -0.1], dtype=np.float32),
+        }
+        reference_state = _reference_state()
+        weights = JaxScoreWeights({"joint_jerk": 0.2})
+
+        accumulator = score_step(
+            init_score_accumulator((), jnp=_NumpyJnp),
+            step_state,
+            reference_state,
+            weights,
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        joint_acc_delta = step_state["joint_vel"] - step_state["prev_joint_vel"]
+        expected = np.linalg.norm(joint_acc_delta - step_state["prev_joint_acc"])
+        expected /= POLICY_DT
+        self.assertAlmostEqual(float(metrics["joint_jerk_mean"]), expected, places=6)
+        self.assertEqual(metrics["joint_jerk"], metrics["joint_jerk_mean"])
+        self.assertAlmostEqual(float(metrics["score"]), -0.2 * expected, places=6)
 
     def test_score_step_accumulates_rotation_error_terms(self) -> None:
         identity = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -267,6 +296,7 @@ class MjxScoringTest(unittest.TestCase):
         self.assertEqual(metrics["contact_mismatch"], metrics["contact_mismatch_rate"])
         self.assertEqual(metrics["control_delta"], metrics["control_delta_mean"])
         self.assertEqual(metrics["joint_acc"], metrics["joint_acc_mean"])
+        self.assertEqual(metrics["joint_jerk"], metrics["joint_jerk_mean"])
 
     def test_accumulator_averages_multiple_steps(self) -> None:
         reference_state = _reference_state()

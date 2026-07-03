@@ -486,6 +486,62 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertGreater(float(first[0]), float(first[1]))
         self.assertGreater(float(first[1]), float(first[2]))
 
+    def test_score_candidate_controls_accumulates_joint_jerk_from_carry(self) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+        reference["score_weights"] = JaxScoreWeights({"joint_jerk": 1.0})
+        reference["prev_joint_acc"] = np.full((2, ACTION_DIM), 0.1, dtype=np.float32)
+        joint_vels = np.stack(
+            [
+                np.full((2, ACTION_DIM), 0.2, dtype=np.float32),
+                np.full((2, ACTION_DIM), 0.5, dtype=np.float32),
+                np.full((2, ACTION_DIM), 0.9, dtype=np.float32),
+            ],
+            axis=0,
+        )
+
+        def accelerating_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            next_robot, score_state = _physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+            next_robot = dict(next_robot)
+            qvel = np.asarray(next_robot["qvel"]).copy()
+            qvel[:, 6:] = joint_vels[int(step_index)]
+            next_robot["qvel"] = qvel
+            return next_robot, score_state
+
+        metrics = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=accelerating_step,
+            return_metrics=True,
+        )
+
+        expected = np.linalg.norm(np.full(ACTION_DIM, 0.1, dtype=np.float32))
+        expected /= POLICY_DT
+        np.testing.assert_allclose(
+            metrics["joint_jerk_mean"],
+            np.full(2, expected, dtype=np.float32),
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(metrics["score"], -expected, rtol=1e-6)
+
     def test_score_candidate_controls_uses_reference_base_qpos_window(self) -> None:
         samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
         reference = _rollout_reference(samples=1, horizon=3)
@@ -592,6 +648,8 @@ class MjxRolloutTest(unittest.TestCase):
             trace["final_prev_control"],
             samples[:, -1],
         )
+        self.assertIn("final_prev_joint_acc", trace)
+        np.testing.assert_allclose(trace["final_prev_joint_acc"], 0.0)
 
     def test_score_candidate_controls_broadcasts_single_live_state_batch(self) -> None:
         samples = np.zeros((2, 2, QPOS_DIM - 1), dtype=np.float32)
@@ -1012,6 +1070,32 @@ class MjxRolloutTest(unittest.TestCase):
 
         self.assertEqual(scores.shape, (2,))
         self.assertEqual(lax.calls, [{"steps": 3}])
+
+    def test_lax_scan_broadcasts_unbatched_prev_joint_acc_before_carry(self) -> None:
+        samples = np.zeros((ACTION_DIM, 2, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=ACTION_DIM, horizon=2)
+        reference["prev_joint_acc"] = np.full(ACTION_DIM, 0.1, dtype=np.float32)
+        lax = _RecordingLax()
+        runtime = type(
+            "ScanRuntime",
+            (),
+            {
+                "jnp": _NumpyJnp(),
+                "jax": type("ScanJax", (), {"lax": lax})(),
+            },
+        )()
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=_physics_step,
+        )
+
+        self.assertEqual(scores.shape, (ACTION_DIM,))
+        self.assertEqual(lax.calls, [{"steps": 2}])
 
     def test_lax_scan_materializes_partial_obs_history(self) -> None:
         samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)

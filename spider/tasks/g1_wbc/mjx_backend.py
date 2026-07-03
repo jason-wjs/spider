@@ -114,6 +114,7 @@ def run_g1_wbc_mjx_mpc(
     current_obs_state = None
     current_obs_initialized = False
     current_prev_control = None
+    current_prev_joint_acc = None
     jit_warmup_enabled = False
     jit_warmup_wall_time_sec = 0.0
     if use_jax_controls:
@@ -156,6 +157,7 @@ def run_g1_wbc_mjx_mpc(
             obs_state=current_obs_state,
             obs_initialized=current_obs_initialized if current_obs_state is not None else None,
             prev_control=current_prev_control,
+            prev_joint_acc=current_prev_joint_acc,
         )
         window_result = optimizer(
             config=window_config,
@@ -220,6 +222,7 @@ def run_g1_wbc_mjx_mpc(
                         current_obs_initialized if current_obs_state is not None else None
                     ),
                     prev_control=current_prev_control,
+                    prev_joint_acc=current_prev_joint_acc,
                 )
                 execute_trace = rollout_tracer(
                     execute_controls[None, :, :],
@@ -236,6 +239,10 @@ def run_g1_wbc_mjx_mpc(
                 current_prev_control = execute_trace.get(
                     "final_prev_control",
                     execute_controls[-1:],
+                )
+                current_prev_joint_acc = execute_trace.get(
+                    "final_prev_joint_acc",
+                    current_prev_joint_acc,
                 )
         info.update(
             {
@@ -463,6 +470,7 @@ def _mjx_score_weights(
         "control_delta": float(reward_weights.get("control_delta", 0.0)),
         "action_delta": float(reward_weights.get("action_delta", 0.0)),
         "joint_acc": float(reward_weights.get("joint_acc", 0.0)),
+        "joint_jerk": float(reward_weights.get("joint_jerk", 0.0)),
     }
     return {name: value for name, value in mapping.items() if value != 0.0}
 
@@ -721,6 +729,7 @@ def _window_reference(
     obs_state=None,
     obs_initialized=None,
     prev_control=None,
+    prev_joint_acc=None,
 ):
     if rollout_reference_factory is None:
         return {"start": int(start)}
@@ -740,6 +749,8 @@ def _window_reference(
         kwargs["obs_initialized"] = obs_initialized
     if prev_control is not None:
         kwargs["prev_control"] = prev_control
+    if prev_joint_acc is not None:
+        kwargs["prev_joint_acc"] = prev_joint_acc
     return rollout_reference_factory(**kwargs)
 
 

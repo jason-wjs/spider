@@ -34,6 +34,7 @@ def build_mjx_rollout_reference(
     obs_state=None,
     obs_initialized=None,
     prev_control=None,
+    prev_joint_acc=None,
 ) -> dict[str, object]:
     """Build the reference payload consumed by ``score_candidate_controls``."""
 
@@ -108,7 +109,14 @@ def build_mjx_rollout_reference(
         "default_joint_pos": default_joint_pos(jnp=jnp),
         "joint_low": _joint_limit_array(model_bundle, high=False, jnp=jnp),
         "joint_high": _joint_limit_array(model_bundle, high=True, jnp=jnp),
-        "prev_control": controls[0] if prev_control is None else _to_jnp(prev_control, jnp=jnp),
+        "prev_control": (
+            controls[0] if prev_control is None else _to_jnp(prev_control, jnp=jnp)
+        ),
+        "prev_joint_acc": (
+            _to_jnp([0.0] * ACTION_DIM, jnp=jnp)
+            if prev_joint_acc is None
+            else _to_jnp(prev_joint_acc, jnp=jnp)
+        ),
         "score_weights": _score_weights(score_weights),
     }
 
