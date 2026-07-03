@@ -611,7 +611,30 @@ def validate_runtime_environment(args: argparse.Namespace) -> tuple[str, ...]:
         failures.append("single_gpu_visibility")
     if str(args.device) not in {"cuda", "cuda:0"}:
         failures.append("single_gpu_device")
+    if len(visible) == 1 and _visible_gpu_has_compute_processes(visible[0]):
+        failures.append("gpu_contention")
     return tuple(failures)
+
+
+def _visible_gpu_has_compute_processes(visible_gpu: str) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--id",
+                str(visible_gpu),
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return True
+    if result.returncode != 0:
+        return True
+    return any(line.strip() for line in result.stdout.splitlines())
 
 
 def _environment_failure_report(

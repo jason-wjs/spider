@@ -18,13 +18,15 @@ RUNNER_PATH = (
 )
 
 
-def load_runner():
+def load_runner(*, assume_idle_gpu: bool = True):
     spec = importlib.util.spec_from_file_location("mjx_acceptance_runner", RUNNER_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load runner from {RUNNER_PATH}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    if assume_idle_gpu:
+        module._visible_gpu_has_compute_processes = lambda visible_gpu: False
     return module
 
 
@@ -1025,6 +1027,44 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual(report["classification"], "invalid_benchmark")
         self.assertIn("single_gpu_visibility", report["environment_failures"])
+
+    def test_main_fails_fast_when_visible_gpu_has_compute_processes(self) -> None:
+        runner = load_runner(assume_idle_gpu=False)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            busy_gpu = runner.subprocess.CompletedProcess(
+                args=["nvidia-smi"],
+                returncode=0,
+                stdout="12345, python, 13269 MiB\n",
+                stderr="",
+            )
+
+            with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "2"}):
+                with mock.patch.object(runner.subprocess, "run", return_value=busy_gpu):
+                    with mock.patch.object(
+                        runner,
+                        "run_command",
+                        side_effect=AssertionError("run_command should not be called"),
+                    ):
+                        exit_code = runner.main(
+                            [
+                                "--baseline-manifest",
+                                str(manifest_path),
+                                "--output-dir",
+                                str(output_dir),
+                                "--device",
+                                "cuda:0",
+                            ]
+                        )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn("gpu_contention", report["environment_failures"])
 
     def test_report_quality_gate_uses_frozen_baseline_envelope(self) -> None:
         runner = load_runner()
