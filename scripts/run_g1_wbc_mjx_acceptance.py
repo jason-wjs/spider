@@ -99,8 +99,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--required-gpu-name-fragment",
         default=DEFAULT_REQUIRED_GPU_NAME_FRAGMENT,
         help=(
-            "Substring required in MJX runtime GPU names for this acceptance "
-            "milestone. Use an empty value to disable the model-name check."
+            "Substring required in baseline and MJX runtime GPU names for this "
+            "acceptance milestone. Use an empty value to disable the model-name check."
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
@@ -390,6 +390,10 @@ def _build_report(
             (
                 *baseline_gate.failures,
                 *_baseline_artifact_evidence_failures(baseline_group),
+                *_baseline_runtime_evidence_failures(
+                    baseline_group,
+                    required_gpu_name_fragment=required_gpu_name_fragment,
+                ),
             )
         )
         mjx_gate = evaluate_mjx_group(
@@ -732,6 +736,10 @@ def _has_invalid_benchmark_failure(
     invalid_markers = {
         "accepted_windows",
         "baseline_fallback",
+        "baseline_required_gpu",
+        "baseline_runtime_gpu_name",
+        "baseline_runtime_visible_devices",
+        "baseline_single_visible_gpu",
         "baseline_wall_time",
         "compile_init_wall_time",
         "contact_saturation",
@@ -939,6 +947,29 @@ def _baseline_artifact_evidence_failures(rows: list[dict[str, Any]]) -> tuple[st
             value = artifacts.get(key)
             if not isinstance(value, str) or not Path(value).expanduser().is_file():
                 failures.append(key)
+    return _unique(failures)
+
+
+def _baseline_runtime_evidence_failures(
+    rows: list[dict[str, Any]],
+    *,
+    required_gpu_name_fragment: str,
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    required = str(required_gpu_name_fragment)
+    for row in rows:
+        devices = row.get("runtime_visible_devices")
+        if not isinstance(devices, (list, tuple)) or not devices:
+            failures.append("baseline_runtime_visible_devices")
+        else:
+            visible = tuple(str(value) for value in devices if str(value))
+            if len(visible) != 1:
+                failures.append("baseline_single_visible_gpu")
+        gpu_name = row.get("runtime_gpu_name")
+        if not isinstance(gpu_name, str) or not gpu_name.strip():
+            failures.append("baseline_runtime_gpu_name")
+        elif required and required not in gpu_name:
+            failures.append("baseline_required_gpu")
     return _unique(failures)
 
 

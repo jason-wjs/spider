@@ -104,6 +104,8 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                     "accepted_windows": 40,
                     "mpc_used_baseline_fallback": False,
                     "num_steps": 800,
+                    "runtime_visible_devices": ["0"],
+                    "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
                     "artifacts": {
                         "metrics_json": str(output_dir / "metrics.json"),
                         "rollout_npz": str(output_dir / "rollout.npz"),
@@ -975,6 +977,84 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertIn(
             "mjx_required_gpu",
             report["motion_results"]["jump"]["mjx_failures"],
+        )
+
+    def test_missing_or_non_h100_baseline_gpu_name_fails_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["rows"][0]["runtime_gpu_name"] = "NVIDIA GeForce RTX 4090"
+            manifest["rows"][1].pop("runtime_gpu_name")
+            manifest["rows"][2].pop("runtime_visible_devices")
+            manifest["rows"][3]["runtime_visible_devices"] = ["0", "1"]
+            manifest_path.write_text(json.dumps(manifest))
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row.update(_replay_evidence(argv))
+                    return row
+                row.update(
+                    {
+                        "mpc_accepted": True,
+                        "accepted_windows": 40,
+                        "mpc_used_baseline_fallback": False,
+                        "compile_init_wall_time_sec": 2.0,
+                        "jit_warmup_enabled": True,
+                        "jit_warmup_wall_time_sec": 1.5,
+                        "runtime_visible_devices": ("0",),
+                        "steady_state_wall_time_sec": 1.0,
+                        **_mjx_contact_evidence(),
+                    }
+                )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "baseline_runtime_gpu_name",
+            report["motion_results"]["jump"]["baseline_failures"],
+        )
+        self.assertIn(
+            "baseline_required_gpu",
+            report["motion_results"]["jump"]["baseline_failures"],
+        )
+        self.assertIn(
+            "baseline_runtime_visible_devices",
+            report["motion_results"]["jump"]["baseline_failures"],
+        )
+        self.assertIn(
+            "baseline_single_visible_gpu",
+            report["motion_results"]["walk"]["baseline_failures"],
         )
 
     def test_missing_or_saturated_mjx_contact_diagnostics_fail_closed(self) -> None:

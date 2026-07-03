@@ -32,10 +32,11 @@ Hardware rules:
 - RTX 4090 is the final deployment target.
 - Four available H100s may be used for separate experiments, but never for one
   motion inference run.
-- The H100 milestone report must include the runtime GPU name for every MJX
-  repeat, and the default formal acceptance gate requires the name to contain
-  `H100`. Later RTX 4090 validation should use a different explicit required
-  GPU-name fragment rather than reusing the H100 milestone label.
+- The H100 milestone report must include the runtime GPU name for every
+  baseline and MJX repeat, and the default formal acceptance gate requires both
+  names to contain `H100`. Later RTX 4090 validation should use a different
+  explicit required GPU-name fragment rather than reusing the H100 milestone
+  label.
 
 Timing rules:
 
