@@ -328,6 +328,8 @@ The MuJoCo-Warp replay gate must:
 - report `num_command_frames >= num_replay_steps + 1`
 - match `num_command_frames` to the saved command NPZ frame count, reported as
   `replay_command_npz_frames`
+- require replay `rollout.npz["ref_indices"]` to stay within the saved command
+  frame range, reported as `replay_rollout_ref_indices`
 - compare replay quality against the same frozen baseline envelope
 
 If MJX metrics pass but MuJoCo-Warp replay fails, the result is a parity

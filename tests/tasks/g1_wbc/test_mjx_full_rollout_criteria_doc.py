@@ -35,6 +35,7 @@ class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
             "replay_saved_command_source",
             "replay_saved_command_hash",
             "replay_command_npz_frames",
+            "replay_rollout_ref_indices",
             "pass_h100_milestone",
             "invalid_benchmark",
         )

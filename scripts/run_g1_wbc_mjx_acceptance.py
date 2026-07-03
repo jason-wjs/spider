@@ -997,6 +997,20 @@ def _replay_provenance_failures(
         )
         if command_frames is not None and command_npz_frames != command_frames:
             failures.append("replay_command_npz_frames")
+        artifacts = row.get("artifacts", {})
+        rollout_path = (
+            artifacts.get("rollout_npz") if isinstance(artifacts, dict) else None
+        )
+        if (
+            command_frames is not None
+            and isinstance(rollout_path, str)
+            and Path(rollout_path).expanduser().is_file()
+            and not _replay_rollout_ref_indices_within_command(
+                Path(rollout_path).expanduser(),
+                command_frames=command_frames,
+            )
+        ):
+            failures.append("replay_rollout_ref_indices")
     return _unique(failures)
 
 
@@ -1037,6 +1051,27 @@ def _npz_frame_count(path: Path, *, keys: tuple[str, ...]) -> int | None:
     except Exception:
         return None
     return None
+
+
+def _replay_rollout_ref_indices_within_command(
+    path: Path,
+    *,
+    command_frames: int,
+) -> bool:
+    try:
+        with np.load(path) as data:
+            ref_indices = np.asarray(data["ref_indices"])
+    except Exception:
+        return False
+    if ref_indices.size == 0:
+        return False
+    try:
+        return bool(
+            np.all(ref_indices >= 0)
+            and np.all(ref_indices < int(command_frames))
+        )
+    except Exception:
+        return False
 
 
 def _has_invalid_benchmark_failure(
@@ -1090,6 +1125,7 @@ def _has_invalid_benchmark_failure(
         "replay_saved_command",
         "replay_saved_command_hash",
         "replay_saved_command_source",
+        "replay_rollout_ref_indices",
         "returncode",
         "rollout_npz",
         "rollout_npz_hash",

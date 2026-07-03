@@ -1187,6 +1187,43 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["replay_results"]["jump"]["failures"],
         )
 
+    def test_replay_rollout_ref_indices_must_stay_within_command_frames(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in replay_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_rollout = Path(bad_row["artifacts"]["rollout_npz"])
+            arrays = _valid_rollout_arrays()
+            arrays["ref_indices"][-1, 0] = 9999
+            np.savez_compressed(bad_rollout, **arrays)
+            bad_row["artifact_sha256"]["rollout_npz"] = _file_sha256(bad_rollout)
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "replay_rollout_ref_indices",
+            report["replay_results"]["jump"]["failures"],
+        )
+
     def test_missing_baseline_artifact_paths_fail_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
