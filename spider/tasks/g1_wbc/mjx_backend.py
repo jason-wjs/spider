@@ -21,7 +21,7 @@ from spider.tasks.g1_wbc.mjx_contacts import get_contact_profile
 from spider.tasks.g1_wbc.mjx_optimizer import JaxWindowOptimizerConfig, optimize_window
 from spider.tasks.g1_wbc.mjx_policy import convert_wbc_actor_to_jax
 from spider.tasks.g1_wbc.mjx_runtime import require_mjx_runtime
-from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion, qvel_from_qpos_trajectory
+from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion
 from spider.tasks.g1_wbc.result_types import G1WbcMpcRun, G1WbcSpiderResult
 
 
@@ -46,6 +46,7 @@ def run_g1_wbc_mjx_mpc(
     rollout_factory: Callable[..., Any] | None = None,
     rollout_scorer: Callable[..., Any] | None = None,
     rollout_reference_factory: Callable[..., Any] | None = None,
+    command_builder: Callable[..., G1CommandBatch] | None = None,
     enable_physics_scan: bool = False,
 ):
     """Run the MJX full-rollout backend or fail before touching Warp state."""
@@ -226,7 +227,13 @@ def run_g1_wbc_mjx_mpc(
         refined_qpos=refined_qpos.detach().clone(),
     )
     _validate_rollout_shape(rollout, total_steps=total_steps, refined_qpos=refined_qpos)
-    command = _command_from_refined_qpos(motion, refined_qpos, rollout)
+    command = _command_from_refined_qpos(
+        motion,
+        refined_qpos,
+        rollout,
+        command_builder=command_builder,
+        rollout_config=execute_rollout_config,
+    )
     _validate_command_shape(command, total_steps=total_steps)
     contact_metadata = _contact_metadata(
         model_bundle=model_bundle,
@@ -946,18 +953,29 @@ def _command_from_refined_qpos(
     motion: G1Motion,
     refined_qpos: torch.Tensor,
     rollout,
+    *,
+    command_builder: Callable[..., G1CommandBatch] | None = None,
+    rollout_config=None,
 ) -> G1CommandBatch:
-    qvel_trajectory = qvel_from_qpos_trajectory(refined_qpos[:, None, :])
-    return G1CommandBatch(
-        path=motion.path,
-        motion_type=motion.motion_type,
-        fps=motion.fps,
-        joint_pos=refined_qpos[:, None, 7:].contiguous(),
-        joint_vel=qvel_trajectory[..., 6:].contiguous(),
-        body_pos_w=rollout.body_pos_w.detach().clone(),
-        body_quat_w=rollout.body_quat_w.detach().clone(),
-        body_lin_vel_w=rollout.body_lin_vel_w.detach().clone(),
-        body_ang_vel_w=rollout.body_ang_vel_w.detach().clone(),
-        qpos_trajectory=refined_qpos[:, None, :].contiguous(),
-        qvel_trajectory=qvel_trajectory.contiguous(),
+    del rollout
+    if command_builder is None:
+        command_builder = _default_command_builder
+    return command_builder(
+        motion,
+        refined_qpos[:, None, :].contiguous(),
+        rollout_config,
+    )
+
+
+def _default_command_builder(
+    motion: G1Motion,
+    qpos_trajectory: torch.Tensor,
+    rollout_config,
+) -> G1CommandBatch:
+    from spider.tasks.g1_wbc.rollout import command_batch_from_qpos_trajectory
+
+    return command_batch_from_qpos_trajectory(
+        motion,
+        qpos_trajectory,
+        rollout_config,
     )

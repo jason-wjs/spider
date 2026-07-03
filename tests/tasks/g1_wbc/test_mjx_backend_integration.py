@@ -21,7 +21,7 @@ from spider.tasks.g1_wbc.constants import (
 )
 from spider.tasks.g1_wbc.mjx_backend import run_g1_wbc_mjx_mpc
 from spider.tasks.g1_wbc.mjx_components import build_mjx_rollout_components
-from spider.tasks.g1_wbc.motion import G1Motion, qvel_from_qpos_trajectory
+from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion, qvel_from_qpos_trajectory
 from spider.tasks.g1_wbc.policy import WbcActor
 from spider.tasks.g1_wbc.result_types import G1WbcMpcRun
 
@@ -161,6 +161,26 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                     ref_indices=torch.arange(frames, device=device).view(frames, 1),
                 )
 
+            def command_builder(motion, qpos_trajectory, config):
+                del config
+                frames = int(qpos_trajectory.shape[0])
+                bodies = len(MUJOCO_BODY_NAMES)
+                body_quat = torch.zeros(frames, 1, bodies, 4)
+                body_quat[..., 0] = 1.0
+                return SimpleNamespace(
+                    path=motion.path,
+                    motion_type=motion.motion_type,
+                    fps=motion.fps,
+                    joint_pos=qpos_trajectory[..., 7:].clone(),
+                    joint_vel=torch.zeros(frames, 1, ACTION_DIM),
+                    body_pos_w=torch.zeros(frames, 1, bodies, 3),
+                    body_quat_w=body_quat,
+                    body_lin_vel_w=torch.zeros(frames, 1, bodies, 3),
+                    body_ang_vel_w=torch.zeros(frames, 1, bodies, 3),
+                    qpos_trajectory=qpos_trajectory.clone(),
+                    qvel_trajectory=torch.zeros(frames, 1, QVEL_DIM),
+                )
+
             config = SimpleNamespace(
                 horizon_steps=40,
                 ctrl_steps=20,
@@ -189,6 +209,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
                 optimizer=optimizer,
                 rollout_factory=rollout_factory,
+                command_builder=command_builder,
             )
             print("accepted", result.metadata["accepted"])
             print("rollout_loaded", "spider.tasks.g1_wbc.rollout" in sys.modules)
@@ -238,6 +259,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             policy_converter=fake_policy_converter,
             optimizer=_fake_optimizer,
             rollout_factory=_fake_rollout_result,
+            command_builder=_fake_command_builder,
         )
 
         self.assertIsInstance(result, G1WbcMpcRun)
@@ -287,16 +309,77 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             refined_qpos=refined_qpos,
         )
 
+        def command_builder(motion, qpos_trajectory, config):
+            del motion, config
+            qvel = qvel_from_qpos_trajectory(qpos_trajectory)
+            return G1CommandBatch(
+                path=None,
+                motion_type="mujoco",
+                fps=50.0,
+                joint_pos=qpos_trajectory[..., 7:].contiguous(),
+                joint_vel=qvel[..., 6:].contiguous(),
+                body_pos_w=rollout.body_pos_w.clone(),
+                body_quat_w=rollout.body_quat_w.clone(),
+                body_lin_vel_w=rollout.body_lin_vel_w.clone(),
+                body_ang_vel_w=rollout.body_ang_vel_w.clone(),
+                qpos_trajectory=qpos_trajectory.contiguous(),
+                qvel_trajectory=qvel.contiguous(),
+            )
+
         command = mjx_backend_module._command_from_refined_qpos(
             _motion(frames=3),
             refined_qpos,
             rollout,
+            command_builder=command_builder,
+            rollout_config=SimpleNamespace(device="cpu"),
         )
 
         expected_qvel = qvel_from_qpos_trajectory(refined_qpos[:, None, :])
         torch.testing.assert_close(command.qvel_trajectory, expected_qvel)
         torch.testing.assert_close(command.joint_vel, expected_qvel[..., 6:])
         torch.testing.assert_close(command.qpos_trajectory[:, 0], refined_qpos)
+
+    def test_command_from_refined_qpos_uses_command_builder_body_fields(self) -> None:
+        refined_qpos = torch.zeros(3, QPOS_DIM)
+        refined_qpos[:, 3] = 1.0
+        rollout = _fake_rollout_result(
+            _motion(frames=3),
+            total_steps=2,
+            device=torch.device("cpu"),
+            refined_qpos=refined_qpos,
+        )
+        rollout.body_pos_w.fill_(-5.0)
+        rollout.body_lin_vel_w.fill_(-6.0)
+        builder_body_pos = torch.full_like(rollout.body_pos_w, 7.0)
+        builder_body_lin_vel = torch.full_like(rollout.body_lin_vel_w, 8.0)
+
+        def command_builder(motion, qpos_trajectory, config):
+            del motion, config
+            qvel = qvel_from_qpos_trajectory(qpos_trajectory)
+            return G1CommandBatch(
+                path=None,
+                motion_type="mujoco",
+                fps=50.0,
+                joint_pos=qpos_trajectory[..., 7:].contiguous(),
+                joint_vel=qvel[..., 6:].contiguous(),
+                body_pos_w=builder_body_pos.clone(),
+                body_quat_w=rollout.body_quat_w.clone(),
+                body_lin_vel_w=builder_body_lin_vel.clone(),
+                body_ang_vel_w=rollout.body_ang_vel_w.clone(),
+                qpos_trajectory=qpos_trajectory.contiguous(),
+                qvel_trajectory=qvel.contiguous(),
+            )
+
+        command = mjx_backend_module._command_from_refined_qpos(
+            _motion(frames=3),
+            refined_qpos,
+            rollout,
+            command_builder=command_builder,
+            rollout_config=SimpleNamespace(device="cpu"),
+        )
+
+        torch.testing.assert_close(command.body_pos_w, builder_body_pos)
+        torch.testing.assert_close(command.body_lin_vel_w, builder_body_lin_vel)
 
     def test_mjx_backend_emits_contact_capacity_metadata(self) -> None:
         def optimizer(**kwargs):
@@ -361,6 +444,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
             optimizer=optimizer,
             rollout_factory=_fake_rollout_result,
+            command_builder=_fake_command_builder,
         )
 
         self.assertEqual(result.metadata["planning_horizon_steps"], 11)
@@ -554,6 +638,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             rollout_factory=_fake_rollout_result,
             rollout_scorer=components.rollout_scorer,
             rollout_reference_factory=components.rollout_reference_factory,
+            command_builder=_fake_command_builder,
         )
 
         self.assertTrue(result.metadata["accepted"])
@@ -826,6 +911,7 @@ def _run_with_fakes(
         ),
         policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
         rollout_factory=rollout_factory,
+        command_builder=_fake_command_builder,
         enable_physics_scan=enable_physics_scan,
         **kwargs,
     )
@@ -1064,6 +1150,32 @@ def _fake_rollout_result(
         floor_contact_indicator=torch.zeros(frames, 1, 3, device=device),
         floor_contact_force=torch.zeros(frames, 1, 3, device=device),
         ref_indices=torch.arange(frames, device=device).view(frames, 1),
+    )
+
+
+def _fake_command_builder(
+    motion: G1Motion,
+    qpos_trajectory: torch.Tensor,
+    config,
+):
+    del config
+    frames = int(qpos_trajectory.shape[0])
+    bodies = len(MUJOCO_BODY_NAMES)
+    device = qpos_trajectory.device
+    body_quat = torch.zeros(frames, 1, bodies, 4, device=device)
+    body_quat[..., 0] = 1.0
+    return G1CommandBatch(
+        path=motion.path,
+        motion_type=motion.motion_type,
+        fps=motion.fps,
+        joint_pos=qpos_trajectory[..., 7:].contiguous(),
+        joint_vel=torch.zeros(frames, 1, ACTION_DIM, device=device),
+        body_pos_w=torch.zeros(frames, 1, bodies, 3, device=device),
+        body_quat_w=body_quat,
+        body_lin_vel_w=torch.zeros(frames, 1, bodies, 3, device=device),
+        body_ang_vel_w=torch.zeros(frames, 1, bodies, 3, device=device),
+        qpos_trajectory=qpos_trajectory.contiguous(),
+        qvel_trajectory=torch.zeros(frames, 1, QVEL_DIM, device=device),
     )
 
 
