@@ -37,6 +37,8 @@ def build_mjx_rollout_reference(
     prev_joint_acc=None,
     prev_contact=None,
     prev_contact_valid=None,
+    prev_contact_force=None,
+    prev_contact_force_valid=None,
 ) -> dict[str, object]:
     """Build the reference payload consumed by ``score_candidate_controls``."""
 
@@ -128,6 +130,16 @@ def build_mjx_rollout_reference(
             prev_contact is not None
             if prev_contact_valid is None
             else _to_jnp(prev_contact_valid, jnp=jnp)
+        ),
+        "prev_contact_force": (
+            _to_jnp([0.0, 0.0], jnp=jnp)
+            if prev_contact_force is None
+            else _to_jnp(prev_contact_force, jnp=jnp)
+        ),
+        "prev_contact_force_valid": (
+            prev_contact_force is not None
+            if prev_contact_force_valid is None
+            else _to_jnp(prev_contact_force_valid, jnp=jnp)
         ),
         "score_weights": _score_weights(score_weights),
     }

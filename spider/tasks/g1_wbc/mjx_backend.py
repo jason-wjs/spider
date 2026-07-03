@@ -117,6 +117,8 @@ def run_g1_wbc_mjx_mpc(
     current_prev_joint_acc = None
     current_prev_contact = None
     current_prev_contact_valid = None
+    current_prev_contact_force = None
+    current_prev_contact_force_valid = None
     jit_warmup_enabled = False
     jit_warmup_wall_time_sec = 0.0
     if use_jax_controls:
@@ -162,6 +164,8 @@ def run_g1_wbc_mjx_mpc(
             prev_joint_acc=current_prev_joint_acc,
             prev_contact=current_prev_contact,
             prev_contact_valid=current_prev_contact_valid,
+            prev_contact_force=current_prev_contact_force,
+            prev_contact_force_valid=current_prev_contact_force_valid,
         )
         window_result = optimizer(
             config=window_config,
@@ -229,6 +233,8 @@ def run_g1_wbc_mjx_mpc(
                     prev_joint_acc=current_prev_joint_acc,
                     prev_contact=current_prev_contact,
                     prev_contact_valid=current_prev_contact_valid,
+                    prev_contact_force=current_prev_contact_force,
+                    prev_contact_force_valid=current_prev_contact_force_valid,
                 )
                 execute_trace = rollout_tracer(
                     execute_controls[None, :, :],
@@ -257,6 +263,14 @@ def run_g1_wbc_mjx_mpc(
                 current_prev_contact_valid = execute_trace.get(
                     "final_prev_contact_valid",
                     current_prev_contact_valid,
+                )
+                current_prev_contact_force = execute_trace.get(
+                    "final_prev_contact_force",
+                    current_prev_contact_force,
+                )
+                current_prev_contact_force_valid = execute_trace.get(
+                    "final_prev_contact_force_valid",
+                    current_prev_contact_force_valid,
                 )
         info.update(
             {
@@ -475,6 +489,10 @@ def _mjx_score_weights(
         "ee_global_pos": float(reward_weights.get("ee_global_pos_error", 0.0)),
         "ee_global_rot": float(reward_weights.get("ee_global_rot_error", 0.0)),
         "bad_floor_contact": float(reward_weights.get("bad_floor_contact", 0.0)),
+        "bad_floor_force_excess": float(
+            reward_weights.get("bad_floor_force_excess", 0.0)
+        ),
+        "contact_force_delta": float(reward_weights.get("contact_force_delta", 0.0)),
         "contact": float(reward_weights.get("contact_mismatch", 0.0)),
         "contact_false_positive": float(
             reward_weights.get("contact_false_positive", 0.0)
@@ -748,6 +766,8 @@ def _window_reference(
     prev_joint_acc=None,
     prev_contact=None,
     prev_contact_valid=None,
+    prev_contact_force=None,
+    prev_contact_force_valid=None,
 ):
     if rollout_reference_factory is None:
         return {"start": int(start)}
@@ -773,6 +793,10 @@ def _window_reference(
         kwargs["prev_contact"] = prev_contact
     if prev_contact_valid is not None:
         kwargs["prev_contact_valid"] = prev_contact_valid
+    if prev_contact_force is not None:
+        kwargs["prev_contact_force"] = prev_contact_force
+    if prev_contact_force_valid is not None:
+        kwargs["prev_contact_force_valid"] = prev_contact_force_valid
     return rollout_reference_factory(**kwargs)
 
 

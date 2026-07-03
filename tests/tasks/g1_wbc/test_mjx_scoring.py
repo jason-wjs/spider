@@ -317,7 +317,56 @@ class MjxScoringTest(unittest.TestCase):
             metrics["bad_floor_contact"],
             metrics["bad_floor_contact_rate"],
         )
+        self.assertEqual(
+            metrics["bad_floor_force_excess"],
+            metrics["bad_floor_force_excess_mean"],
+        )
+        self.assertEqual(
+            metrics["contact_force_delta"],
+            metrics["contact_force_delta_mean"],
+        )
         self.assertAlmostEqual(float(metrics["score"]), -3.0)
+
+    def test_score_step_accumulates_contact_force_terms(self) -> None:
+        step_state = {
+            **_step_state(),
+            "contact_force": np.array([600.0, 0.0], dtype=np.float32),
+            "prev_contact_force": np.array([300.0, 400.0], dtype=np.float32),
+            "prev_contact_force_valid": np.array(1.0, dtype=np.float32),
+            "floor_contact_force": np.array([10.0, 20.0, 600.0], dtype=np.float32),
+        }
+        weights = JaxScoreWeights(
+            {
+                "contact_force_delta": 1.5,
+                "bad_floor_force_excess": 2.0,
+            }
+        )
+
+        accumulator = score_step(
+            init_score_accumulator((), jnp=_NumpyJnp),
+            step_state,
+            _reference_state(),
+            weights,
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        expected_delta = (
+            np.linalg.norm(step_state["contact_force"] - step_state["prev_contact_force"])
+            / 300.0
+        )
+        self.assertAlmostEqual(float(metrics["contact_force_delta_mean"]), expected_delta)
+        self.assertEqual(
+            metrics["contact_force_delta"],
+            metrics["contact_force_delta_mean"],
+        )
+        self.assertAlmostEqual(float(metrics["bad_floor_force_excess_mean"]), 1.0)
+        self.assertEqual(
+            metrics["bad_floor_force_excess"],
+            metrics["bad_floor_force_excess_mean"],
+        )
+        expected_penalty = 1.5 * expected_delta + 2.0
+        self.assertAlmostEqual(float(metrics["score"]), -expected_penalty)
 
     def test_finalize_score_returns_compute_rollout_scores_term_aliases(self) -> None:
         step_state = _step_state()

@@ -401,6 +401,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             "g1_wbc_joint_global",
             {
                 "bad_floor_contact": 4.5,
+                "bad_floor_force_excess": 0.7,
+                "contact_force_delta": 2.5,
                 "contact_mismatch": 2.0,
                 "contact_false_positive": 1.5,
                 "contact_false_negative": 0.4,
@@ -411,6 +413,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         )
 
         self.assertEqual(weights["bad_floor_contact"], 4.5)
+        self.assertEqual(weights["bad_floor_force_excess"], 0.7)
+        self.assertEqual(weights["contact_force_delta"], 2.5)
         self.assertEqual(weights["contact"], 2.0)
         self.assertEqual(weights["contact_false_positive"], 1.5)
         self.assertEqual(weights["contact_false_negative"], 0.4)
@@ -902,6 +906,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         live_prev_control = np.full((1, QPOS_DIM - 1), 0.33, dtype=np.float32)
         live_prev_joint_acc = np.full((1, ACTION_DIM), 0.21, dtype=np.float32)
         live_prev_contact = np.array([[1.0, 0.0]], dtype=np.float32)
+        live_prev_contact_force = np.array([[15.0, 25.0]], dtype=np.float32)
 
         def optimizer(**kwargs):
             optimizer_references.append(dict(kwargs["reference"]["kwargs"]))
@@ -944,6 +949,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 "final_prev_joint_acc": live_prev_joint_acc,
                 "final_prev_contact": live_prev_contact,
                 "final_prev_contact_valid": np.array([1.0], dtype=np.float32),
+                "final_prev_contact_force": live_prev_contact_force,
+                "final_prev_contact_force_valid": np.array([1.0], dtype=np.float32),
             }
 
         _run_with_fakes(
@@ -975,6 +982,14 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         )
         np.testing.assert_allclose(second_reference["prev_contact"], live_prev_contact)
         np.testing.assert_allclose(second_reference["prev_contact_valid"], [1.0])
+        np.testing.assert_allclose(
+            second_reference["prev_contact_force"],
+            live_prev_contact_force,
+        )
+        np.testing.assert_allclose(
+            second_reference["prev_contact_force_valid"],
+            [1.0],
+        )
 
     def test_mjx_backend_accepts_jax_optimizer_arrays(self) -> None:
         try:

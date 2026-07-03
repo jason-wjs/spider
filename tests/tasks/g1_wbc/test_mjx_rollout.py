@@ -592,6 +592,57 @@ class MjxRolloutTest(unittest.TestCase):
         )
         np.testing.assert_allclose(metrics["score"], [-expected], rtol=1e-6)
 
+    def test_score_candidate_controls_carries_contact_force_delta_after_first_step(
+        self,
+    ) -> None:
+        samples = np.zeros((1, 2, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=2)
+        reference["score_weights"] = JaxScoreWeights({"contact_force_delta": 1.0})
+        contact_forces = np.array(
+            [[[0.0, 0.0]], [[300.0, 400.0]]],
+            dtype=np.float32,
+        )
+
+        def force_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            next_robot, score_state = _physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+            score_state = dict(score_state)
+            score_state["contact_force"] = contact_forces[int(step_index)]
+            return next_robot, score_state
+
+        metrics = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=force_step,
+            return_metrics=True,
+        )
+
+        expected = (np.linalg.norm(np.array([300.0, 400.0], dtype=np.float32)) / 300.0)
+        expected /= 2.0
+        np.testing.assert_allclose(
+            metrics["contact_force_delta_mean"],
+            [expected],
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(metrics["score"], [-expected], rtol=1e-6)
+
     def test_score_candidate_controls_uses_reference_base_qpos_window(self) -> None:
         samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
         reference = _rollout_reference(samples=1, horizon=3)
@@ -703,6 +754,9 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertIn("final_prev_contact", trace)
         np.testing.assert_allclose(trace["final_prev_contact"], 0.0)
         np.testing.assert_allclose(trace["final_prev_contact_valid"], 1.0)
+        self.assertIn("final_prev_contact_force", trace)
+        np.testing.assert_allclose(trace["final_prev_contact_force"], 0.0)
+        np.testing.assert_allclose(trace["final_prev_contact_force_valid"], 0.0)
 
     def test_score_candidate_controls_broadcasts_single_live_state_batch(self) -> None:
         samples = np.zeros((2, 2, QPOS_DIM - 1), dtype=np.float32)

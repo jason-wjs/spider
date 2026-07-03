@@ -209,6 +209,11 @@ def score_candidate_controls(
         sample_count,
         jnp=jnp,
     )
+    prev_contact_force, prev_contact_force_valid = _initial_prev_contact_force(
+        reference,
+        sample_count,
+        jnp=jnp,
+    )
     weights = reference.get("score_weights", JaxScoreWeights({}))
     if not isinstance(weights, JaxScoreWeights):
         weights = JaxScoreWeights(dict(weights))
@@ -233,6 +238,8 @@ def score_candidate_controls(
             prev_joint_acc,
             prev_contact,
             prev_contact_valid,
+            prev_contact_force,
+            prev_contact_force_valid,
             accumulator,
         )
 
@@ -246,6 +253,8 @@ def score_candidate_controls(
                 prev_joint_acc,
                 prev_contact,
                 prev_contact_valid,
+                prev_contact_force,
+                prev_contact_force_valid,
                 accumulator,
             ) = carry
             next_values = _score_rollout_step(
@@ -257,6 +266,8 @@ def score_candidate_controls(
                 prev_joint_acc=prev_joint_acc,
                 prev_contact=prev_contact,
                 prev_contact_valid=prev_contact_valid,
+                prev_contact_force=prev_contact_force,
+                prev_contact_force_valid=prev_contact_force_valid,
                 accumulator=accumulator,
                 samples=samples,
                 reference=step_reference,
@@ -283,6 +294,8 @@ def score_candidate_controls(
                 next_values["prev_joint_acc"],
                 next_values["prev_contact"],
                 next_values["prev_contact_valid"],
+                next_values["prev_contact_force"],
+                next_values["prev_contact_force_valid"],
                 next_values["accumulator"],
             ), None
 
@@ -308,6 +321,8 @@ def score_candidate_controls(
             prev_joint_acc=prev_joint_acc,
             prev_contact=prev_contact,
             prev_contact_valid=prev_contact_valid,
+            prev_contact_force=prev_contact_force,
+            prev_contact_force_valid=prev_contact_force_valid,
             accumulator=accumulator,
             samples=samples,
             reference=step_reference,
@@ -328,6 +343,8 @@ def score_candidate_controls(
         prev_joint_acc = next_values["prev_joint_acc"]
         prev_contact = next_values["prev_contact"]
         prev_contact_valid = next_values["prev_contact_valid"]
+        prev_contact_force = next_values["prev_contact_force"]
+        prev_contact_force_valid = next_values["prev_contact_force_valid"]
         accumulator = next_values["accumulator"]
 
     metrics = finalize_score(accumulator, jnp=jnp)
@@ -410,6 +427,11 @@ def rollout_candidate_controls(
         sample_count,
         jnp=jnp,
     )
+    prev_contact_force, prev_contact_force_valid = _initial_prev_contact_force(
+        reference,
+        sample_count,
+        jnp=jnp,
+    )
     obs_initialized = reference.get("obs_initialized", False)
     step_reference = _with_commanded_qpos(
         reference,
@@ -430,6 +452,8 @@ def rollout_candidate_controls(
             prev_joint_acc=prev_joint_acc,
             prev_contact=prev_contact,
             prev_contact_valid=prev_contact_valid,
+            prev_contact_force=prev_contact_force,
+            prev_contact_force_valid=prev_contact_force_valid,
             samples=samples,
             reference=step_reference,
             obs_indices=obs_indices,
@@ -448,6 +472,8 @@ def rollout_candidate_controls(
         prev_joint_acc = next_values["prev_joint_acc"]
         prev_contact = next_values["prev_contact"]
         prev_contact_valid = next_values["prev_contact_valid"]
+        prev_contact_force = next_values["prev_contact_force"]
+        prev_contact_force_valid = next_values["prev_contact_force_valid"]
         qpos_trace.append(robot_state["qpos"])
         qvel_trace.append(robot_state["qvel"])
 
@@ -461,6 +487,8 @@ def rollout_candidate_controls(
         "final_prev_joint_acc": prev_joint_acc,
         "final_prev_contact": prev_contact,
         "final_prev_contact_valid": prev_contact_valid,
+        "final_prev_contact_force": prev_contact_force,
+        "final_prev_contact_force_valid": prev_contact_force_valid,
     }
 
 
@@ -489,6 +517,8 @@ def _score_rollout_step(
     prev_joint_acc,
     prev_contact,
     prev_contact_valid,
+    prev_contact_force,
+    prev_contact_force_valid,
     accumulator,
     samples,
     reference: Mapping[str, object],
@@ -556,7 +586,15 @@ def _score_rollout_step(
     step_state.setdefault("prev_joint_acc", prev_joint_acc)
     step_state.setdefault("prev_contact", prev_contact)
     step_state.setdefault("prev_contact_valid", prev_contact_valid)
+    step_state.setdefault("prev_contact_force", prev_contact_force)
+    step_state.setdefault("prev_contact_force_valid", prev_contact_force_valid)
     current_contact = jnp.asarray(step_state["contact"])
+    if "contact_force" in step_state:
+        current_contact_force = jnp.asarray(step_state["contact_force"])
+        current_contact_force_valid = jnp.zeros((sample_count,)) + 1.0
+    else:
+        current_contact_force = jnp.zeros((sample_count, 2))
+        current_contact_force_valid = jnp.zeros((sample_count,))
     score_reference = _time_slice_reference(
         _required(reference, "score_reference"),
         step_index,
@@ -578,6 +616,8 @@ def _score_rollout_step(
         "prev_joint_acc": current_joint_acc,
         "prev_contact": current_contact,
         "prev_contact_valid": jnp.zeros((sample_count,)) + 1.0,
+        "prev_contact_force": current_contact_force,
+        "prev_contact_force_valid": current_contact_force_valid,
         "accumulator": accumulator,
     }
 
@@ -592,6 +632,8 @@ def _rollout_trace_step(
     prev_joint_acc,
     prev_contact,
     prev_contact_valid,
+    prev_contact_force,
+    prev_contact_force_valid,
     samples,
     reference: Mapping[str, object],
     obs_indices: JaxObsIndices,
@@ -648,6 +690,12 @@ def _rollout_trace_step(
     current_joint_vel = _joint_vel(robot_state)
     current_joint_acc = current_joint_vel - prev_joint_vel
     current_contact = jnp.asarray(_physics_score_state["contact"])
+    if "contact_force" in _physics_score_state:
+        current_contact_force = jnp.asarray(_physics_score_state["contact_force"])
+        current_contact_force_valid = jnp.zeros((sample_count,)) + 1.0
+    else:
+        current_contact_force = jnp.zeros((sample_count, 2))
+        current_contact_force_valid = jnp.zeros((sample_count,))
     return {
         "robot_state": robot_state,
         "obs_state": JaxObsState(history=next_obs_state.history, last_action=action),
@@ -656,6 +704,8 @@ def _rollout_trace_step(
         "prev_joint_acc": current_joint_acc,
         "prev_contact": current_contact,
         "prev_contact_valid": jnp.zeros((sample_count,)) + 1.0,
+        "prev_contact_force": current_contact_force,
+        "prev_contact_force_valid": current_contact_force_valid,
     }
 
 
@@ -919,6 +969,30 @@ def _initial_prev_contact(reference: Mapping[str, object], sample_count: int, *,
     else:
         valid = _ensure_batch(jnp.asarray(valid), sample_count, jnp=jnp)
     return contact, valid
+
+
+def _initial_prev_contact_force(
+    reference: Mapping[str, object],
+    sample_count: int,
+    *,
+    jnp,
+):
+    contact_force = reference.get("prev_contact_force")
+    if contact_force is None:
+        contact_force = jnp.zeros((sample_count, 2))
+    else:
+        contact_force = jnp.asarray(contact_force)
+        if tuple(int(dim) for dim in contact_force.shape) == (2,):
+            contact_force = _broadcast_batch(contact_force, sample_count, jnp=jnp)
+        else:
+            contact_force = _ensure_batch(contact_force, sample_count, jnp=jnp)
+
+    valid = reference.get("prev_contact_force_valid")
+    if valid is None:
+        valid = jnp.zeros((sample_count,))
+    else:
+        valid = _ensure_batch(jnp.asarray(valid), sample_count, jnp=jnp)
+    return contact_force, valid
 
 
 def _time_slice_reference(

@@ -191,6 +191,7 @@ class MjxReferenceTest(unittest.TestCase):
         prev_control = np.full(QPOS_DIM - 1, 0.33, dtype=np.float32)
         prev_joint_acc = np.full(ACTION_DIM, 0.21, dtype=np.float32)
         prev_contact = np.array([1.0, 0.0], dtype=np.float32)
+        prev_contact_force = np.array([15.0, 25.0], dtype=np.float32)
 
         reference = build_mjx_rollout_reference(
             start=2,
@@ -205,6 +206,7 @@ class MjxReferenceTest(unittest.TestCase):
             prev_control=prev_control,
             prev_joint_acc=prev_joint_acc,
             prev_contact=prev_contact,
+            prev_contact_force=prev_contact_force,
         )
 
         np.testing.assert_allclose(reference["initial_robot_state"]["qpos"], 42.0)
@@ -220,6 +222,8 @@ class MjxReferenceTest(unittest.TestCase):
         np.testing.assert_allclose(reference["prev_joint_acc"], prev_joint_acc)
         np.testing.assert_allclose(reference["prev_contact"], prev_contact)
         self.assertTrue(reference["prev_contact_valid"])
+        np.testing.assert_allclose(reference["prev_contact_force"], prev_contact_force)
+        self.assertTrue(reference["prev_contact_force_valid"])
 
     def test_default_joint_pos_matches_wbc_knees_bent_pose(self) -> None:
         reference = build_mjx_rollout_reference(
