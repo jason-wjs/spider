@@ -46,6 +46,7 @@ ACCUMULATOR_KEYS = (
     "contact_false_positive_sum",
     "contact_false_negative_sum",
     "contact_switch_sum",
+    "bad_floor_contact_sum",
     "control_delta_sum",
     "action_delta_sum",
     "joint_acc_sum",
@@ -138,6 +139,14 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     ) * _validity_value(step_state, "prev_contact_valid", batch_shape, jnp=jnp)
+    bad_floor_contact = _mean_optional_feature_tail(
+        step_state,
+        "floor_contact",
+        start=2,
+        required=_weight(weights, "bad_floor_contact") != 0.0,
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
     control_delta = _mean_l2_delta(
         step_state["control"],
         step_state["prev_control"],
@@ -188,6 +197,9 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         terms["contact_false_negative_sum"] + contact_false_negative
     )
     terms["contact_switch_sum"] = terms["contact_switch_sum"] + contact_switch
+    terms["bad_floor_contact_sum"] = (
+        terms["bad_floor_contact_sum"] + bad_floor_contact
+    )
     terms["control_delta_sum"] = terms["control_delta_sum"] + control_delta
     terms["action_delta_sum"] = terms["action_delta_sum"] + action_delta
     terms["joint_acc_sum"] = terms["joint_acc_sum"] + joint_acc
@@ -214,6 +226,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         + _weight(weights, "contact_false_positive") * contact_false_positive
         + _weight(weights, "contact_false_negative") * contact_false_negative
         + _weight(weights, "contact_switch") * contact_switch
+        + _weight(weights, "bad_floor_contact") * bad_floor_contact
         + _weight(weights, "control_delta") * control_delta
         + _weight(weights, "action_delta") * action_delta
         + _weight(weights, "joint_acc") * joint_acc
@@ -239,6 +252,7 @@ def finalize_score(accumulator, *, jnp):
     contact_false_positive = terms["contact_false_positive_sum"] / count
     contact_false_negative = terms["contact_false_negative_sum"] / count
     contact_switch = terms["contact_switch_sum"] / count
+    bad_floor_contact = terms["bad_floor_contact_sum"] / count
     control_delta = terms["control_delta_sum"] / count
     action_delta = terms["action_delta_sum"] / count
     joint_acc = terms["joint_acc_sum"] / count
@@ -255,6 +269,7 @@ def finalize_score(accumulator, *, jnp):
         "contact_false_positive_rate": contact_false_positive,
         "contact_false_negative_rate": contact_false_negative,
         "contact_switch_rate": contact_switch,
+        "bad_floor_contact_rate": bad_floor_contact,
         "control_delta_mean": control_delta,
         "action_delta_mean": action_delta,
         "joint_acc_mean": joint_acc,
@@ -269,6 +284,7 @@ def finalize_score(accumulator, *, jnp):
         "contact_false_positive": contact_false_positive,
         "contact_false_negative": contact_false_negative,
         "contact_switch": contact_switch,
+        "bad_floor_contact": bad_floor_contact,
         "control_delta": control_delta,
         "action_delta": action_delta,
         "joint_acc": joint_acc,
@@ -334,6 +350,29 @@ def _mean_optional_l2_delta(
     delta = jnp.asarray(step_state[actual_name]) - jnp.asarray(step_state[expected_name])
     norm = jnp.sqrt(jnp.sum(delta * delta, axis=-1))
     return _mean_feature_axes(norm, batch_shape=batch_shape, jnp=jnp)
+
+
+def _mean_optional_feature_tail(
+    step_state,
+    name: str,
+    *,
+    start: int,
+    required: bool,
+    batch_shape: tuple[int, ...],
+    jnp,
+):
+    if name not in step_state:
+        if required:
+            raise KeyError(f"Missing score field {name!r}")
+        return jnp.zeros(batch_shape)
+    value = jnp.asarray(step_state[name])
+    if int(value.shape[-1]) <= int(start):
+        if required:
+            raise ValueError(
+                f"Expected score field {name!r} to have channel > {int(start)}"
+            )
+        return jnp.zeros(batch_shape)
+    return _mean_feature_axes(value[..., int(start) :], batch_shape=batch_shape, jnp=jnp)
 
 
 def _mean_quat_error(

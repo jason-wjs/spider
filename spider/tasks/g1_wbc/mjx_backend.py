@@ -474,6 +474,7 @@ def _mjx_score_weights(
         "body_global_rot": float(reward_weights.get("body_global_rot_error", 0.0)),
         "ee_global_pos": float(reward_weights.get("ee_global_pos_error", 0.0)),
         "ee_global_rot": float(reward_weights.get("ee_global_rot_error", 0.0)),
+        "bad_floor_contact": float(reward_weights.get("bad_floor_contact", 0.0)),
         "contact": float(reward_weights.get("contact_mismatch", 0.0)),
         "contact_false_positive": float(
             reward_weights.get("contact_false_positive", 0.0)

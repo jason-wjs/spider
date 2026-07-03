@@ -296,6 +296,29 @@ class MjxScoringTest(unittest.TestCase):
         self.assertEqual(metrics["contact_switch"], metrics["contact_switch_rate"])
         self.assertAlmostEqual(float(metrics["score"]), -2.0 * expected)
 
+    def test_score_step_accumulates_bad_floor_contact_from_third_channel(self) -> None:
+        step_state = {
+            **_step_state(),
+            "floor_contact": np.array([1.0, 0.0, 1.0], dtype=np.float32),
+        }
+        weights = JaxScoreWeights({"bad_floor_contact": 3.0})
+
+        accumulator = score_step(
+            init_score_accumulator((), jnp=_NumpyJnp),
+            step_state,
+            _reference_state(),
+            weights,
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        self.assertAlmostEqual(float(metrics["bad_floor_contact_rate"]), 1.0)
+        self.assertEqual(
+            metrics["bad_floor_contact"],
+            metrics["bad_floor_contact_rate"],
+        )
+        self.assertAlmostEqual(float(metrics["score"]), -3.0)
+
     def test_finalize_score_returns_compute_rollout_scores_term_aliases(self) -> None:
         step_state = _step_state()
         reference_state = _reference_state()
@@ -324,6 +347,10 @@ class MjxScoringTest(unittest.TestCase):
         self.assertEqual(metrics["joint_acc"], metrics["joint_acc_mean"])
         self.assertEqual(metrics["joint_jerk"], metrics["joint_jerk_mean"])
         self.assertEqual(metrics["contact_switch"], metrics["contact_switch_rate"])
+        self.assertEqual(
+            metrics["bad_floor_contact"],
+            metrics["bad_floor_contact_rate"],
+        )
 
     def test_accumulator_averages_multiple_steps(self) -> None:
         reference_state = _reference_state()

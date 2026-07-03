@@ -400,6 +400,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         weights = mjx_backend_module._mjx_score_weights(
             "g1_wbc_joint_global",
             {
+                "bad_floor_contact": 4.5,
                 "contact_mismatch": 2.0,
                 "contact_false_positive": 1.5,
                 "contact_false_negative": 0.4,
@@ -409,6 +410,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             },
         )
 
+        self.assertEqual(weights["bad_floor_contact"], 4.5)
         self.assertEqual(weights["contact"], 2.0)
         self.assertEqual(weights["contact_false_positive"], 1.5)
         self.assertEqual(weights["contact_false_negative"], 0.4)

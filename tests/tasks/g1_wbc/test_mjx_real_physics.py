@@ -19,6 +19,7 @@ from spider.tasks.g1_wbc.mjx_physics import (
     action_to_model_ctrl,
     foot_contact_geom_groups,
     foot_contact_indicator_from_contact,
+    floor_contact_indicator_from_contact,
     joint_order_to_model_ctrl,
     make_mjx_command_reference_fn,
     make_mjx_physics_step_fn,
@@ -209,6 +210,7 @@ class MjxRealPhysicsTest(unittest.TestCase):
                 for index in range(1, 8)
             }
         )
+        geom_name_to_id["robot/left_hand_collision"] = 31
         bundle = SimpleNamespace(
             profile=SimpleNamespace(
                 floor_geom_names=("terrain",),
@@ -226,6 +228,7 @@ class MjxRealPhysicsTest(unittest.TestCase):
         self.assertEqual(groups.floor_geom_ids, (3,))
         self.assertEqual(groups.left_foot_geom_ids, tuple(range(11, 18)))
         self.assertEqual(groups.right_foot_geom_ids, tuple(range(21, 28)))
+        self.assertIn(31, groups.other_robot_geom_ids)
 
     def test_foot_contact_indicator_from_contact_uses_active_floor_pairs(self) -> None:
         contact = SimpleNamespace(
@@ -303,6 +306,36 @@ class MjxRealPhysicsTest(unittest.TestCase):
         )
 
         np.testing.assert_allclose(indicator, np.zeros(2, dtype=np.float32))
+
+    def test_floor_contact_indicator_from_contact_marks_other_robot_floor_contact(
+        self,
+    ) -> None:
+        contact = SimpleNamespace(
+            geom=np.array(
+                [
+                    [3, 11],
+                    [3, 25],
+                    [31, 3],
+                ],
+                dtype=np.int32,
+            ),
+            dist=np.array([-0.001, -0.002, -0.003], dtype=np.float32),
+            includemargin=np.zeros(3, dtype=np.float32),
+        )
+
+        indicator = floor_contact_indicator_from_contact(
+            contact,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=tuple(range(11, 18)),
+            right_foot_geom_ids=tuple(range(21, 28)),
+            other_robot_geom_ids=(31, 32),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(
+            indicator,
+            np.array([1.0, 1.0, 1.0], dtype=np.float32),
+        )
 
     def test_command_reference_fn_returns_command_body_kinematics(self) -> None:
         bundle = SimpleNamespace(
@@ -452,6 +485,7 @@ class MjxRealPhysicsTest(unittest.TestCase):
             (sample_count, len(TASK_EE_BODY_NAMES), 3),
         )
         self.assertEqual(score_state["contact"].shape, (sample_count, 2))
+        self.assertEqual(score_state["floor_contact"].shape, (sample_count, 3))
         self.assertEqual(score_state["model_ctrl"].shape, (sample_count, ACTION_DIM))
         self.assertEqual(score_state["time"].shape, (sample_count,))
 

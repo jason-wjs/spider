@@ -24,6 +24,7 @@ class FootContactGeomGroups:
     floor_geom_ids: tuple[int, ...]
     left_foot_geom_ids: tuple[int, ...]
     right_foot_geom_ids: tuple[int, ...]
+    other_robot_geom_ids: tuple[int, ...]
 
 
 def default_action_scale(*, jnp):
@@ -57,14 +58,27 @@ def foot_contact_geom_groups(bundle) -> FootContactGeomGroups:
         raise ValueError(
             "Contact profile must define floor, left foot, and right foot geoms"
         )
+    left_foot_geom_ids = tuple(
+        _lookup_geom_id(geom_name_to_id, name) for name in left_names
+    )
+    right_foot_geom_ids = tuple(
+        _lookup_geom_id(geom_name_to_id, name) for name in right_names
+    )
+    foot_geom_ids = set(left_foot_geom_ids) | set(right_foot_geom_ids)
+    other_robot_geom_ids = tuple(
+        sorted(
+            geom_id
+            for name, geom_id in geom_name_to_id.items()
+            if int(geom_id) not in foot_geom_ids
+            and int(geom_id) not in floor_geom_ids
+            and _is_robot_collision_geom_name(name)
+        )
+    )
     return FootContactGeomGroups(
         floor_geom_ids=floor_geom_ids,
-        left_foot_geom_ids=tuple(
-            _lookup_geom_id(geom_name_to_id, name) for name in left_names
-        ),
-        right_foot_geom_ids=tuple(
-            _lookup_geom_id(geom_name_to_id, name) for name in right_names
-        ),
+        left_foot_geom_ids=left_foot_geom_ids,
+        right_foot_geom_ids=right_foot_geom_ids,
+        other_robot_geom_ids=other_robot_geom_ids,
     )
 
 
@@ -78,6 +92,27 @@ def foot_contact_indicator_from_contact(
 ):
     """Return left/right foot-floor contact indicators from fixed-shape MJX contact."""
 
+    return floor_contact_indicator_from_contact(
+        contact,
+        floor_geom_ids=floor_geom_ids,
+        left_foot_geom_ids=left_foot_geom_ids,
+        right_foot_geom_ids=right_foot_geom_ids,
+        other_robot_geom_ids=(),
+        jnp=jnp,
+    )[:2]
+
+
+def floor_contact_indicator_from_contact(
+    contact,
+    *,
+    floor_geom_ids: tuple[int, ...],
+    left_foot_geom_ids: tuple[int, ...],
+    right_foot_geom_ids: tuple[int, ...],
+    other_robot_geom_ids: tuple[int, ...],
+    jnp,
+):
+    """Return left foot, right foot, and other-robot floor contact indicators."""
+
     geom = jnp.asarray(contact.geom)
     dist = jnp.asarray(contact.dist)
     includemargin = jnp.asarray(contact.includemargin)
@@ -88,10 +123,12 @@ def foot_contact_indicator_from_contact(
     has_floor = _contact_has_any_geom(geom, floor_geom_ids, jnp=jnp)
     left = _contact_has_any_geom(geom, left_foot_geom_ids, jnp=jnp)
     right = _contact_has_any_geom(geom, right_foot_geom_ids, jnp=jnp)
+    other = _contact_has_any_geom(geom, other_robot_geom_ids, jnp=jnp)
     return jnp.asarray(
         [
             _as_indicator(jnp.any(active & has_floor & left), jnp=jnp),
             _as_indicator(jnp.any(active & has_floor & right), jnp=jnp),
+            _as_indicator(jnp.any(active & has_floor & other), jnp=jnp),
         ]
     )
 
@@ -267,17 +304,19 @@ def make_mjx_physics_step_fn(
                 "body_quat": jnp.take(data.xquat, score_body_id_array, axis=0),
                 "ee_pos": jnp.take(data.xpos, ee_body_id_array, axis=0),
                 "ee_quat": jnp.take(data.xquat, ee_body_id_array, axis=0),
-                "contact": foot_contact_indicator_from_contact(
+                "floor_contact": floor_contact_indicator_from_contact(
                     data._impl.contact,
                     floor_geom_ids=contact_groups.floor_geom_ids,
                     left_foot_geom_ids=contact_groups.left_foot_geom_ids,
                     right_foot_geom_ids=contact_groups.right_foot_geom_ids,
+                    other_robot_geom_ids=contact_groups.other_robot_geom_ids,
                     jnp=jnp,
                 ),
                 **contact_count_diagnostics(data._impl.contact, jnp=jnp),
                 "model_ctrl": data.ctrl,
                 "time": data.time,
             }
+            score_state["contact"] = score_state["floor_contact"][:2]
             return next_robot, score_state
 
         return runtime.jax.vmap(step_one)(qpos, qvel, action_array)
@@ -467,6 +506,11 @@ def _lookup_geom_id(name_to_id: dict[str, int], geom_name: str) -> int:
     raise ValueError(f"MJX model bundle is missing geom {geom_name!r}")
 
 
+def _is_robot_collision_geom_name(name: str) -> bool:
+    bare_name = str(name).removeprefix("robot/")
+    return bare_name.endswith("_collision")
+
+
 def _contact_has_any_geom(geom, geom_ids: tuple[int, ...], *, jnp):
     geom_ids = jnp.asarray(tuple(int(value) for value in geom_ids))
     return jnp.any(geom[..., None] == geom_ids, axis=(1, 2))
@@ -521,6 +565,7 @@ __all__ = [
     "FootContactGeomGroups",
     "foot_contact_geom_groups",
     "foot_contact_indicator_from_contact",
+    "floor_contact_indicator_from_contact",
     "joint_order_to_model_ctrl",
     "make_mjx_command_reference_fn",
     "make_mjx_physics_step_fn",
