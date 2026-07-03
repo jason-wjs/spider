@@ -82,9 +82,13 @@ def _reference_state() -> dict[str, np.ndarray]:
 
 
 def _expected_terms(step_state, reference_state) -> dict[str, float]:
-    root_error = np.mean((step_state["root_pos"] - reference_state["root_pos"]) ** 2)
-    body_error = np.mean((step_state["body_pos"] - reference_state["body_pos"]) ** 2)
-    ee_error = np.mean((step_state["ee_pos"] - reference_state["ee_pos"]) ** 2)
+    root_error = np.linalg.norm(step_state["root_pos"] - reference_state["root_pos"])
+    body_error = np.mean(
+        np.linalg.norm(step_state["body_pos"] - reference_state["body_pos"], axis=-1)
+    )
+    ee_error = np.mean(
+        np.linalg.norm(step_state["ee_pos"] - reference_state["ee_pos"], axis=-1)
+    )
     contact_error = np.mean(np.abs(step_state["contact"] - reference_state["contact"]))
     control_delta = np.mean((step_state["control"] - step_state["prev_control"]) ** 2)
     joint_acc = np.mean((step_state["joint_vel"] - step_state["prev_joint_vel"]) ** 2)

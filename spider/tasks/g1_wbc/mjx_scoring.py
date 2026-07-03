@@ -64,7 +64,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
 
     terms = _require_accumulator(accumulator)
     batch_shape = _shape_tuple(terms["count"].shape)
-    root_error = _mean_squared(
+    root_error = _mean_l2_delta(
         step_state["root_pos"],
         reference_state["root_pos"],
         batch_shape=batch_shape,
@@ -78,7 +78,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     )
-    body_error = _mean_squared(
+    body_error = _mean_l2_delta(
         step_state["body_pos"],
         reference_state["body_pos"],
         batch_shape=batch_shape,
@@ -92,7 +92,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     )
-    ee_error = _mean_squared(
+    ee_error = _mean_l2_delta(
         step_state["ee_pos"],
         reference_state["ee_pos"],
         batch_shape=batch_shape,
@@ -246,6 +246,12 @@ def finalize_score(accumulator, *, jnp):
 def _mean_squared(actual, expected, *, batch_shape: tuple[int, ...], jnp):
     delta = jnp.asarray(actual) - jnp.asarray(expected)
     return _mean_feature_axes(delta * delta, batch_shape=batch_shape, jnp=jnp)
+
+
+def _mean_l2_delta(actual, expected, *, batch_shape: tuple[int, ...], jnp):
+    delta = jnp.asarray(actual) - jnp.asarray(expected)
+    norm = jnp.sqrt(jnp.sum(delta * delta, axis=-1))
+    return _mean_feature_axes(norm, batch_shape=batch_shape, jnp=jnp)
 
 
 def _mean_abs(actual, expected, *, batch_shape: tuple[int, ...], jnp):
