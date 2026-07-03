@@ -150,7 +150,7 @@ def run_g1_wbc_mjx_mpc(
             runtime=runtime,
         )
         execute_steps = min(control_steps, total_steps - sim_step)
-        controls = (
+        updated_controls = (
             _validated_jax_controls(
                 window_result.updated_controls,
                 horizon=horizon,
@@ -168,17 +168,24 @@ def run_g1_wbc_mjx_mpc(
             execute_steps=execute_steps,
             device=device,
         )
-        _apply_execute_chunk_to_refined_qpos(
-            refined_qpos,
-            execute_chunk,
-            baseline_qpos=baseline_qpos,
-            start=sim_step,
-            execute_steps=execute_steps,
-            joint_low=joint_low,
-            joint_high=joint_high,
-        )
         info = dict(window_result.info)
         window_accepted = _window_accepted(info)
+        if window_accepted:
+            _require_physics_scan_evidence(
+                info,
+                enabled=bool(enable_physics_scan),
+                horizon=horizon,
+            )
+            controls = updated_controls
+            _apply_execute_chunk_to_refined_qpos(
+                refined_qpos,
+                execute_chunk,
+                baseline_qpos=baseline_qpos,
+                start=sim_step,
+                execute_steps=execute_steps,
+                joint_low=joint_low,
+                joint_high=joint_high,
+            )
         info.update(
             {
                 "backend": "mjx",
@@ -470,6 +477,22 @@ def _window_accepted(info: dict[str, Any]) -> bool:
     if isinstance(accepted, (int, float)) and math.isfinite(float(accepted)):
         return bool(accepted)
     raise ValueError("MJX optimizer info accepted metadata must be boolean-like")
+
+
+def _require_physics_scan_evidence(
+    info: dict[str, Any],
+    *,
+    enabled: bool,
+    horizon: int,
+) -> None:
+    if not enabled:
+        return
+    count = _optional_nonnegative_int(info.get("physics_step_count"))
+    if count is None or count < int(horizon):
+        raise ValueError(
+            "Accepted MJX windows require physics scan evidence covering the "
+            f"{int(horizon)}-step planning horizon"
+        )
 
 
 def _rollout_active_contact_count(rollout) -> int:

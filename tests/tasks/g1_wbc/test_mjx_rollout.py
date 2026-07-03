@@ -524,6 +524,7 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertEqual(metrics["score"].shape, (2,))
         np.testing.assert_allclose(metrics["active_contact_count"], [3.0, 5.0])
         np.testing.assert_allclose(metrics["contact_pair_count"], [4.0, 5.0])
+        np.testing.assert_allclose(metrics["physics_step_count"], [3.0, 3.0])
 
     def test_score_candidate_controls_feeds_previous_action_into_next_observation(
         self,

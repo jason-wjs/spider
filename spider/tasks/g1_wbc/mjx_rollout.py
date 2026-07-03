@@ -247,7 +247,14 @@ def score_candidate_controls(
         carry, _ = scan(scan_step, carry, jnp.arange(horizon))
         accumulator = carry[-1]
         metrics = finalize_score(accumulator, jnp=jnp)
-        return metrics if return_metrics else metrics["score"]
+        if return_metrics:
+            return _with_physics_step_count(
+                metrics,
+                sample_count=sample_count,
+                horizon=horizon,
+                jnp=jnp,
+            )
+        return metrics["score"]
 
     for step_index in range(horizon):
         next_values = _score_rollout_step(
@@ -276,7 +283,29 @@ def score_candidate_controls(
         accumulator = next_values["accumulator"]
 
     metrics = finalize_score(accumulator, jnp=jnp)
-    return metrics if return_metrics else metrics["score"]
+    if return_metrics:
+        return _with_physics_step_count(
+            metrics,
+            sample_count=sample_count,
+            horizon=horizon,
+            jnp=jnp,
+        )
+    return metrics["score"]
+
+
+def _with_physics_step_count(
+    metrics: Mapping[str, object],
+    *,
+    sample_count: int,
+    horizon: int,
+    jnp,
+) -> dict[str, object]:
+    enriched = dict(metrics)
+    enriched["physics_step_count"] = jnp.full(
+        (int(sample_count),),
+        int(horizon),
+    )
+    return enriched
 
 
 def _score_rollout_step(

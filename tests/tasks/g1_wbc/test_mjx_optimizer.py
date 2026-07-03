@@ -379,6 +379,7 @@ class MjxOptimizerTest(unittest.TestCase):
                 "score": np.array([0.0, 1.0, 3.0, -2.0], dtype=np.float32),
                 "active_contact_count": np.array([2, 5, 7, 1], dtype=np.float32),
                 "contact_pair_count": np.array([4, 6, 9, 3], dtype=np.float32),
+                "physics_step_count": np.array([3, 5, 2, 4], dtype=np.float32),
             }
 
         result = optimize_window(
@@ -395,6 +396,7 @@ class MjxOptimizerTest(unittest.TestCase):
         self.assertEqual(float(result.info["best_score"]), 3.0)
         self.assertEqual(float(result.info["active_contact_count"]), 7.0)
         self.assertEqual(float(result.info["contact_pair_count"]), 9.0)
+        self.assertEqual(float(result.info["physics_step_count"]), 5.0)
 
     def test_optimize_window_rejects_column_vector_scores(self) -> None:
         config = _config()

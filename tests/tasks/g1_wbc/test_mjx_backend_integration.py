@@ -370,6 +370,12 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertFalse(result.metadata["accepted"])
         self.assertEqual(result.metadata["accepted_windows"], 39)
         self.assertFalse(result.result.infos[1]["accepted"])
+        self.assertTrue(
+            torch.allclose(
+                result.result.refined_qpos[21:40, 0],
+                torch.zeros(19),
+            )
+        )
 
     def test_default_optimizer_consumes_explicit_rollout_scorer(self) -> None:
         calls: list[tuple[int, ...]] = []
@@ -520,25 +526,22 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertTrue(result.metadata["accepted"])
         self.assertEqual(result.metadata["backend"], "mjx")
 
-    def test_mjx_backend_builds_rollout_components_when_scan_enabled(self) -> None:
-        result = _run_with_fakes(
-            optimizer=_fake_optimizer,
-            rollout_factory=_fake_rollout_result,
-            runtime=_FakeOptimizerRuntime(),
-            enable_physics_scan=True,
-            reward_weights={
-                "body_global_pos_error": 4.0,
-                "ee_global_pos_error": 1.5,
-                "contact_false_positive": 1.5,
-                "contact_false_negative": 0.4,
-                "control_delta": 1.8,
-                "joint_acc": 0.006,
-            },
-        )
-
-        self.assertTrue(result.metadata["accepted"])
-        self.assertEqual(result.metadata["backend"], "mjx")
-        self.assertTrue(result.metadata["physics_scan_enabled"])
+    def test_scan_enabled_accepted_windows_require_physics_scan_evidence(self) -> None:
+        with self.assertRaisesRegex(ValueError, "physics scan"):
+            _run_with_fakes(
+                optimizer=_fake_optimizer,
+                rollout_factory=_fake_rollout_result,
+                runtime=_FakeOptimizerRuntime(),
+                enable_physics_scan=True,
+                reward_weights={
+                    "body_global_pos_error": 4.0,
+                    "ee_global_pos_error": 1.5,
+                    "contact_false_positive": 1.5,
+                    "contact_false_negative": 0.4,
+                    "control_delta": 1.8,
+                    "joint_acc": 0.006,
+                },
+            )
 
     def test_mjx_backend_default_path_stays_fail_closed(self) -> None:
         with self.assertRaisesRegex(

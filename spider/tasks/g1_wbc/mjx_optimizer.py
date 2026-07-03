@@ -150,7 +150,7 @@ def _rollout_diagnostics(rollout_result, *, jnp) -> dict[str, object]:
     if not isinstance(rollout_result, Mapping):
         return {}
     diagnostics: dict[str, object] = {}
-    for name in ("active_contact_count", "contact_pair_count"):
+    for name in ("active_contact_count", "contact_pair_count", "physics_step_count"):
         if name in rollout_result:
             diagnostics[name] = _jnp_max(jnp.asarray(rollout_result[name]), jnp=jnp)
     return diagnostics
