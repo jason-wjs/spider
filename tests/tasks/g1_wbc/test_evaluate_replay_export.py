@@ -87,6 +87,8 @@ class EvaluateReplayExportTest(unittest.TestCase):
 
         self.assertEqual(payload["mpc"]["runtime_visible_devices"], ["0"])
         self.assertEqual(payload["mpc"]["runtime_gpu_name"], "NVIDIA H100 80GB HBM3")
+        self.assertIn("steady_state_wall_time_sec", payload["mpc"])
+        self.assertGreaterEqual(payload["mpc"]["steady_state_wall_time_sec"], 0.0)
 
 
 if __name__ == "__main__":

@@ -106,6 +106,8 @@ def main() -> None:
             mode=args.replay_task_mode,
             execute_rollout_config=execute_config,
         )
+        _synchronize_rollout_device(config)
+        steady_start = time.perf_counter()
         rollout = task.replay_qpos_command_sequence(
             qpos_trajectory,
             qvel_trajectory=(
@@ -114,6 +116,8 @@ def main() -> None:
             control_steps=control_steps,
             total_steps=total_steps,
         )
+        _synchronize_rollout_device(config)
+        steady_state_wall_time_sec = time.perf_counter() - steady_start
         mpc_payload = {
             "backend": (
                 "spider.tasks.g1_wbc.spider_task."
@@ -125,6 +129,7 @@ def main() -> None:
             "control_steps": control_steps,
             "use_saved_qvel": bool(args.replay_use_saved_qvel),
             "serial_execute_warp_launches": bool(args.serial_execute_warp_launches),
+            "steady_state_wall_time_sec": steady_state_wall_time_sec,
             "num_command_frames": int(qpos_trajectory.shape[0]),
             "num_replay_steps": total_steps,
             "runtime_visible_devices": _runtime_visible_devices(),
