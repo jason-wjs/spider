@@ -140,6 +140,14 @@ The MJX acceptance runner treats a missing baseline `metrics.json`,
 `rollout.npz`, or `mpc_command.npz` as an invalid benchmark even if the manifest
 contains otherwise valid metric fields.
 
+The acceptance runner must also reject non-formal manifests before launching MJX
+runs. A formal manifest has schema version `1`, baseline name
+`g1_wbc_stage0_mujoco_warp_sweetpoint`, motions `jump/walk`, seeds `0/1/2`, and
+per-row argv values matching the frozen sweetpoint configuration. The row argv
+must contain explicit existing files for `--motion`, `--checkpoint`, and
+`--mpc-reward-weights`; an alias such as `--checkpoint bc` is not sufficient for
+formal acceptance in this worktree.
+
 The manifest must contain at least three repeated runs per hard-gate motion,
 using seeds `0`, `1`, and `2`, unless a historical artifact is explicitly
 declared as the only available baseline. Historical single-run artifacts may be

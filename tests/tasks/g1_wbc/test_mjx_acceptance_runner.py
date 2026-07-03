@@ -26,14 +26,20 @@ def load_runner():
 
 def _baseline_manifest(tmp_path: Path) -> Path:
     rows = []
+    checkpoint = tmp_path / "model.pt"
+    reward_weights = tmp_path / "reward.json"
+    checkpoint.write_text("checkpoint")
+    reward_weights.write_text("{}")
     for motion in ("jump", "walk"):
+        motion_path = tmp_path / f"{motion}.npz"
+        motion_path.write_text("motion")
         for seed in (0, 1, 2):
             output_dir = tmp_path / "baseline" / motion / f"seed_{seed}"
             _write_artifacts(output_dir)
             rows.append(
                 {
                     "motion_name": motion,
-                    "motion": f"/tmp/{motion}.npz",
+                    "motion": str(motion_path),
                     "seed": seed,
                     "output_dir": str(output_dir),
                     "argv": [
@@ -41,11 +47,11 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         "-m",
                         "spider.tasks.g1_wbc.evaluate",
                         "--motion",
-                        f"/tmp/{motion}.npz",
+                        str(motion_path),
                         "--motion-type",
                         "isaaclab",
                         "--checkpoint",
-                        "model.pt",
+                        str(checkpoint),
                         "--device",
                         "cuda:0",
                         "--output-dir",
@@ -58,9 +64,37 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         "mujoco_warp",
                         "--max-steps",
                         "800",
+                        "--mpc-samples",
+                        "512",
+                        "--mpc-iterations",
+                        "2",
+                        "--mpc-planning-horizon-steps",
+                        "40",
                         "--mpc-control-steps",
                         "20",
+                        "--mpc-sampling-mode",
+                        "knot",
+                        "--mpc-knot-count",
+                        "8",
+                        "--mpc-temperature",
+                        "0.7",
+                        "--mpc-root-pos-sigma",
+                        "0.04",
+                        "--mpc-root-rot-sigma",
+                        "0.10",
+                        "--mpc-joint-sigma",
+                        "0.18",
+                        "--mpc-smooth-passes",
+                        "0",
+                        "--mpc-command-reg-weight",
+                        "0.0",
+                        "--mpc-command-smooth-weight",
+                        "0.0",
+                        "--mpc-guided-candidate",
+                        "--mpc-acceptance-gate",
                         "--save-rollout",
+                        "--mpc-reward-weights",
+                        str(reward_weights),
                     ],
                     "status": "ok",
                     "returncode": 0,
@@ -79,7 +113,7 @@ def _baseline_manifest(tmp_path: Path) -> Path:
             )
     manifest = {
         "schema_version": 1,
-        "baseline_name": "test",
+        "baseline_name": "g1_wbc_stage0_mujoco_warp_sweetpoint",
         "motions": ["jump", "walk"],
         "seeds": [0, 1, 2],
         "rows": rows,
@@ -190,6 +224,26 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "run matrix"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_non_sweetpoint_baseline_argv(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            argv = manifest["rows"][0]["argv"]
+            argv[argv.index("--mpc-samples") + 1] = "128"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "formal Stage 0 sweetpoint"):
                 runner.build_acceptance_plan(args, manifest)
 
     def test_run_command_records_wall_time_for_replay_gate(self) -> None:

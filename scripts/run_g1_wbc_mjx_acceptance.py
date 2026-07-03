@@ -34,6 +34,31 @@ DEFAULT_PYTHON_EXECUTABLE = (
 MOTIONS = ("jump", "walk")
 SEEDS = (0, 1, 2)
 MIN_SPEEDUP = 12.0
+FORMAL_BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
+FORMAL_STAGE0_ARG_VALUES = {
+    "--motion-type": "isaaclab",
+    "--method": "g1_wbc_joint_global",
+    "--mpc-backend": "mujoco_warp",
+    "--max-steps": "800",
+    "--mpc-samples": "512",
+    "--mpc-iterations": "2",
+    "--mpc-planning-horizon-steps": "40",
+    "--mpc-control-steps": "20",
+    "--mpc-sampling-mode": "knot",
+    "--mpc-knot-count": "8",
+    "--mpc-temperature": "0.7",
+    "--mpc-root-pos-sigma": "0.04",
+    "--mpc-root-rot-sigma": "0.10",
+    "--mpc-joint-sigma": "0.18",
+    "--mpc-smooth-passes": "0",
+    "--mpc-command-reg-weight": "0.0",
+    "--mpc-command-smooth-weight": "0.0",
+}
+FORMAL_STAGE0_FLAGS = (
+    "--save-rollout",
+    "--mpc-guided-candidate",
+    "--mpc-acceptance-gate",
+)
 MJX_CONTACT_SATURATION_FIELDS = (
     "contact_saturated",
     "max_contact_points_saturated",
@@ -79,6 +104,7 @@ def build_acceptance_plan(
     output_root = args.output_dir.expanduser().resolve()
     rows = manifest.get("rows", [])
     matrix = _baseline_run_matrix(rows)
+    _validate_formal_baseline_manifest(manifest, matrix)
     plan: list[PlannedAcceptanceRun] = []
     for motion in MOTIONS:
         for seed in SEEDS:
@@ -221,6 +247,75 @@ def _baseline_run_matrix(rows: Any) -> dict[tuple[str, int], dict[str, Any]]:
             f"missing={missing}, duplicates={duplicates}, extras={extras}."
         )
     return matrix
+
+
+def _validate_formal_baseline_manifest(
+    manifest: dict[str, Any],
+    matrix: dict[tuple[str, int], dict[str, Any]],
+) -> None:
+    failures: list[str] = []
+    if manifest.get("schema_version") != 1:
+        failures.append("schema_version")
+    if manifest.get("baseline_name") != FORMAL_BASELINE_NAME:
+        failures.append("baseline_name")
+    if tuple(str(value) for value in manifest.get("motions", ())) != MOTIONS:
+        failures.append("motions")
+    try:
+        seeds = tuple(int(value) for value in manifest.get("seeds", ()))
+    except (TypeError, ValueError):
+        seeds = ()
+    if seeds != SEEDS:
+        failures.append("seeds")
+
+    for (motion, seed), row in matrix.items():
+        failures.extend(_formal_stage0_row_failures(row, motion=motion, seed=seed))
+
+    unique_failures = _unique(failures)
+    if unique_failures:
+        raise ValueError(
+            "Baseline manifest is not a formal Stage 0 sweetpoint: "
+            + ", ".join(unique_failures)
+        )
+
+
+def _formal_stage0_row_failures(
+    row: dict[str, Any],
+    *,
+    motion: str,
+    seed: int,
+) -> list[str]:
+    failures: list[str] = []
+    argv = row.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+        return ["argv"]
+
+    for flag, expected in FORMAL_STAGE0_ARG_VALUES.items():
+        value = _argv_value(argv, flag)
+        if value != expected:
+            failures.append(flag)
+    for flag in FORMAL_STAGE0_FLAGS:
+        if flag not in argv:
+            failures.append(flag)
+
+    if _argv_value(argv, "--seed") != str(seed):
+        failures.append("--seed")
+    if not _same_path(_argv_value(argv, "--motion"), row.get("motion")):
+        failures.append("--motion")
+    if not _same_path(_argv_value(argv, "--output-dir"), row.get("output_dir")):
+        failures.append("--output-dir")
+
+    motion_path = _argv_value(argv, "--motion")
+    if not _is_existing_file(motion_path):
+        failures.append("motion_file")
+    checkpoint_path = _argv_value(argv, "--checkpoint")
+    if not _is_existing_file_or_dir(checkpoint_path):
+        failures.append("checkpoint")
+    reward_path = _argv_value(argv, "--mpc-reward-weights")
+    if not _is_existing_file(reward_path):
+        failures.append("--mpc-reward-weights")
+    if row.get("motion_name") != motion:
+        failures.append("motion_name")
+    return failures
 
 
 def _mjx_argv_from_baseline_row(
@@ -887,6 +982,33 @@ def _output_dir_from_argv(argv: list[str]) -> Path:
         return Path(argv[argv.index("--output-dir") + 1]).expanduser()
     except (ValueError, IndexError) as exc:
         raise ValueError("Command argv is missing --output-dir") from exc
+
+
+def _argv_value(argv: list[str], flag: str) -> str | None:
+    try:
+        index = argv.index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(argv):
+        return None
+    return argv[index + 1]
+
+
+def _same_path(left: str | None, right: Any) -> bool:
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+
+
+def _is_existing_file(path: str | None) -> bool:
+    return isinstance(path, str) and Path(path).expanduser().is_file()
+
+
+def _is_existing_file_or_dir(path: str | None) -> bool:
+    if not isinstance(path, str):
+        return False
+    expanded = Path(path).expanduser()
+    return expanded.is_file() or expanded.is_dir()
 
 
 def _set_arg(argv: list[str], flag: str, value: str) -> list[str]:
