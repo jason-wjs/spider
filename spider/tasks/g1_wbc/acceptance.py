@@ -129,6 +129,7 @@ class SpeedGateResult:
     passed: bool
     speedup: float
     failures: tuple[str, ...]
+    worst_speedup: float | None = None
 
 
 def evaluate_baseline_group(

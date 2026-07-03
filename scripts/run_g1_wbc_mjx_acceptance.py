@@ -660,6 +660,7 @@ def _build_report(
         speed_results[motion] = {
             "passed": speed_gate.passed,
             "speedup": speed_gate.speedup,
+            "worst_speedup": speed_gate.worst_speedup,
             "failures": speed_gate.failures,
         }
         realtime_gate = _realtime_gate_for_motion(
@@ -1052,10 +1053,49 @@ def _speed_gate_for_motion(
         mjx_steady_state_wall_time_sec=mjx_time,
         min_speedup=min_speedup,
     )
-    failures = _unique((*baseline_failures, *mjx_failures, *gate.failures))
+    worst_speedup, worst_failures = _worst_seed_speedup(
+        baseline_rows,
+        mjx_rows,
+        min_speedup=min_speedup,
+    )
+    failures = _unique(
+        (*baseline_failures, *mjx_failures, *gate.failures, *worst_failures)
+    )
     if failures:
-        return SpeedGateResult(False, gate.speedup, failures)
-    return gate
+        return SpeedGateResult(False, gate.speedup, failures, worst_speedup)
+    return SpeedGateResult(gate.passed, gate.speedup, gate.failures, worst_speedup)
+
+
+def _worst_seed_speedup(
+    baseline_rows: list[dict[str, Any]],
+    mjx_rows: list[dict[str, Any]],
+    *,
+    min_speedup: float,
+) -> tuple[float | None, tuple[str, ...]]:
+    baseline_times = _timing_by_seed(baseline_rows, "steady_state_wall_time_sec")
+    mjx_times = _timing_by_seed(mjx_rows, "steady_state_wall_time_sec")
+    if set(baseline_times) != set(SEEDS) or set(mjx_times) != set(SEEDS):
+        return None, ()
+    speedups = [
+        baseline_times[seed] / mjx_times[seed]
+        for seed in SEEDS
+    ]
+    worst_speedup = min(speedups)
+    failures = ("speedup_worst",) if worst_speedup < float(min_speedup) else ()
+    return worst_speedup, failures
+
+
+def _timing_by_seed(
+    rows: list[dict[str, Any]],
+    name: str,
+) -> dict[int, float]:
+    values: dict[int, float] = {}
+    for row in rows:
+        seed = _safe_int(row.get("seed"))
+        value = _timing_value(row, name)
+        if seed in SEEDS and _valid_timing(value) and float(value) > 0.0:
+            values[int(seed)] = float(value)
+    return values
 
 
 def _realtime_gate_for_motion(

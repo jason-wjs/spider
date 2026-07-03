@@ -1306,6 +1306,72 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(report["classification"], "speed_regression")
         self.assertIn("speedup", report["speed_results"]["jump"]["failures"])
 
+    def test_worst_seed_speed_shortfall_fails_even_when_mean_speedup_passes(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                seed = int(argv[argv.index("--seed") + 1])
+                motion = Path(argv[argv.index("--motion") + 1]).stem
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row.update(_replay_evidence(argv))
+                    return row
+                mjx_times = {
+                    "jump": {0: 0.1, 1: 0.1, 2: 29.8},
+                    "walk": {0: 1.0, 1: 1.0, 2: 1.0},
+                }
+                row.update(
+                    {
+                        "mpc_accepted": True,
+                        "accepted_windows": 40,
+                        "mpc_used_baseline_fallback": False,
+                        "compile_init_wall_time_sec": 2.0,
+                        "jit_warmup_enabled": True,
+                        "jit_warmup_wall_time_sec": 1.5,
+                        "runtime_visible_devices": ("0",),
+                        "steady_state_wall_time_sec": mjx_times[motion][seed],
+                        **_mjx_contact_evidence(),
+                    }
+                )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "speed_regression")
+        self.assertEqual(report["speed_results"]["jump"]["speedup"], 12.0)
+        self.assertAlmostEqual(report["speed_results"]["jump"]["worst_speedup"], 120.0 / 29.8)
+        self.assertIn("speedup_worst", report["speed_results"]["jump"]["failures"])
+        self.assertNotIn("speedup", report["speed_results"]["jump"]["failures"])
+
     def test_missing_or_multiple_mjx_visible_devices_fail_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:

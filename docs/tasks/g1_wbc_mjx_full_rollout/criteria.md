@@ -317,6 +317,16 @@ The first milestone passes speed only when both hard-gate motions reach:
 baseline_mean_steady_state_wall_time / mjx_mean_steady_state_wall_time >= 12.0
 ```
 
+It must also pass the seed-paired worst-repeat gate:
+
+```text
+worst_speedup = min(baseline_seed_wall_time / mjx_same_seed_wall_time) >= 12.0
+```
+
+The report uses `speedup` for the mean ratio and `worst_speedup` for the
+seed-paired lower bound. A failure of only the worst-repeat gate is reported as
+`speedup_worst` so mean speed and outlier speed failures are distinguishable.
+
 Required class on success:
 
 - `pass_h100_milestone`

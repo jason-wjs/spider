@@ -27,6 +27,7 @@ class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
             ">= 12x",
             "RTX 4090",
             "MuJoCo-Warp replay",
+            "worst_speedup",
             "pass_h100_milestone",
             "invalid_benchmark",
         )
