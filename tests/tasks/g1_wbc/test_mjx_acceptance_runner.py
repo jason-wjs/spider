@@ -969,6 +969,80 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
 
         self.assertIsNone(row)
 
+    def test_existing_acceptance_row_reuse_rejects_malformed_mjx_npz_schema(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            mjx_rows, _replay_rows = _write_reusable_acceptance_outputs(
+                runner,
+                plan,
+                output_dir=output_dir,
+            )
+            planned = plan[0]
+            rollout_path = Path(planned.output_dir) / "rollout.npz"
+            np.savez_compressed(rollout_path, qpos=np.zeros((801, 1, 36), dtype=np.float32))
+            mjx_rows[0]["artifact_sha256"]["rollout_npz"] = _file_sha256(rollout_path)
+            mjx_rows[0]["artifact_mtime_ns"]["rollout_npz"] = rollout_path.stat().st_mtime_ns
+
+            row = runner.load_existing_acceptance_row(
+                planned,
+                kind="mjx",
+                existing_rows=mjx_rows,
+            )
+
+        self.assertIsNone(row)
+
+    def test_existing_acceptance_row_reuse_rejects_malformed_replay_npz_schema(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            _mjx_rows, replay_rows = _write_reusable_acceptance_outputs(
+                runner,
+                plan,
+                output_dir=output_dir,
+            )
+            planned = plan[0]
+            rollout_path = Path(planned.replay_output_dir) / "rollout.npz"
+            np.savez_compressed(rollout_path, qpos=np.zeros((801, 1, 36), dtype=np.float32))
+            replay_rows[0]["artifact_sha256"]["rollout_npz"] = _file_sha256(rollout_path)
+            replay_rows[0]["artifact_mtime_ns"]["rollout_npz"] = rollout_path.stat().st_mtime_ns
+
+            row = runner.load_existing_acceptance_row(
+                planned,
+                kind="replay",
+                existing_rows=replay_rows,
+            )
+
+        self.assertIsNone(row)
+
     def test_existing_acceptance_rows_ignore_unpaired_partial_rows(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:

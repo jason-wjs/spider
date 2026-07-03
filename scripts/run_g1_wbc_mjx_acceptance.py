@@ -492,6 +492,10 @@ def _verify_existing_acceptance_row(
         return None
     if not _artifacts_match_recorded_hashes(row, expected_artifacts):
         return None
+    if _artifact_freshness_failures([row], artifact_fields=expected_artifacts):
+        return None
+    if _artifact_npz_schema_failures([row], require_command=kind == "mjx"):
+        return None
 
     metrics_path = output_dir / "metrics.json"
     try:

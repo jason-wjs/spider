@@ -127,6 +127,8 @@ def main() -> None:
             "serial_execute_warp_launches": bool(args.serial_execute_warp_launches),
             "num_command_frames": int(qpos_trajectory.shape[0]),
             "num_replay_steps": total_steps,
+            "runtime_visible_devices": _runtime_visible_devices(),
+            "runtime_gpu_name": _runtime_gpu_name(config),
         }
     elif args.method == "no_mpc":
         assert actor is not None
