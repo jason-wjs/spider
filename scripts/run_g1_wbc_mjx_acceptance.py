@@ -1472,7 +1472,16 @@ def _acceptance_row_metrics_provenance_failures(
     failures: list[str] = []
     for row in rows:
         argv = row.get(argv_field)
-        if not isinstance(argv, list) or not _acceptance_metrics_provenance_matches_argv(
+        if not isinstance(argv, list):
+            failures.append(failure)
+            continue
+        if (
+            kind == "mjx"
+            and "--mjx-enable-scan" in argv
+            and _row_value(row, "physics_scan_enabled") is not True
+        ):
+            failures.append("mjx_physics_scan_enabled")
+        if not _acceptance_metrics_provenance_matches_argv(
             argv,
             kind=kind,
             parsed=row,
@@ -1642,6 +1651,7 @@ def _has_invalid_benchmark_failure(
         "mjx_jit_warmup_enabled",
         "mjx_jit_warmup_wall_time",
         "mjx_metrics_provenance",
+        "mjx_physics_scan_enabled",
         "mjx_runtime_visible_devices",
         "mjx_runtime_gpu_name",
         "mjx_required_gpu",
@@ -1950,6 +1960,7 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "compile_init_wall_time_sec": mpc.get("compile_init_wall_time_sec"),
         "jit_warmup_enabled": mpc.get("jit_warmup_enabled"),
         "jit_warmup_wall_time_sec": mpc.get("jit_warmup_wall_time_sec"),
+        "physics_scan_enabled": mpc.get("physics_scan_enabled"),
         "runtime_visible_devices": mpc.get("runtime_visible_devices"),
         "runtime_gpu_name": mpc.get("runtime_gpu_name"),
         "steady_state_wall_time_sec": mpc.get("steady_state_wall_time_sec"),
