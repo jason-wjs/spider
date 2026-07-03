@@ -575,6 +575,42 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertEqual(trace["qpos"].shape, (4, 1, QPOS_DIM))
         np.testing.assert_allclose(trace["qpos"][0, 0], reference["initial_robot_state"]["qpos"][0])
         np.testing.assert_allclose(trace["qpos"][1:, 0, 0], [0.2, 1.2, 2.2])
+        np.testing.assert_allclose(
+            trace["final_robot_state"]["qpos"][0],
+            trace["qpos"][-1, 0],
+        )
+        np.testing.assert_allclose(
+            trace["final_robot_state"]["qvel"][0],
+            trace["qvel"][-1, 0],
+        )
+        self.assertIsInstance(trace["final_obs_state"], JaxObsState)
+        np.testing.assert_allclose(
+            trace["final_obs_state"].last_action,
+            np.zeros((1, ACTION_DIM), dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            trace["final_prev_control"],
+            samples[:, -1],
+        )
+
+    def test_score_candidate_controls_broadcasts_single_live_state_batch(self) -> None:
+        samples = np.zeros((2, 2, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=2)
+        reference["initial_robot_state"]["body_lin_vel_w"] = np.ones(
+            (1, len(MUJOCO_BODY_NAMES), 3),
+            dtype=np.float32,
+        )
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+        )
+
+        self.assertEqual(scores.shape, (2,))
 
     def test_score_candidate_controls_treats_reference_base_qpos_as_window_when_square(
         self,

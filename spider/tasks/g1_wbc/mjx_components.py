@@ -27,6 +27,7 @@ class MjxRolloutComponents:
 
     rollout_scorer: Callable[..., Any]
     rollout_reference_factory: Callable[..., dict[str, object]]
+    rollout_tracer: Callable[..., dict[str, object]]
     physics_step_fn: Callable[..., Any]
     command_reference_fn: Callable[..., Any]
     default_joint_pos: Any
@@ -75,6 +76,17 @@ def build_mjx_rollout_components(
         command_reference_fn=command_reference_fn,
     )
 
+    def rollout_tracer(samples, reference, actor_params, model_bundle):
+        return rollout_candidate_controls(
+            samples,
+            reference,
+            actor_params,
+            model_bundle,
+            runtime=runtime,
+            physics_step_fn=physics_step_fn,
+            command_reference_fn=command_reference_fn,
+        )
+
     def rollout_reference_factory(**kwargs):
         reference_kwargs = dict(kwargs)
         reference_runtime = reference_kwargs.pop("runtime", runtime)
@@ -113,6 +125,7 @@ def build_mjx_rollout_components(
     return MjxRolloutComponents(
         rollout_scorer=rollout_scorer,
         rollout_reference_factory=rollout_reference_factory,
+        rollout_tracer=rollout_tracer,
         physics_step_fn=physics_step_fn,
         command_reference_fn=command_reference_fn,
         default_joint_pos=default_pos,

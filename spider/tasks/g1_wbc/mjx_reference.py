@@ -30,6 +30,10 @@ def build_mjx_rollout_reference(
     model_bundle,
     runtime,
     score_weights: JaxScoreWeights | Mapping[str, float] | None = None,
+    initial_robot_state: Mapping[str, object] | None = None,
+    obs_state=None,
+    obs_initialized=None,
+    prev_control=None,
 ) -> dict[str, object]:
     """Build the reference payload consumed by ``score_candidate_controls``."""
 
@@ -54,20 +58,14 @@ def build_mjx_rollout_reference(
     command_body_indices = _body_indices(COMMAND_BODY_NAMES)
     ee_body_indices = _body_indices(TASK_EE_BODY_NAMES)
 
-    initial_robot_state = {
-        "qpos": _to_jnp(_slice_index(qpos, initial_index), jnp=jnp),
-        "qvel": _to_jnp(_slice_index(qvel, initial_index), jnp=jnp),
-        "body_pos_w": _to_jnp(_slice_index(motion.body_pos_w, initial_index), jnp=jnp),
-        "body_quat_w": _to_jnp(_slice_index(motion.body_quat_w, initial_index), jnp=jnp),
-        "body_lin_vel_w": _to_jnp(
-            _slice_index(motion.body_lin_vel_w, initial_index),
+    if initial_robot_state is None:
+        initial_robot_state = _motion_robot_state(
+            motion,
+            initial_index=initial_index,
             jnp=jnp,
-        ),
-        "body_ang_vel_w": _to_jnp(
-            _slice_index(motion.body_ang_vel_w, initial_index),
-            jnp=jnp,
-        ),
-    }
+        )
+    else:
+        initial_robot_state = _robot_state_to_jnp(initial_robot_state, jnp=jnp)
     obs_reference = {
         "joint_pos": _to_jnp(_slice_window(motion.joint_pos, indices), jnp=jnp),
         "joint_vel": _to_jnp(_slice_window(motion.joint_vel, indices), jnp=jnp),
@@ -98,13 +96,13 @@ def build_mjx_rollout_reference(
         "base_qpos": _to_jnp(_slice_window(qpos, indices), jnp=jnp),
         "obs_reference": obs_reference,
         "score_reference": score_reference,
-        "obs_state": None,
-        "obs_initialized": False,
+        "obs_state": obs_state,
+        "obs_initialized": False if obs_initialized is None else obs_initialized,
         "obs_indices": _obs_indices(),
         "default_joint_pos": default_joint_pos(jnp=jnp),
         "joint_low": _joint_limit_array(model_bundle, high=False, jnp=jnp),
         "joint_high": _joint_limit_array(model_bundle, high=True, jnp=jnp),
-        "prev_control": controls[0],
+        "prev_control": controls[0] if prev_control is None else _to_jnp(prev_control, jnp=jnp),
         "score_weights": _score_weights(score_weights),
     }
 
@@ -131,6 +129,39 @@ def _slice_index(value, index: int):
 
 def _slice_window(value, indices: tuple[int, ...]):
     return value[list(indices)]
+
+
+def _motion_robot_state(motion, *, initial_index: int, jnp) -> dict[str, object]:
+    return {
+        "qpos": _to_jnp(_slice_index(motion.qpos(), initial_index), jnp=jnp),
+        "qvel": _to_jnp(_slice_index(motion.qvel(), initial_index), jnp=jnp),
+        "body_pos_w": _to_jnp(_slice_index(motion.body_pos_w, initial_index), jnp=jnp),
+        "body_quat_w": _to_jnp(_slice_index(motion.body_quat_w, initial_index), jnp=jnp),
+        "body_lin_vel_w": _to_jnp(
+            _slice_index(motion.body_lin_vel_w, initial_index),
+            jnp=jnp,
+        ),
+        "body_ang_vel_w": _to_jnp(
+            _slice_index(motion.body_ang_vel_w, initial_index),
+            jnp=jnp,
+        ),
+    }
+
+
+def _robot_state_to_jnp(state: Mapping[str, object], *, jnp) -> dict[str, object]:
+    fields = (
+        "qpos",
+        "qvel",
+        "body_pos_w",
+        "body_quat_w",
+        "body_lin_vel_w",
+        "body_ang_vel_w",
+    )
+    missing = [name for name in fields if name not in state]
+    if missing:
+        names = ", ".join(missing)
+        raise ValueError(f"initial_robot_state is missing fields: {names}")
+    return {name: _to_jnp(state[name], jnp=jnp) for name in fields}
 
 
 def _to_jnp(value, *, jnp):

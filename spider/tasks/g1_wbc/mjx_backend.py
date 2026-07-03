@@ -46,6 +46,7 @@ def run_g1_wbc_mjx_mpc(
     rollout_factory: Callable[..., Any] | None = None,
     rollout_scorer: Callable[..., Any] | None = None,
     rollout_reference_factory: Callable[..., Any] | None = None,
+    rollout_tracer: Callable[..., Any] | None = None,
     command_builder: Callable[..., G1CommandBatch] | None = None,
     enable_physics_scan: bool = False,
 ):
@@ -73,6 +74,8 @@ def run_g1_wbc_mjx_mpc(
                 rollout_scorer = components.rollout_scorer
             if rollout_reference_factory is None:
                 rollout_reference_factory = components.rollout_reference_factory
+            if rollout_tracer is None:
+                rollout_tracer = getattr(components, "rollout_tracer", None)
         if rollout_factory is None:
             rollout_factory = _default_static_rollout_factory(execute_rollout_config)
 
@@ -107,6 +110,10 @@ def run_g1_wbc_mjx_mpc(
     best_scores: list[Any] = []
     sim_step = 0
     accepted_windows = 0
+    current_robot_state = None
+    current_obs_state = None
+    current_obs_initialized = False
+    current_prev_control = None
     jit_warmup_enabled = False
     jit_warmup_wall_time_sec = 0.0
     if use_jax_controls:
@@ -145,6 +152,10 @@ def run_g1_wbc_mjx_mpc(
             actor_params=actor_params,
             model_bundle=model_bundle,
             runtime=runtime,
+            initial_robot_state=current_robot_state,
+            obs_state=current_obs_state,
+            obs_initialized=current_obs_initialized if current_obs_state is not None else None,
+            prev_control=current_prev_control,
         )
         window_result = optimizer(
             config=window_config,
@@ -193,6 +204,39 @@ def run_g1_wbc_mjx_mpc(
                 joint_low=joint_low,
                 joint_high=joint_high,
             )
+            if rollout_tracer is not None:
+                execute_controls = updated_controls[:execute_steps]
+                execute_reference = _window_reference(
+                    rollout_reference_factory,
+                    start=sim_step,
+                    motion=motion,
+                    controls=execute_controls,
+                    actor_params=actor_params,
+                    model_bundle=model_bundle,
+                    runtime=runtime,
+                    initial_robot_state=current_robot_state,
+                    obs_state=current_obs_state,
+                    obs_initialized=(
+                        current_obs_initialized if current_obs_state is not None else None
+                    ),
+                    prev_control=current_prev_control,
+                )
+                execute_trace = rollout_tracer(
+                    execute_controls[None, :, :],
+                    execute_reference,
+                    actor_params,
+                    model_bundle,
+                )
+                current_robot_state = _required_trace_value(
+                    execute_trace,
+                    "final_robot_state",
+                )
+                current_obs_state = execute_trace.get("final_obs_state")
+                current_obs_initialized = True
+                current_prev_control = execute_trace.get(
+                    "final_prev_control",
+                    execute_controls[-1:],
+                )
         info.update(
             {
                 "backend": "mjx",
@@ -668,17 +712,36 @@ def _window_reference(
     actor_params,
     model_bundle,
     runtime,
+    initial_robot_state=None,
+    obs_state=None,
+    obs_initialized=None,
+    prev_control=None,
 ):
     if rollout_reference_factory is None:
         return {"start": int(start)}
-    return rollout_reference_factory(
-        start=int(start),
-        motion=motion,
-        controls=controls,
-        actor_params=actor_params,
-        model_bundle=model_bundle,
-        runtime=runtime,
-    )
+    kwargs = {
+        "start": int(start),
+        "motion": motion,
+        "controls": controls,
+        "actor_params": actor_params,
+        "model_bundle": model_bundle,
+        "runtime": runtime,
+    }
+    if initial_robot_state is not None:
+        kwargs["initial_robot_state"] = initial_robot_state
+    if obs_state is not None:
+        kwargs["obs_state"] = obs_state
+    if obs_initialized is not None:
+        kwargs["obs_initialized"] = obs_initialized
+    if prev_control is not None:
+        kwargs["prev_control"] = prev_control
+    return rollout_reference_factory(**kwargs)
+
+
+def _required_trace_value(trace: Any, name: str) -> Any:
+    if not isinstance(trace, dict) or name not in trace:
+        raise ValueError(f"MJX rollout trace is missing required field {name}")
+    return trace[name]
 
 
 def _supports_jax_controls(runtime) -> bool:

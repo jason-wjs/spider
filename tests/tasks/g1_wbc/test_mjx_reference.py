@@ -14,7 +14,7 @@ from spider.tasks.g1_wbc.constants import (
     QVEL_DIM,
     TASK_EE_BODY_NAMES,
 )
-from spider.tasks.g1_wbc.mjx_obs import JaxObsIndices
+from spider.tasks.g1_wbc.mjx_obs import JaxObsIndices, JaxObsState
 from spider.tasks.g1_wbc.mjx_reference import build_mjx_rollout_reference
 from spider.tasks.g1_wbc.motion import G1Motion
 
@@ -152,6 +152,58 @@ class MjxReferenceTest(unittest.TestCase):
             expected,
         )
         np.testing.assert_allclose(reference["base_qpos"][:, 0], expected)
+
+    def test_rollout_reference_accepts_live_state_overrides(self) -> None:
+        motion = _motion(frames=6)
+        controls = torch.zeros(4, QPOS_DIM - 1)
+        live_robot_state = {
+            "qpos": np.full(QPOS_DIM, 42.0, dtype=np.float32),
+            "qvel": np.full(QVEL_DIM, 0.25, dtype=np.float32),
+            "body_pos_w": np.full((len(MUJOCO_BODY_NAMES), 3), 1.5, dtype=np.float32),
+            "body_quat_w": np.tile(
+                np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+                (len(MUJOCO_BODY_NAMES), 1),
+            ),
+            "body_lin_vel_w": np.full(
+                (len(MUJOCO_BODY_NAMES), 3),
+                0.5,
+                dtype=np.float32,
+            ),
+            "body_ang_vel_w": np.full(
+                (len(MUJOCO_BODY_NAMES), 3),
+                0.75,
+                dtype=np.float32,
+            ),
+        }
+        live_obs_state = JaxObsState(
+            history={"joint_pos": np.full((5, ACTION_DIM), 2.0, dtype=np.float32)},
+            last_action=np.full(ACTION_DIM, 0.125, dtype=np.float32),
+        )
+        prev_control = np.full(QPOS_DIM - 1, 0.33, dtype=np.float32)
+
+        reference = build_mjx_rollout_reference(
+            start=2,
+            motion=motion,
+            controls=controls,
+            actor_params=object(),
+            model_bundle=_model_bundle(),
+            runtime=_Runtime(),
+            initial_robot_state=live_robot_state,
+            obs_state=live_obs_state,
+            obs_initialized=True,
+            prev_control=prev_control,
+        )
+
+        np.testing.assert_allclose(reference["initial_robot_state"]["qpos"], 42.0)
+        np.testing.assert_allclose(reference["initial_robot_state"]["qvel"], 0.25)
+        np.testing.assert_allclose(reference["initial_robot_state"]["body_pos_w"], 1.5)
+        np.testing.assert_allclose(
+            reference["base_qpos"][:, 0],
+            motion.qpos()[[2, 3, 4, 5], 0].numpy(),
+        )
+        self.assertIs(reference["obs_state"], live_obs_state)
+        self.assertTrue(reference["obs_initialized"])
+        np.testing.assert_allclose(reference["prev_control"], prev_control)
 
     def test_default_joint_pos_matches_wbc_knees_bent_pose(self) -> None:
         reference = build_mjx_rollout_reference(

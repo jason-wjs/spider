@@ -859,6 +859,76 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertGreaterEqual(len(captured), 2)
         self.assertTrue(torch.allclose(captured[1][:, 0], torch.zeros(40)))
 
+    def test_mjx_backend_carries_execute_trace_state_between_windows(self) -> None:
+        optimizer_references: list[dict[str, object]] = []
+        tracer_references: list[dict[str, object]] = []
+        live_obs_state = SimpleNamespace(history={"sentinel": object()}, last_action="last")
+        live_prev_control = np.full((1, QPOS_DIM - 1), 0.33, dtype=np.float32)
+
+        def optimizer(**kwargs):
+            optimizer_references.append(dict(kwargs["reference"]["kwargs"]))
+            updated = torch.zeros(40, QPOS_DIM - 1)
+            chunk = torch.zeros(21, QPOS_DIM - 1)
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25), "accepted": True},
+            )
+
+        def rollout_reference_factory(**kwargs):
+            reference_kwargs = dict(kwargs)
+            return {
+                "start": kwargs["start"],
+                "kwargs": reference_kwargs,
+            }
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del samples, actor_params, model_bundle
+            tracer_references.append(dict(reference["kwargs"]))
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((1, QPOS_DIM), dtype=np.float32)
+            qpos[:, 0] = 123.0 + float(reference["start"])
+            qpos[:, 3] = 1.0
+            qvel = np.full((1, QVEL_DIM), 0.5, dtype=np.float32)
+            body_quat = np.zeros((1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            return {
+                "final_robot_state": {
+                    "qpos": qpos,
+                    "qvel": qvel,
+                    "body_pos_w": np.full((1, bodies, 3), 1.5, dtype=np.float32),
+                    "body_quat_w": body_quat,
+                    "body_lin_vel_w": np.full((1, bodies, 3), 2.5, dtype=np.float32),
+                    "body_ang_vel_w": np.full((1, bodies, 3), 3.5, dtype=np.float32),
+                },
+                "final_obs_state": live_obs_state,
+                "final_prev_control": live_prev_control,
+            }
+
+        _run_with_fakes(
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+        )
+
+        self.assertGreaterEqual(len(optimizer_references), 2)
+        self.assertGreaterEqual(len(tracer_references), 1)
+        self.assertNotIn("initial_robot_state", optimizer_references[0])
+        self.assertEqual(tracer_references[0]["start"], 0)
+        second_reference = optimizer_references[1]
+        np.testing.assert_allclose(
+            second_reference["initial_robot_state"]["qpos"][:, 0],
+            [123.0],
+        )
+        np.testing.assert_allclose(
+            second_reference["initial_robot_state"]["qvel"],
+            0.5,
+        )
+        self.assertIs(second_reference["obs_state"], live_obs_state)
+        self.assertTrue(second_reference["obs_initialized"])
+        np.testing.assert_allclose(second_reference["prev_control"], live_prev_control)
+
     def test_mjx_backend_accepts_jax_optimizer_arrays(self) -> None:
         try:
             import jax.numpy as jnp
@@ -978,6 +1048,7 @@ def _run_with_fakes(
     runtime=None,
     rollout_scorer=None,
     rollout_reference_factory=None,
+    rollout_tracer=None,
     enable_physics_scan=False,
     reward_weights=None,
 ):
@@ -988,6 +1059,8 @@ def _run_with_fakes(
         kwargs["rollout_scorer"] = rollout_scorer
     if rollout_reference_factory is not None:
         kwargs["rollout_reference_factory"] = rollout_reference_factory
+    if rollout_tracer is not None:
+        kwargs["rollout_tracer"] = rollout_tracer
     return run_g1_wbc_mjx_mpc(
         spider_config=spider_config or _spider_config(),
         motion=_motion(),

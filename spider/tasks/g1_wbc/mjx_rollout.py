@@ -418,6 +418,10 @@ def rollout_candidate_controls(
     return {
         "qpos": jnp.stack(qpos_trace, axis=0),
         "qvel": jnp.stack(qvel_trace, axis=0),
+        "final_robot_state": robot_state,
+        "final_obs_state": obs_state,
+        "final_prev_control": prev_control,
+        "final_prev_joint_vel": prev_joint_vel,
     }
 
 
@@ -753,6 +757,17 @@ def _batched_robot_state(
         sample_count,
         jnp=jnp,
     )
+    body_lin_vel_source = state.get("body_lin_vel_w")
+    body_lin_vel_w = (
+        jnp.zeros(body_pos_w.shape)
+        if body_lin_vel_source is None
+        else _ensure_robot_state_batch(
+            "body_lin_vel_w",
+            jnp.asarray(body_lin_vel_source),
+            sample_count,
+            jnp=jnp,
+        )
+    )
     body_quat_w = _ensure_robot_state_batch(
         "body_quat_w",
         jnp.asarray(state["body_quat_w"]),
@@ -777,6 +792,7 @@ def _batched_robot_state(
         "qvel": qvel,
         "body_pos_w": body_pos_w,
         "body_quat_w": body_quat_w,
+        "body_lin_vel_w": body_lin_vel_w,
         "body_ang_vel_w": body_ang_vel_w,
         "base_ang_vel_b": base_ang_vel_b,
     }
@@ -847,6 +863,8 @@ def _ensure_reference_batch(name: str, value, sample_count: int, *, jnp):
 def _ensure_batch(value, sample_count: int, *, jnp):
     if len(value.shape) > 0 and int(value.shape[0]) == int(sample_count):
         return value
+    if len(value.shape) > 0 and int(value.shape[0]) == 1:
+        return jnp.repeat(value, int(sample_count), axis=0)
     return _broadcast_batch(value, sample_count, jnp=jnp)
 
 
@@ -860,7 +878,7 @@ def _is_unbatched_robot_state(name: str, value) -> bool:
         return shape == (QPOS_DIM,)
     if name == "qvel":
         return len(shape) == 1
-    if name in {"body_pos_w", "body_ang_vel_w"}:
+    if name in {"body_pos_w", "body_lin_vel_w", "body_ang_vel_w"}:
         return len(shape) == 2 and shape[-1] == 3
     if name == "body_quat_w":
         return len(shape) == 2 and shape[-1] == 4
