@@ -2026,6 +2026,43 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["motion_results"]["jump"]["mjx_failures"],
         )
 
+    def test_mjx_command_qpos_trajectory_must_match_refined_qpos(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in mjx_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_command = Path(bad_row["artifacts"]["mpc_command_npz"])
+            arrays = _valid_command_arrays()
+            arrays["command_qpos_trajectory"][10, 0, 0] = 1.0
+            np.savez_compressed(bad_command, **arrays)
+            bad_row["artifact_sha256"]["mpc_command_npz"] = _file_sha256(bad_command)
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "mpc_command_qpos_mismatch",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+
     def test_4090_target_reports_realtime_pass_classification(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:

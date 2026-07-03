@@ -1058,6 +1058,7 @@ def _has_invalid_benchmark_failure(
         "mpc_accepted",
         "mpc_command_npz",
         "mpc_command_npz_hash",
+        "mpc_command_qpos_mismatch",
         "mpc_command_npz_schema",
         "mpc_command_npz_stale",
         "mpc_rollout_qpos_mismatch",
@@ -1539,6 +1540,10 @@ def _artifact_npz_schema_failures(
                 )
                 if not command_valid:
                     failures.append("mpc_command_npz_schema")
+                elif not _command_qpos_is_consistent(
+                    Path(command_path).expanduser(),
+                ):
+                    failures.append("mpc_command_qpos_mismatch")
             if (
                 rollout_valid
                 and command_valid
@@ -1606,9 +1611,7 @@ def _rollout_matches_command_npz(rollout_path: Path, command_path: Path) -> bool
     try:
         with np.load(rollout_path) as rollout, np.load(command_path) as command:
             rollout_qpos = np.asarray(rollout["qpos"])[:, 0]
-            refined_qpos = np.asarray(command["refined_qpos"])
-            if refined_qpos.ndim == 3 and refined_qpos.shape[1] == 1:
-                refined_qpos = refined_qpos[:, 0]
+            refined_qpos = _squeeze_single_batch_axis(command["refined_qpos"])
             if rollout_qpos.shape != refined_qpos.shape:
                 return False
             return bool(
@@ -1621,6 +1624,34 @@ def _rollout_matches_command_npz(rollout_path: Path, command_path: Path) -> bool
             )
     except Exception:
         return False
+
+
+def _command_qpos_is_consistent(command_path: Path) -> bool:
+    try:
+        with np.load(command_path) as command:
+            refined_qpos = _squeeze_single_batch_axis(command["refined_qpos"])
+            command_qpos = _squeeze_single_batch_axis(
+                command["command_qpos_trajectory"]
+            )
+            if refined_qpos.shape != command_qpos.shape:
+                return False
+            return bool(
+                np.allclose(
+                    refined_qpos,
+                    command_qpos,
+                    atol=1.0e-5,
+                    rtol=1.0e-5,
+                )
+            )
+    except Exception:
+        return False
+
+
+def _squeeze_single_batch_axis(array) -> np.ndarray:
+    value = np.asarray(array)
+    if value.ndim == 3 and value.shape[1] == 1:
+        return value[:, 0]
+    return value
 
 
 def _npz_has_shapes(

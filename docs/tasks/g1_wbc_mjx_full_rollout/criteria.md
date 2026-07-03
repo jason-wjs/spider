@@ -157,6 +157,9 @@ arrays, `actions`, `controls`, foot contact arrays, floor contact arrays,
 `candidate_scores`, command joint/body trajectories, and command
 `qpos`/`qvel` trajectories with shapes consistent with the same frame count.
 Invalid command content is reported as `mpc_command_npz_schema`.
+Within a command NPZ, `refined_qpos` must match `command_qpos_trajectory`
+within the runtime acceptance tolerance. Mismatch is reported as
+`mpc_command_qpos_mismatch`.
 For MJX and Stage0 MPC rows, `rollout.npz["qpos"][:, 0]` must match
 `mpc_command.npz["refined_qpos"]` within the runtime acceptance tolerance.
 Mismatch is reported as `mpc_rollout_qpos_mismatch`.
