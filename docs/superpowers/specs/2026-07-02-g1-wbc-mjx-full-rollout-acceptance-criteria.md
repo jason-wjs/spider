@@ -364,6 +364,11 @@ report `replay_mode=shared_execute_backend`, `control_steps` matching the planne
 `--replay-control-steps`, `num_replay_steps` matching the replay metrics step
 count, and `num_command_frames >= num_replay_steps + 1`.
 
+Freshness is also an invalid-benchmark gate. Artifacts written by MJX and replay
+runs must have modification times consistent with the current command start
+time, with a small filesystem timestamp tolerance. Reusing stale files from an
+older output directory cannot satisfy formal acceptance.
+
 ### Speed Criteria
 
 For the H100 first milestone:

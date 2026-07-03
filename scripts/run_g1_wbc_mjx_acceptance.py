@@ -35,6 +35,7 @@ MOTIONS = ("jump", "walk")
 SEEDS = (0, 1, 2)
 MIN_SPEEDUP = 12.0
 DEFAULT_REQUIRED_GPU_NAME_FRAGMENT = "H100"
+ARTIFACT_FRESHNESS_TOLERANCE_NS = 2_000_000_000
 FORMAL_BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
 FORMAL_STAGE0_ARG_VALUES = {
     "--motion-type": "isaaclab",
@@ -150,6 +151,7 @@ def build_acceptance_plan(
 
 
 def run_command(argv: list[str], *, cwd: Path) -> dict[str, Any]:
+    command_start_time_ns = time.time_ns()
     start = time.perf_counter()
     result = subprocess.run(
         argv,
@@ -165,6 +167,7 @@ def run_command(argv: list[str], *, cwd: Path) -> dict[str, Any]:
         "stderr": result.stderr,
         "status": "ok" if result.returncode == 0 else "failed",
         "command_wall_time_sec": float(wall_time_sec),
+        "command_start_time_ns": int(command_start_time_ns),
     }
     metrics_path = _output_dir_from_argv(argv) / "metrics.json"
     if metrics_path.is_file():
@@ -404,6 +407,10 @@ def _build_report(
                     required_gpu_name_fragment=required_gpu_name_fragment,
                 ),
                 *_mjx_contact_evidence_failures(mjx_group),
+                *_artifact_freshness_failures(
+                    mjx_group,
+                    artifact_fields=REQUIRED_ARTIFACT_FIELDS,
+                ),
             )
         )
         replay_failures = _row_evidence_failures(
@@ -417,6 +424,10 @@ def _build_report(
             (
                 *replay_failures,
                 *_replay_provenance_failures(replay_group),
+                *_artifact_freshness_failures(
+                    replay_group,
+                    artifact_fields=("metrics_json", "rollout_npz"),
+                ),
                 *_replay_quality_failures(
                     motion,
                     replay_group,
@@ -726,6 +737,7 @@ def _has_invalid_benchmark_failure(
         "contact_saturation",
         "fallback",
         "metrics_json",
+        "metrics_json_stale",
         "max_contact_points_saturation",
         "max_geom_pairs_saturation",
         "mjx_compile_init_wall_time",
@@ -739,6 +751,7 @@ def _has_invalid_benchmark_failure(
         "mjx_steady_state_wall_time",
         "mpc_accepted",
         "mpc_command_npz",
+        "mpc_command_npz_stale",
         "num_steps",
         "repeat_count",
         "replay_control_steps",
@@ -748,6 +761,7 @@ def _has_invalid_benchmark_failure(
         "replay_saved_command",
         "returncode",
         "rollout_npz",
+        "rollout_npz_stale",
         "seed",
         "status",
     }
@@ -928,6 +942,28 @@ def _baseline_artifact_evidence_failures(rows: list[dict[str, Any]]) -> tuple[st
     return _unique(failures)
 
 
+def _artifact_freshness_failures(
+    rows: list[dict[str, Any]],
+    *,
+    artifact_fields: tuple[str, ...],
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        start_ns = _safe_int(row.get("command_start_time_ns"))
+        if start_ns is None:
+            continue
+        mtimes = row.get("artifact_mtime_ns", {})
+        if not isinstance(mtimes, dict):
+            mtimes = {}
+        for key in artifact_fields:
+            mtime_ns = _safe_int(mtimes.get(key))
+            if mtime_ns is None:
+                continue
+            if int(mtime_ns) + ARTIFACT_FRESHNESS_TOLERANCE_NS < int(start_ns):
+                failures.append(f"{key}_stale")
+    return _unique(failures)
+
+
 def _row_evidence_failures(
     rows: list[dict[str, Any]],
     *,
@@ -1043,10 +1079,18 @@ def _unique(values) -> tuple[str, ...]:
 def _attach_artifacts(row: dict[str, Any], output_dir: str | Path) -> dict[str, Any]:
     output_dir = Path(output_dir).expanduser()
     row = dict(row)
+    artifact_paths = {
+        "metrics_json": output_dir / "metrics.json",
+        "rollout_npz": output_dir / "rollout.npz",
+        "mpc_command_npz": output_dir / "mpc_command.npz",
+    }
     row["artifacts"] = {
-        "metrics_json": _existing_path(output_dir / "metrics.json"),
-        "rollout_npz": _existing_path(output_dir / "rollout.npz"),
-        "mpc_command_npz": _existing_path(output_dir / "mpc_command.npz"),
+        key: _existing_path(path)
+        for key, path in artifact_paths.items()
+    }
+    row["artifact_mtime_ns"] = {
+        key: path.stat().st_mtime_ns if path.exists() else None
+        for key, path in artifact_paths.items()
     }
     return row
 
