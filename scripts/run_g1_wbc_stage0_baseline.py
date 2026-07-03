@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -264,7 +265,22 @@ def attach_artifact_paths(row: dict[str, Any]) -> dict[str, Any]:
         for key, path in artifacts.items()
         if path.exists()
     }
+    row["artifact_sha256"] = {
+        key: file_sha256(path)
+        for key, path in artifacts.items()
+        if path.exists()
+    }
     return row
+
+
+def file_sha256(path: Path) -> str:
+    """Return a SHA256 hex digest for a local artifact file."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def run_command(command: Stage0Command) -> dict[str, Any]:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shlex
@@ -394,6 +395,10 @@ def _build_report(
                     baseline_group,
                     artifact_fields=REQUIRED_ARTIFACT_FIELDS,
                 ),
+                *_artifact_hash_failures(
+                    baseline_group,
+                    artifact_fields=REQUIRED_ARTIFACT_FIELDS,
+                ),
                 *_baseline_runtime_evidence_failures(
                     baseline_group,
                     required_gpu_name_fragment=required_gpu_name_fragment,
@@ -749,6 +754,7 @@ def _has_invalid_benchmark_failure(
         "contact_saturation",
         "fallback",
         "metrics_json",
+        "metrics_json_hash",
         "metrics_json_stale",
         "max_contact_points_saturation",
         "max_geom_pairs_saturation",
@@ -763,6 +769,7 @@ def _has_invalid_benchmark_failure(
         "mjx_steady_state_wall_time",
         "mpc_accepted",
         "mpc_command_npz",
+        "mpc_command_npz_hash",
         "mpc_command_npz_stale",
         "num_steps",
         "repeat_count",
@@ -773,6 +780,7 @@ def _has_invalid_benchmark_failure(
         "replay_saved_command",
         "returncode",
         "rollout_npz",
+        "rollout_npz_hash",
         "rollout_npz_stale",
         "seed",
         "status",
@@ -997,6 +1005,41 @@ def _artifact_freshness_failures(
             if int(mtime_ns) + ARTIFACT_FRESHNESS_TOLERANCE_NS < int(start_ns):
                 failures.append(f"{key}_stale")
     return _unique(failures)
+
+
+def _artifact_hash_failures(
+    rows: list[dict[str, Any]],
+    *,
+    artifact_fields: tuple[str, ...],
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        artifacts = row.get("artifacts", {})
+        expected_hashes = row.get("artifact_sha256", {})
+        if not isinstance(artifacts, dict):
+            artifacts = {}
+        if not isinstance(expected_hashes, dict):
+            expected_hashes = {}
+        for key in artifact_fields:
+            expected = expected_hashes.get(key)
+            if not isinstance(expected, str) or not expected.strip():
+                failures.append(f"{key}_hash")
+                continue
+            artifact = artifacts.get(key)
+            if not isinstance(artifact, str) or not Path(artifact).expanduser().is_file():
+                continue
+            actual = _file_sha256(Path(artifact).expanduser())
+            if actual != expected:
+                failures.append(f"{key}_hash")
+    return _unique(failures)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _row_evidence_failures(

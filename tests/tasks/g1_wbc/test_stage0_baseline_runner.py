@@ -247,6 +247,16 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertTrue(
             all(isinstance(value, int) for value in updated["artifact_mtime_ns"].values())
         )
+        self.assertEqual(
+            set(updated["artifact_sha256"]),
+            {"metrics_json", "rollout_npz", "mpc_command_npz"},
+        )
+        self.assertTrue(
+            all(
+                isinstance(value, str) and len(value) == 64
+                for value in updated["artifact_sha256"].values()
+            )
+        )
 
     def test_run_command_extracts_metrics_and_mpc_payload(self) -> None:
         runner = load_runner()

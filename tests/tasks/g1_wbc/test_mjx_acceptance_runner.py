@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -111,6 +112,11 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         "rollout_npz": str(output_dir / "rollout.npz"),
                         "mpc_command_npz": str(output_dir / "mpc_command.npz"),
                     },
+                    "artifact_sha256": {
+                        "metrics_json": _file_sha256(output_dir / "metrics.json"),
+                        "rollout_npz": _file_sha256(output_dir / "rollout.npz"),
+                        "mpc_command_npz": _file_sha256(output_dir / "mpc_command.npz"),
+                    },
                     "steady_state_wall_time_sec": 120.0,
                 }
             )
@@ -143,6 +149,12 @@ def _metrics(*, success: bool) -> dict[str, float | bool]:
         "joint_acc_mean": 1.0,
         "joint_jerk_mean": 1.0,
     }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 class MjxAcceptanceRunnerTest(unittest.TestCase):
@@ -570,6 +582,69 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(report["classification"], "invalid_benchmark")
         self.assertIn(
             "metrics_json_stale",
+            report["motion_results"]["jump"]["baseline_failures"],
+        )
+
+    def test_mismatched_baseline_artifact_hash_fails_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["rows"][1]["artifact_sha256"]["metrics_json"] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest))
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row.update(_replay_evidence(argv))
+                    return row
+                row.update(
+                    {
+                        "mpc_accepted": True,
+                        "accepted_windows": 40,
+                        "mpc_used_baseline_fallback": False,
+                        "compile_init_wall_time_sec": 2.0,
+                        "jit_warmup_enabled": True,
+                        "jit_warmup_wall_time_sec": 1.5,
+                        "runtime_visible_devices": ("0",),
+                        "steady_state_wall_time_sec": 1.0,
+                        **_mjx_contact_evidence(),
+                    }
+                )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "metrics_json_hash",
             report["motion_results"]["jump"]["baseline_failures"],
         )
 

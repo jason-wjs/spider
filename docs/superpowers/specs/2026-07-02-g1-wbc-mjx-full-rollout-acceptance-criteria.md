@@ -159,6 +159,9 @@ Formal Stage 0 manifests produced by the runner record `command_start_time_ns`
 and `artifact_mtime_ns` for those baseline artifacts; acceptance rejects
 artifacts whose mtimes predate the recorded command start, which catches reused
 output directories with stale baseline files.
+The runner also records `artifact_sha256` for each baseline artifact, and
+acceptance recomputes those hashes. Any missing or mismatched baseline artifact
+hash is an invalid benchmark, not a quality regression.
 
 The acceptance runner must also reject non-formal manifests before launching MJX
 runs. A formal manifest has schema version `1`, baseline name
