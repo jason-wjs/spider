@@ -158,6 +158,63 @@ class MjxBackendCliTest(unittest.TestCase):
         config = evaluate._build_sampling_config(args)
         self.assertFalse(config.use_warm_start)
 
+    def test_mjx_generic_accepts_mjx_guided_candidate_toggle(self) -> None:
+        argv = [
+            "evaluate.py",
+            "--motion",
+            "/tmp/motion.npz",
+            "--method",
+            "g1_wbc_joint_global",
+            "--mpc-backend",
+            "mjx",
+            "--mpc-optimizer",
+            "generic",
+            "--mpc-samples",
+            "512",
+            "--mpc-iterations",
+            "2",
+            "--mpc-planning-horizon-steps",
+            "40",
+            "--mpc-control-steps",
+            "20",
+            "--mpc-knot-count",
+            "8",
+            "--mpc-temperature",
+            "0.7",
+            "--mpc-root-pos-sigma",
+            "0.04",
+            "--mpc-root-rot-sigma",
+            "0.10",
+            "--mpc-joint-sigma",
+            "0.18",
+            "--mjx-guided-candidate",
+        ]
+
+        with mock.patch("sys.argv", argv):
+            args = evaluate._parse_args()
+
+        evaluate._validate_backend_args(args)
+        config = evaluate._build_sampling_config(args)
+        self.assertTrue(config.use_guided_candidate)
+
+    def test_mjx_guided_candidate_toggle_requires_mjx_generic(self) -> None:
+        argv = [
+            "evaluate.py",
+            "--motion",
+            "/tmp/motion.npz",
+            "--method",
+            "g1_wbc_joint_global",
+            "--mpc-optimizer",
+            "generic",
+            "--mjx-guided-candidate",
+        ]
+
+        with mock.patch("sys.argv", argv):
+            args = evaluate._parse_args()
+
+        with self.assertRaisesRegex(ValueError, "--mjx-guided-candidate"):
+            evaluate._validate_backend_args(args)
+
     def test_file_sha256_hashes_saved_command_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             command = Path(tmp_dir) / "mpc_command.npz"

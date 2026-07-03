@@ -161,6 +161,7 @@ def build_g1_wbc_sampling_config(
     use_torch_compile: bool,
     seed: int,
     use_warm_start: bool = True,
+    use_guided_candidate: bool = False,
 ) -> Config:
     """Build the SPIDER sampling config for the G1 WBC task adapter."""
 
@@ -212,6 +213,7 @@ def build_g1_wbc_sampling_config(
     config.rollout_batch_size = int(rollout_batch_size)
     config.control_update_mode = str(control_update_mode)
     config.use_warm_start = bool(use_warm_start)
+    config.use_guided_candidate = bool(use_guided_candidate)
     config.noise_scale = _g1_wbc_noise_scale(config, knot_count)
     config.beta_traj = (
         config.final_noise_scale ** (1 / config.max_num_iterations)

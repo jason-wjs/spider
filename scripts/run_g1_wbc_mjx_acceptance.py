@@ -200,6 +200,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "when command, metrics provenance, artifact hashes, and schema match."
         ),
     )
+    parser.add_argument(
+        "--mjx-guided-candidate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable MJX-generated guided candidate controls in the generic MJX "
+            "acceptance run. The replay validation run never receives this flag."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -222,6 +231,7 @@ def build_acceptance_plan(
                 args.python_executable,
                 output_dir,
                 args.device,
+                bool(args.mjx_guided_candidate),
             )
             replay_argv = _replay_argv_from_mjx(
                 row,
@@ -643,6 +653,15 @@ def _mjx_metrics_provenance_matches(
     if _safe_int(parsed.get("accepted_windows")) != 40:
         return False
     if parsed.get("mpc_used_baseline_fallback") is not False:
+        return False
+    try:
+        expected_guided_candidate = _argv_bool_optional(
+            argv,
+            "--mjx-guided-candidate",
+        )
+    except ValueError:
+        return False
+    if mpc.get("use_guided_candidate") is not expected_guided_candidate:
         return False
     for field in (
         "steady_state_wall_time_sec",
@@ -1190,6 +1209,7 @@ def _mjx_argv_from_baseline_row(
     python_executable: str,
     output_dir: Path,
     device: str,
+    use_guided_candidate: bool,
 ) -> list[str]:
     argv = list(row["argv"])
     argv[0] = str(python_executable)
@@ -1205,6 +1225,13 @@ def _mjx_argv_from_baseline_row(
         argv.append("--mjx-enable-scan")
     if "--save-rollout" not in argv:
         argv.append("--save-rollout")
+    for flag in ("--mjx-guided-candidate", "--no-mjx-guided-candidate"):
+        argv = _drop_flag(argv, flag)
+    argv.append(
+        "--mjx-guided-candidate"
+        if use_guided_candidate
+        else "--no-mjx-guided-candidate"
+    )
     return argv
 
 
@@ -1220,6 +1247,8 @@ def _replay_argv_from_mjx(
     argv = _set_arg(argv, "--output-dir", str(replay_output_dir))
     argv = _drop_arg_with_value(argv, "--mpc-reward-weights")
     argv = _drop_flag(argv, "--mjx-enable-scan")
+    argv = _drop_flag(argv, "--mjx-guided-candidate")
+    argv = _drop_flag(argv, "--no-mjx-guided-candidate")
     argv.extend(["--saved-command", str(mjx_output_dir / "mpc_command.npz")])
     argv.extend(["--replay-control-steps", "20"])
     argv.extend(["--replay-task-mode", "g1_wbc_joint_global"])

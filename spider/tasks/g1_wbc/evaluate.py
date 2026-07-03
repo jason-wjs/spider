@@ -456,6 +456,12 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--mjx-guided-candidate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable MJX-generated guided candidate controls for the generic MJX backend.",
+    )
+    parser.add_argument(
         "--mpc-optimizer",
         choices=("generic", "legacy"),
         default="generic",
@@ -559,6 +565,13 @@ def _validate_backend_args(args: argparse.Namespace) -> None:
         raise ValueError("--mpc-backend mjx requires an MPC method.")
     if args.mpc_backend == "mjx" and args.mpc_optimizer != "generic":
         raise ValueError("--mpc-backend mjx requires --mpc-optimizer generic.")
+    if args.mjx_guided_candidate is not None and not (
+        args.mpc_backend == "mjx" and args.mpc_optimizer == "generic"
+    ):
+        raise ValueError(
+            "--mjx-guided-candidate requires --mpc-backend mjx "
+            "and --mpc-optimizer generic."
+        )
     if args.mpc_optimizer == "legacy" and args.method not in MPC_METHODS:
         raise ValueError("--mpc-optimizer legacy requires an MPC method.")
     if args.mpc_optimizer != "legacy":
@@ -622,6 +635,11 @@ def _build_sampling_config(args: argparse.Namespace) -> Config:
         1.0 if args.mpc_last_ctrl_noise_scale is None else float(args.mpc_last_ctrl_noise_scale)
     )
     use_warm_start = True if args.mpc_warm_start is None else bool(args.mpc_warm_start)
+    use_guided_candidate = (
+        False
+        if args.mjx_guided_candidate is None
+        else bool(args.mjx_guided_candidate)
+    )
     return build_g1_wbc_sampling_config(
         device=args.device,
         num_samples=int(args.mpc_samples),
@@ -641,6 +659,7 @@ def _build_sampling_config(args: argparse.Namespace) -> Config:
         use_torch_compile=bool(args.mpc_torch_compile),
         seed=int(args.seed),
         use_warm_start=use_warm_start,
+        use_guided_candidate=use_guided_candidate,
     )
 
 

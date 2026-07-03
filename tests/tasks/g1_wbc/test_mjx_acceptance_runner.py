@@ -432,6 +432,10 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 optimizer_idx = item.mjx_argv.index("--mpc-optimizer")
                 self.assertEqual(item.mjx_argv[optimizer_idx + 1], "generic")
                 self.assertIn("--mjx-enable-scan", item.mjx_argv)
+                self.assertIn("--no-mjx-guided-candidate", item.mjx_argv)
+                self.assertNotIn("--mjx-guided-candidate", item.mjx_argv)
+                self.assertNotIn("--mjx-guided-candidate", item.replay_argv)
+                self.assertNotIn("--no-mjx-guided-candidate", item.replay_argv)
                 for flag in (
                     "--mpc-preset",
                     "--mpc-sampling-mode",
@@ -454,6 +458,34 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 self.assertNotIn("--mjx-enable-scan", item.replay_argv)
                 method_idx = item.replay_argv.index("--method")
                 self.assertEqual(item.replay_argv[method_idx + 1], "replay_command")
+
+    def test_build_acceptance_plan_can_enable_mjx_guided_candidate(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-guided-candidate",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 6)
+        for item in plan:
+            with self.subTest(motion=item.motion, seed=item.seed):
+                self.assertIn("--mjx-guided-candidate", item.mjx_argv)
+                self.assertNotIn("--no-mjx-guided-candidate", item.mjx_argv)
+                self.assertNotIn("--mjx-guided-candidate", item.replay_argv)
+                self.assertNotIn("--no-mjx-guided-candidate", item.replay_argv)
 
     def test_build_acceptance_plan_rejects_missing_or_duplicate_matrix_rows(self) -> None:
         runner = load_runner()
@@ -1068,6 +1100,45 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     _mjx_metrics_payload(planned, motion="/tmp/stale_motion.npz")
                 )
             )
+
+            row = runner.load_existing_acceptance_row(
+                planned,
+                kind="mjx",
+                existing_rows=mjx_rows,
+            )
+
+        self.assertIsNone(row)
+
+    def test_existing_acceptance_row_reuse_rejects_mismatched_mjx_guided_candidate(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-guided-candidate",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            mjx_rows, _replay_rows = _write_reusable_acceptance_outputs(
+                runner,
+                plan,
+                output_dir=output_dir,
+            )
+            planned = plan[0]
+            payload = _mjx_metrics_payload(planned)
+            payload["mpc"]["use_guided_candidate"] = False
+            (Path(planned.output_dir) / "metrics.json").write_text(json.dumps(payload))
 
             row = runner.load_existing_acceptance_row(
                 planned,
@@ -3746,6 +3817,10 @@ def _mjx_metrics_payload(planned, *, motion: str | None = None) -> dict[str, obj
             "physics_step_count_max": 40,
             "physics_step_count_windows": 40,
             "steady_state_wall_time_sec": 1.0,
+            "use_guided_candidate": _test_argv_bool_optional(
+                planned.mjx_argv,
+                "--mjx-guided-candidate",
+            ),
             "runtime_visible_devices": ["0"],
             **_mjx_contact_evidence(),
         },
@@ -3943,12 +4018,25 @@ def _fresh_metrics_provenance(
             "physics_step_count_max": 40,
             "physics_step_count_windows": 40,
             "steady_state_wall_time_sec": 1.0,
+            "use_guided_candidate": _test_argv_bool_optional(
+                argv,
+                "--mjx-guided-candidate",
+            ),
         },
     }
 
 
 def _test_argv_value(argv: list[str], flag: str) -> str:
     return str(argv[argv.index(flag) + 1])
+
+
+def _test_argv_bool_optional(argv: list[str], flag: str) -> bool:
+    negative_flag = f"--no-{flag[2:]}"
+    positive = flag in argv
+    negative = negative_flag in argv
+    if positive == negative:
+        raise AssertionError(f"expected exactly one of {flag} or {negative_flag}")
+    return positive
 
 
 def _replay_evidence(
