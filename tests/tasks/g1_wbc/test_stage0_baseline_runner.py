@@ -490,6 +490,55 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
 
                 self.assertFalse(row["mpc_accepted"])
 
+    def test_run_command_missing_or_invalid_mpc_fallback_fails_closed(self) -> None:
+        runner = load_runner()
+        invalid_values = {
+            "missing": None,
+            "none": None,
+            "string": "false",
+        }
+        for name, fallback in invalid_values.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    output_dir = Path(tmp_dir) / "jump" / "seed_0"
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    mpc = {
+                        "accepted": True,
+                        "accepted_windows": 40,
+                    }
+                    if name != "missing":
+                        mpc["used_baseline_fallback"] = fallback
+                    (output_dir / "metrics.json").write_text(
+                        json.dumps(
+                            {
+                                "metrics": {
+                                    "num_steps": 800,
+                                    "success": True,
+                                    "score": -2.0,
+                                },
+                                "mpc": mpc,
+                            }
+                        )
+                    )
+                    command = runner.Stage0Command(
+                        motion_name="jump",
+                        motion="/tmp/missing/jump.npz",
+                        seed=0,
+                        output_dir=str(output_dir),
+                        argv=["python", "-m", "spider.tasks.g1_wbc.evaluate"],
+                        command_text="python -m spider.tasks.g1_wbc.evaluate",
+                    )
+                    completed = mock.Mock(returncode=0, stdout="{}", stderr="")
+
+                    with mock.patch.object(
+                        runner.subprocess,
+                        "run",
+                        return_value=completed,
+                    ):
+                        row = runner.run_command(command)
+
+                self.assertIsNot(row["mpc_used_baseline_fallback"], False)
+
     def test_main_reuses_existing_ok_rows_when_requested(self) -> None:
         import torch
 
@@ -871,6 +920,80 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                     }
                     if name != "missing":
                         mpc["accepted"] = accepted
+                    (output_dir / "metrics.json").write_text(
+                        json.dumps(
+                            {
+                                "motion": "/tmp/formal_jump.npz",
+                                "checkpoint": "/tmp/model.pt",
+                                "method": "g1_wbc_joint_global",
+                                "metrics": _passing_metrics(),
+                                "mpc": mpc,
+                            }
+                        )
+                    )
+                    (output_dir / "rollout.npz").write_text("{}")
+                    (output_dir / "mpc_command.npz").write_text("{}")
+                    runner.write_stage0_runner_provenance(command)
+
+                    row = runner.load_existing_ok_row(command)
+
+                self.assertIsNone(row)
+
+    def test_existing_row_reuse_rejects_missing_or_invalid_mpc_safety_fields(
+        self,
+    ) -> None:
+        runner = load_runner()
+        invalid_cases = (
+            ("accepted_windows_missing", "accepted_windows", None),
+            ("accepted_windows_num_windows_fallback", "accepted_windows", None),
+            ("accepted_windows_string", "accepted_windows", "40"),
+            ("fallback_missing", "used_baseline_fallback", None),
+            ("fallback_none", "used_baseline_fallback", None),
+            ("fallback_string", "used_baseline_fallback", "false"),
+        )
+        for name, field, value in invalid_cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    output_dir = Path(tmp_dir)
+                    command = runner.Stage0Command(
+                        motion_name="jump",
+                        motion="/tmp/formal_jump.npz",
+                        seed=0,
+                        output_dir=str(output_dir),
+                        argv=[
+                            "python",
+                            "-m",
+                            "spider.tasks.g1_wbc.evaluate",
+                            "--motion",
+                            "/tmp/formal_jump.npz",
+                            "--checkpoint",
+                            "/tmp/model.pt",
+                            "--method",
+                            "g1_wbc_joint_global",
+                            "--mpc-backend",
+                            "mujoco_warp",
+                            "--mpc-optimizer",
+                            "legacy",
+                        ],
+                        command_text="python -m spider.tasks.g1_wbc.evaluate",
+                    )
+                    mpc = {
+                        "mpc_backend": "mujoco_warp",
+                        "mpc_optimizer": "legacy",
+                        "accepted": True,
+                        "accepted_windows": 40,
+                        "used_baseline_fallback": False,
+                    }
+                    if field == "accepted_windows":
+                        mpc.pop("accepted_windows")
+                        if name == "accepted_windows_num_windows_fallback":
+                            mpc["num_windows"] = 40
+                        elif value is not None:
+                            mpc["accepted_windows"] = value
+                    else:
+                        mpc.pop("used_baseline_fallback")
+                        if name != "fallback_missing":
+                            mpc["used_baseline_fallback"] = value
                     (output_dir / "metrics.json").write_text(
                         json.dumps(
                             {

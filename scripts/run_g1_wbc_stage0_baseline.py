@@ -498,10 +498,11 @@ def run_command(command: Stage0Command) -> dict[str, Any]:
         mpc = payload.get("mpc", {})
         row["metrics"] = metrics
         row["mpc_accepted"] = mpc.get("accepted") is True
-        row["accepted_windows"] = int(
-            mpc.get("accepted_windows", mpc.get("num_windows", -1))
+        accepted_windows = _strict_json_int(mpc.get("accepted_windows"))
+        row["accepted_windows"] = -1 if accepted_windows is None else accepted_windows
+        row["mpc_used_baseline_fallback"] = _strict_json_bool(
+            mpc.get("used_baseline_fallback")
         )
-        row["mpc_used_baseline_fallback"] = bool(mpc.get("used_baseline_fallback", False))
         row["num_steps"] = int(metrics.get("num_steps", -1))
         if isinstance(mpc.get("steady_state_wall_time_sec"), (int, float)):
             row["steady_state_wall_time_sec"] = float(mpc["steady_state_wall_time_sec"])
@@ -542,16 +543,17 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
         return None
     try:
         num_steps = int(metrics.get("num_steps", -1))
-        accepted_windows = int(mpc.get("accepted_windows", mpc.get("num_windows", -1)))
     except (TypeError, ValueError):
         return None
+    accepted_windows = _strict_json_int(mpc.get("accepted_windows"))
+    used_baseline_fallback = _strict_json_bool(mpc.get("used_baseline_fallback"))
     if num_steps != 800:
         return None
     if mpc.get("accepted") is not True:
         return None
     if accepted_windows != 40:
         return None
-    if bool(mpc.get("used_baseline_fallback", False)):
+    if used_baseline_fallback is not False:
         return None
 
     row: dict[str, Any] = {
@@ -561,7 +563,7 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
         "metrics": metrics,
         "mpc_accepted": True,
         "accepted_windows": accepted_windows,
-        "mpc_used_baseline_fallback": False,
+        "mpc_used_baseline_fallback": used_baseline_fallback,
         "num_steps": num_steps,
         "reused_existing": True,
     }
@@ -575,6 +577,16 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
     if isinstance(mpc.get("runtime_gpu_name"), str):
         row["runtime_gpu_name"] = mpc["runtime_gpu_name"]
     return row
+
+
+def _strict_json_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _strict_json_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, int) else None
 
 
 def _existing_runner_provenance_matches(command: Stage0Command) -> bool:
