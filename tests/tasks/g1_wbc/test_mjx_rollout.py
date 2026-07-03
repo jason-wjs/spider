@@ -48,6 +48,18 @@ class _NumpyJnp:
         return np.repeat(value, repeats, axis=axis)
 
     @staticmethod
+    def linspace(start, stop, num):
+        return np.linspace(start, stop, int(num), dtype=np.float32)
+
+    @staticmethod
+    def floor(value):
+        return np.floor(value)
+
+    @staticmethod
+    def minimum(left, right):
+        return np.minimum(left, right)
+
+    @staticmethod
     def stack(values, axis=0):
         return np.stack(values, axis=axis)
 

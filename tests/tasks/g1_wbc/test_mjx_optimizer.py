@@ -20,6 +20,10 @@ class _NumpyJnp:
         return np.concatenate(values, axis=axis)
 
     @staticmethod
+    def repeat(value, repeats, axis=0):
+        return np.repeat(value, repeats, axis=axis)
+
+    @staticmethod
     def full(shape, value):
         return np.full(shape, value, dtype=np.float32)
 
@@ -38,6 +42,18 @@ class _NumpyJnp:
     @staticmethod
     def max(value):
         return np.max(value)
+
+    @staticmethod
+    def linspace(start, stop, num):
+        return np.linspace(start, stop, int(num), dtype=np.float32)
+
+    @staticmethod
+    def floor(value):
+        return np.floor(value)
+
+    @staticmethod
+    def minimum(left, right):
+        return np.minimum(left, right)
 
 
 class _FakeRandom:
@@ -107,6 +123,18 @@ class _UnitStepRandom:
         return noise
 
 
+class _RecordingKnotRandom:
+    def __init__(self) -> None:
+        self.shapes: list[tuple[int, ...]] = []
+
+    def normal(self, key, shape):
+        del key
+        self.shapes.append(tuple(int(dim) for dim in shape))
+        noise = np.zeros(shape, dtype=np.float32)
+        noise[1, :, 0] = np.linspace(0.0, 4.0, int(shape[1]), dtype=np.float32)
+        return noise
+
+
 def _config() -> JaxWindowOptimizerConfig:
     return JaxWindowOptimizerConfig(
         samples=4,
@@ -143,6 +171,35 @@ class MjxOptimizerTest(unittest.TestCase):
         self.assertGreater(np.max(np.abs(nonzero[..., :3])), 0.0)
         self.assertGreater(np.max(np.abs(nonzero[..., 3:6])), 0.0)
         self.assertGreater(np.max(np.abs(nonzero[..., 6:])), 0.0)
+
+    def test_sample_residual_controls_samples_knots_and_interpolates_horizon(self) -> None:
+        random = _RecordingKnotRandom()
+        runtime = SimpleNamespace(
+            jnp=_NumpyJnp(),
+            jax=SimpleNamespace(random=random, nn=_FakeNN()),
+        )
+        config = JaxWindowOptimizerConfig(
+            samples=2,
+            horizon_steps=5,
+            control_steps=2,
+            knot_count=3,
+            temperature=0.5,
+            root_pos_sigma=1.0,
+            root_rot_sigma=1.0,
+            joint_sigma=1.0,
+        )
+
+        samples = sample_residual_controls(
+            config,
+            np.zeros((5, 8), dtype=np.float32),
+            (0, 3),
+            runtime=runtime,
+        )
+
+        self.assertEqual(random.shapes, [(2, 3, 8)])
+        self.assertEqual(samples.shape, (2, 5, 8))
+        np.testing.assert_allclose(samples[0], 0.0)
+        np.testing.assert_allclose(samples[1, :, 0], [0.0, 1.0, 2.0, 3.0, 4.0])
 
     def test_sample_residual_controls_converts_tuple_seed_to_prng_key(self) -> None:
         controls = np.zeros((5, 8), dtype=np.float32)

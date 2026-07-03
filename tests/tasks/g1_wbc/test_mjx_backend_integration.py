@@ -695,6 +695,10 @@ class _FakeOptimizerJnp:
         return np.concatenate(values, axis=axis)
 
     @staticmethod
+    def repeat(value, repeats, axis=0):
+        return np.repeat(value, repeats, axis=axis)
+
+    @staticmethod
     def full(shape, value):
         return np.full(shape, value, dtype=np.float32)
 
@@ -709,6 +713,18 @@ class _FakeOptimizerJnp:
     @staticmethod
     def mean(value):
         return np.mean(value)
+
+    @staticmethod
+    def linspace(start, stop, num):
+        return np.linspace(start, stop, int(num), dtype=np.float32)
+
+    @staticmethod
+    def floor(value):
+        return np.floor(value)
+
+    @staticmethod
+    def minimum(left, right):
+        return np.minimum(left, right)
 
 
 class _FakeOptimizerRandom:

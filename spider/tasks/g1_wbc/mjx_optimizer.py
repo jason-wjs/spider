@@ -38,12 +38,25 @@ def sample_residual_controls(config: JaxWindowOptimizerConfig, controls, key, *,
         raise ValueError(
             f"Expected controls horizon {config.horizon_steps}, got {controls.shape[0]}"
         )
-    sigma = _control_sigma(config, controls.shape[-1], jnp=jnp)
+    parameter_steps = _sample_parameter_steps(config)
+    sigma = _control_sigma(
+        config,
+        controls.shape[-1],
+        steps=parameter_steps,
+        jnp=jnp,
+    )
     noise = runtime.jax.random.normal(
         _prng_key(key, runtime=runtime),
-        (int(config.samples), int(config.horizon_steps), int(controls.shape[-1])),
+        (int(config.samples), int(parameter_steps), int(controls.shape[-1])),
     )
-    samples = controls[None, :, :] + noise * sigma[None, :, :]
+    delta = noise * sigma[None, :, :]
+    if int(parameter_steps) != int(config.horizon_steps):
+        delta = _interpolate_knot_samples(
+            delta,
+            target_steps=int(config.horizon_steps),
+            jnp=jnp,
+        )
+    samples = controls[None, :, :] + delta
     if hasattr(samples, "at"):
         return samples.at[0].set(controls)
     return _set_first(samples, controls)
@@ -120,18 +133,50 @@ def _jnp_max(value, *, jnp):
     return value.max()
 
 
-def _control_sigma(config: JaxWindowOptimizerConfig, width: int, *, jnp):
+def _sample_parameter_steps(config: JaxWindowOptimizerConfig) -> int:
+    horizon = int(config.horizon_steps)
+    if horizon <= 1:
+        return 1
+    return max(2, min(int(config.knot_count), horizon))
+
+
+def _control_sigma(
+    config: JaxWindowOptimizerConfig,
+    width: int,
+    *,
+    steps: int | None = None,
+    jnp,
+):
+    steps = int(config.horizon_steps) if steps is None else int(steps)
     root_pos_width = min(3, int(width))
     root_rot_width = min(3, max(0, int(width) - root_pos_width))
     joint_width = max(0, int(width) - root_pos_width - root_rot_width)
     return jnp.concatenate(
         [
-            jnp.full((int(config.horizon_steps), root_pos_width), config.root_pos_sigma),
-            jnp.full((int(config.horizon_steps), root_rot_width), config.root_rot_sigma),
-            jnp.full((int(config.horizon_steps), joint_width), config.joint_sigma),
+            jnp.full((steps, root_pos_width), config.root_pos_sigma),
+            jnp.full((steps, root_rot_width), config.root_rot_sigma),
+            jnp.full((steps, joint_width), config.joint_sigma),
         ],
         axis=-1,
     )
+
+
+def _interpolate_knot_samples(knot_samples, *, target_steps: int, jnp):
+    target_steps = int(target_steps)
+    if target_steps < 1:
+        raise ValueError(f"target_steps must be positive, got {target_steps}")
+    knot_count = int(knot_samples.shape[1])
+    if target_steps == 1:
+        return knot_samples[:, :1, :]
+    if knot_count <= 1:
+        return jnp.repeat(knot_samples[:, :1, :], target_steps, axis=1)
+    positions = jnp.linspace(0.0, float(knot_count - 1), target_steps)
+    left = jnp.floor(positions).astype("int32")
+    right = jnp.minimum(left + 1, knot_count - 1)
+    blend = (positions - left.astype(positions.dtype))[None, :, None]
+    left_values = knot_samples[:, left, :]
+    right_values = knot_samples[:, right, :]
+    return left_values * (1.0 - blend) + right_values * blend
 
 
 def _validate_config(config: JaxWindowOptimizerConfig) -> None:
@@ -143,6 +188,8 @@ def _validate_config(config: JaxWindowOptimizerConfig) -> None:
         raise ValueError("JAX window optimizer control_steps must be non-negative")
     if int(config.control_steps) >= int(config.horizon_steps):
         raise ValueError("control_steps must be smaller than horizon_steps")
+    if int(config.knot_count) < 2 and int(config.horizon_steps) > 1:
+        raise ValueError("JAX window optimizer knot_count must be at least 2")
     if int(config.iterations) < 1:
         raise ValueError("JAX window optimizer iterations must be positive")
 
