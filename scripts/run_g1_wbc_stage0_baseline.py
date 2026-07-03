@@ -677,6 +677,10 @@ def main(argv: list[str] | None = None) -> int:
         metadata=build_manifest_metadata(args),
     )
     print(str(manifest_path))
+    if not args.dry_run and worst_returncode == 0:
+        baseline_summary = build_baseline_summary(rows)
+        if "baseline_gate_failures" in baseline_summary:
+            return 1
     return worst_returncode
 
 

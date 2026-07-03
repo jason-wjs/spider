@@ -40,6 +40,10 @@ backend: it must use `--mpc-optimizer legacy` so the historical
 `G1WbcMpcConfig` guided candidate, acceptance gate, regularization, and
 per-window metadata semantics are actually active.
 
+MJX acceptance candidates must convert that frozen Stage0 argv to
+`--mpc-backend mjx --mpc-optimizer generic`; MJX backend runs with
+`--mpc-optimizer legacy` are invalid setup, not benchmark failures.
+
 ## Hardware Rules
 
 - One motion inference command may use only one visible GPU.

@@ -40,6 +40,11 @@ def _baseline_manifest(tmp_path: Path) -> Path:
         for seed in (0, 1, 2):
             output_dir = tmp_path / "baseline" / motion / f"seed_{seed}"
             _write_artifacts(output_dir)
+            artifact_mtime_ns = {
+                "metrics_json": (output_dir / "metrics.json").stat().st_mtime_ns,
+                "rollout_npz": (output_dir / "rollout.npz").stat().st_mtime_ns,
+                "mpc_command_npz": (output_dir / "mpc_command.npz").stat().st_mtime_ns,
+            }
             rows.append(
                 {
                     "motion_name": motion,
@@ -66,6 +71,10 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         "g1_wbc_joint_global",
                         "--mpc-backend",
                         "mujoco_warp",
+                        "--mpc-optimizer",
+                        "legacy",
+                        "--mpc-preset",
+                        "aggressive",
                         "--max-steps",
                         "800",
                         "--mpc-samples",
@@ -94,8 +103,24 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                         "0.0",
                         "--mpc-command-smooth-weight",
                         "0.0",
+                        "--mpc-guided-root-pos-gain",
+                        "0.50",
+                        "--mpc-guided-root-rot-gain",
+                        "0.50",
+                        "--mpc-guided-joint-gain",
+                        "0.50",
+                        "--mpc-guided-root-pos-clip",
+                        "0.05",
+                        "--mpc-guided-root-rot-clip",
+                        "0.12",
+                        "--mpc-guided-joint-clip",
+                        "0.35",
                         "--mpc-guided-candidate",
                         "--mpc-acceptance-gate",
+                        "--nconmax-per-env",
+                        "512",
+                        "--njmax-per-env",
+                        "2048",
                         "--save-rollout",
                         "--mpc-reward-weights",
                         str(reward_weights),
@@ -109,11 +134,13 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                     "num_steps": 800,
                     "runtime_visible_devices": ["0"],
                     "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
+                    "command_start_time_ns": min(artifact_mtime_ns.values()) - 1_000_000,
                     "artifacts": {
                         "metrics_json": str(output_dir / "metrics.json"),
                         "rollout_npz": str(output_dir / "rollout.npz"),
                         "mpc_command_npz": str(output_dir / "mpc_command.npz"),
                     },
+                    "artifact_mtime_ns": artifact_mtime_ns,
                     "artifact_sha256": {
                         "metrics_json": _file_sha256(output_dir / "metrics.json"),
                         "rollout_npz": _file_sha256(output_dir / "rollout.npz"),
@@ -309,6 +336,8 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             with self.subTest(motion=item.motion, seed=item.seed):
                 backend_idx = item.mjx_argv.index("--mpc-backend")
                 self.assertEqual(item.mjx_argv[backend_idx + 1], "mjx")
+                optimizer_idx = item.mjx_argv.index("--mpc-optimizer")
+                self.assertEqual(item.mjx_argv[optimizer_idx + 1], "generic")
                 self.assertIn("--mjx-enable-scan", item.mjx_argv)
                 replay_backend_idx = item.replay_argv.index("--mpc-backend")
                 self.assertEqual(item.replay_argv[replay_backend_idx + 1], "mujoco_warp")
@@ -360,6 +389,50 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "provenance"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_formal_baseline_manifest_requires_legacy_optimizer(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            for row in manifest["rows"]:
+                argv = row["argv"]
+                optimizer_idx = argv.index("--mpc-optimizer")
+                del argv[optimizer_idx:optimizer_idx + 2]
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "--mpc-optimizer"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_formal_baseline_manifest_requires_guided_stage0_settings(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            for row in manifest["rows"]:
+                argv = row["argv"]
+                gain_idx = argv.index("--mpc-guided-root-pos-gain")
+                del argv[gain_idx:gain_idx + 2]
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "--mpc-guided-root-pos-gain"):
                 runner.build_acceptance_plan(args, manifest)
 
     def test_build_acceptance_plan_rejects_missing_manifest_input_hashes(self) -> None:
@@ -967,6 +1040,70 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 "rollout_npz": Path(stale_row["artifacts"]["rollout_npz"]).stat().st_mtime_ns,
                 "mpc_command_npz": Path(stale_row["artifacts"]["mpc_command_npz"]).stat().st_mtime_ns,
             }
+            manifest_path.write_text(json.dumps(manifest))
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row.update(_replay_evidence(argv))
+                    return row
+                row.update(
+                    {
+                        "mpc_accepted": True,
+                        "accepted_windows": 40,
+                        "mpc_used_baseline_fallback": False,
+                        "compile_init_wall_time_sec": 2.0,
+                        "jit_warmup_enabled": True,
+                        "jit_warmup_wall_time_sec": 1.5,
+                        "runtime_visible_devices": ("0",),
+                        "steady_state_wall_time_sec": 1.0,
+                        **_mjx_contact_evidence(),
+                    }
+                )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "metrics_json_stale",
+            report["motion_results"]["jump"]["baseline_failures"],
+        )
+
+    def test_missing_baseline_freshness_evidence_fails_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["rows"][1].pop("command_start_time_ns")
+            manifest["rows"][1].pop("artifact_mtime_ns")
             manifest_path.write_text(json.dumps(manifest))
             output_dir = root / "acceptance"
 
@@ -2554,6 +2691,10 @@ def _write_reusable_acceptance_outputs(
                     "returncode": 0,
                     "stdout": "",
                     "stderr": "",
+                    "command_start_time_ns": min(
+                        (mjx_output / name).stat().st_mtime_ns
+                        for name in ("metrics.json", "rollout.npz", "mpc_command.npz")
+                    ) - 1_000_000,
                     "command_wall_time_sec": 11.0,
                     "metrics": mjx_payload["metrics"],
                     "mpc": mjx_mpc,
@@ -2586,6 +2727,10 @@ def _write_reusable_acceptance_outputs(
                     "returncode": 0,
                     "stdout": "",
                     "stderr": "",
+                    "command_start_time_ns": min(
+                        (replay_output / name).stat().st_mtime_ns
+                        for name in ("metrics.json", "rollout.npz")
+                    ) - 1_000_000,
                     "command_wall_time_sec": 12.0,
                     "metrics": replay_payload["metrics"],
                     "mpc": replay_payload["mpc"],

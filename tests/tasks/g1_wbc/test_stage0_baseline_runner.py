@@ -602,7 +602,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                     "returncode": 0,
                     "stdout": "{}",
                     "stderr": "",
-                    "metrics": {"num_steps": 800, "success": True, "score": -2.0},
+                    "metrics": _passing_metrics(),
                     "mpc_accepted": True,
                     "accepted_windows": 40,
                     "mpc_used_baseline_fallback": False,
@@ -704,6 +704,75 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertEqual(manifest["baseline_envelopes"]["jump"]["success"]["count"], 3.0)
         self.assertEqual(manifest["baseline_envelopes"]["walk"]["score"]["mean"], -1.0)
         self.assertEqual(manifest["promoted_seeds"], {"jump": 0, "walk": 0})
+
+    def test_main_returns_nonzero_when_baseline_gate_fails(self) -> None:
+        import torch
+
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = Path(tmp_dir) / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, reward_weights):
+                path.write_text("{}")
+            torch.save(
+                {
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": torch.zeros(1, 886),
+                        "obs_normalizer._std": torch.ones(1, 886),
+                        "mlp.0.weight": torch.zeros(1, 1),
+                    }
+                },
+                checkpoint,
+            )
+
+            def fake_run_command(command):
+                output_dir = Path(command.output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                for name in ("metrics.json", "rollout.npz", "mpc_command.npz"):
+                    (output_dir / name).write_text("{}")
+                metrics = _passing_metrics()
+                metrics["success"] = False
+                metrics["score"] = -99.0
+                return {
+                    "returncode": 0,
+                    "stdout": "{}",
+                    "stderr": "",
+                    "metrics": metrics,
+                    "mpc_accepted": True,
+                    "accepted_windows": 40,
+                    "mpc_used_baseline_fallback": False,
+                    "num_steps": 800,
+                    "steady_state_wall_time_sec": 120.0,
+                    "runtime_visible_devices": ["0"],
+                    "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
+                }
+
+            argv = [
+                "--jump-motion",
+                str(jump_motion),
+                "--walk-motion",
+                str(walk_motion),
+                "--checkpoint",
+                str(checkpoint),
+                "--reward-weights",
+                str(reward_weights),
+                "--output-dir",
+                str(output_root),
+            ]
+            with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"}):
+                with mock.patch.object(runner, "validate_visible_gpu_is_idle", return_value=()):
+                    with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                        exit_code = runner.main(argv)
+
+            manifest = json.loads((output_root / "baseline_manifest.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("baseline_gate_failures", manifest)
+        self.assertNotIn("baseline_envelopes", manifest)
 
     def test_main_resolves_checkpoint_directory_to_file_in_manifest(self) -> None:
         import torch

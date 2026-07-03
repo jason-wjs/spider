@@ -63,6 +63,8 @@ FORMAL_STAGE0_ARG_VALUES = {
     "--motion-type": "isaaclab",
     "--method": "g1_wbc_joint_global",
     "--mpc-backend": "mujoco_warp",
+    "--mpc-optimizer": "legacy",
+    "--mpc-preset": "aggressive",
     "--max-steps": "800",
     "--mpc-samples": "512",
     "--mpc-iterations": "2",
@@ -77,6 +79,14 @@ FORMAL_STAGE0_ARG_VALUES = {
     "--mpc-smooth-passes": "0",
     "--mpc-command-reg-weight": "0.0",
     "--mpc-command-smooth-weight": "0.0",
+    "--mpc-guided-root-pos-gain": "0.50",
+    "--mpc-guided-root-rot-gain": "0.50",
+    "--mpc-guided-joint-gain": "0.50",
+    "--mpc-guided-root-pos-clip": "0.05",
+    "--mpc-guided-root-rot-clip": "0.12",
+    "--mpc-guided-joint-clip": "0.35",
+    "--nconmax-per-env": "512",
+    "--njmax-per-env": "2048",
 }
 FORMAL_STAGE0_FLAGS = (
     "--save-rollout",
@@ -866,6 +876,7 @@ def _mjx_argv_from_baseline_row(
     argv = list(row["argv"])
     argv[0] = str(python_executable)
     argv = _set_arg(argv, "--mpc-backend", "mjx")
+    argv = _set_arg(argv, "--mpc-optimizer", "generic")
     argv = _set_arg(argv, "--output-dir", str(output_dir))
     argv = _set_arg(argv, "--device", str(device))
     if "--mjx-enable-scan" not in argv:
@@ -1865,6 +1876,8 @@ def _artifact_freshness_failures(
     for row in rows:
         start_ns = _safe_int(row.get("command_start_time_ns"))
         if start_ns is None:
+            if _requires_freshness_evidence(row):
+                failures.extend(f"{key}_stale" for key in artifact_fields)
             continue
         mtimes = row.get("artifact_mtime_ns", {})
         if not isinstance(mtimes, dict):
@@ -1872,10 +1885,16 @@ def _artifact_freshness_failures(
         for key in artifact_fields:
             mtime_ns = _safe_int(mtimes.get(key))
             if mtime_ns is None:
+                if _requires_freshness_evidence(row):
+                    failures.append(f"{key}_stale")
                 continue
             if int(mtime_ns) + ARTIFACT_FRESHNESS_TOLERANCE_NS < int(start_ns):
                 failures.append(f"{key}_stale")
     return _unique(failures)
+
+
+def _requires_freshness_evidence(row: dict[str, Any]) -> bool:
+    return bool(row.get("reused_existing")) or row.get("motion_name") in MOTIONS
 
 
 def _artifact_hash_failures(
