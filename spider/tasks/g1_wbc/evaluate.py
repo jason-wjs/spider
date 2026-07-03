@@ -47,7 +47,6 @@ LEGACY_ONLY_MPC_FLAGS = {
     "mpc_elite_frac": "--mpc-elite-frac",
     "mpc_sigma_decay": "--mpc-sigma-decay",
     "mpc_smooth_passes": "--mpc-smooth-passes",
-    "mpc_warm_start": "--mpc-warm-start/--no-mpc-warm-start",
     "mpc_warm_start_source": "--mpc-warm-start-source",
     "mpc_warm_start_decay": "--mpc-warm-start-decay",
     "mpc_command_reg_weight": "--mpc-command-reg-weight",
@@ -622,6 +621,7 @@ def _build_sampling_config(args: argparse.Namespace) -> Config:
     last_ctrl_noise_scale = (
         1.0 if args.mpc_last_ctrl_noise_scale is None else float(args.mpc_last_ctrl_noise_scale)
     )
+    use_warm_start = True if args.mpc_warm_start is None else bool(args.mpc_warm_start)
     return build_g1_wbc_sampling_config(
         device=args.device,
         num_samples=int(args.mpc_samples),
@@ -640,6 +640,7 @@ def _build_sampling_config(args: argparse.Namespace) -> Config:
         final_noise_scale=final_noise_scale,
         use_torch_compile=bool(args.mpc_torch_compile),
         seed=int(args.seed),
+        use_warm_start=use_warm_start,
     )
 
 

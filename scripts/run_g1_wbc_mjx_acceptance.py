@@ -133,8 +133,6 @@ LEGACY_ONLY_MJX_DROP_FLAGS = (
     "--no-mpc-guided-candidate",
     "--mpc-acceptance-gate",
     "--no-mpc-acceptance-gate",
-    "--mpc-warm-start",
-    "--no-mpc-warm-start",
 )
 MJX_CONTACT_SATURATION_FIELDS = (
     "contact_saturated",

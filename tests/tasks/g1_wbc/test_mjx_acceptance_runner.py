@@ -442,12 +442,13 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "--mpc-command-smooth-weight",
                     "--mpc-guided-candidate",
                     "--mpc-acceptance-gate",
-                    "--no-mpc-warm-start",
                     "--mpc-warm-start-source",
                     "--mpc-warm-start-decay",
                 ):
                     self.assertNotIn(flag, item.mjx_argv)
                     self.assertNotIn(flag, item.replay_argv)
+                self.assertIn("--no-mpc-warm-start", item.mjx_argv)
+                self.assertIn("--no-mpc-warm-start", item.replay_argv)
                 replay_backend_idx = item.replay_argv.index("--mpc-backend")
                 self.assertEqual(item.replay_argv[replay_backend_idx + 1], "mujoco_warp")
                 self.assertNotIn("--mjx-enable-scan", item.replay_argv)

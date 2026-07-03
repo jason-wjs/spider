@@ -88,6 +88,7 @@ def sampling_mpc_metadata(config: Config) -> dict[str, Any]:
         "first_ctrl_noise_scale": float(config.first_ctrl_noise_scale),
         "last_ctrl_noise_scale": float(config.last_ctrl_noise_scale),
         "final_noise_scale": float(config.final_noise_scale),
+        "use_warm_start": bool(getattr(config, "use_warm_start", True)),
         "beta_traj": float(config.beta_traj),
         "root_pos_sigma": float(config.pos_noise_scale),
         "root_rot_sigma": float(config.rot_noise_scale),
@@ -133,13 +134,16 @@ def run_receding_horizon(
         infos.append(info)
 
         sim_step += execute_steps
-        prev_controls = controls[execute_steps:]
-        tail_steps = int(config.horizon_steps) - int(prev_controls.shape[0])
-        if tail_steps > 0:
-            tail = make_tail_controls(sim_step, tail_steps)
-            controls = torch.cat([prev_controls, tail], dim=0)
+        if bool(getattr(config, "use_warm_start", True)):
+            prev_controls = controls[execute_steps:]
+            tail_steps = int(config.horizon_steps) - int(prev_controls.shape[0])
+            if tail_steps > 0:
+                tail = make_tail_controls(sim_step, tail_steps)
+                controls = torch.cat([prev_controls, tail], dim=0)
+            else:
+                controls = prev_controls[: int(config.horizon_steps)]
         else:
-            controls = prev_controls[: int(config.horizon_steps)]
+            controls = make_tail_controls(sim_step, int(config.horizon_steps))
 
     return RecedingHorizonResult(
         controls=controls,

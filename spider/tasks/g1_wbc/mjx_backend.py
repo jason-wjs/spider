@@ -91,6 +91,7 @@ def run_g1_wbc_mjx_mpc(
     total_steps = int(total_steps)
     horizon = int(spider_config.horizon_steps)
     control_steps = int(spider_config.ctrl_steps)
+    use_warm_start = bool(getattr(spider_config, "use_warm_start", True))
     window_config = _window_config_from_spider(spider_config)
     use_jax_controls = optimizer is optimize_window and _supports_jax_controls(runtime)
     controls = (
@@ -212,6 +213,7 @@ def run_g1_wbc_mjx_mpc(
                 controls,
                 execute_steps=execute_steps,
                 horizon=horizon,
+                use_warm_start=use_warm_start,
                 runtime=runtime,
             )
             if use_jax_controls
@@ -219,6 +221,7 @@ def run_g1_wbc_mjx_mpc(
                 controls,
                 execute_steps=execute_steps,
                 horizon=horizon,
+                use_warm_start=use_warm_start,
                 device=device,
             )
         )
@@ -276,6 +279,7 @@ def run_g1_wbc_mjx_mpc(
             "num_windows": len(infos),
             "planning_horizon_steps": horizon,
             "control_steps": control_steps,
+            "use_warm_start": use_warm_start,
             "compile_init_wall_time_sec": compile_init_wall_time_sec,
             "jit_warmup_enabled": jit_warmup_enabled,
             "jit_warmup_wall_time_sec": jit_warmup_wall_time_sec,
@@ -782,8 +786,16 @@ def _shift_controls(
     *,
     execute_steps: int,
     horizon: int,
+    use_warm_start: bool,
     device: torch.device,
 ) -> torch.Tensor:
+    if not use_warm_start:
+        return torch.zeros(
+            int(horizon),
+            QPOS_DIM - 1,
+            dtype=controls.dtype,
+            device=device,
+        )
     previous = controls[int(execute_steps) :]
     tail_steps = int(horizon) - int(previous.shape[0])
     if tail_steps > 0:
@@ -804,9 +816,12 @@ def _shift_jax_controls(
     *,
     execute_steps: int,
     horizon: int,
+    use_warm_start: bool,
     runtime,
 ):
     jnp = runtime.jnp
+    if not use_warm_start:
+        return jnp.zeros((int(horizon), QPOS_DIM - 1))
     previous = controls[int(execute_steps) :]
     tail_steps = int(horizon) - int(previous.shape[0])
     if tail_steps > 0:

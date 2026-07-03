@@ -818,6 +818,33 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(captured[1][20:, 0], torch.zeros(20)))
 
+    def test_mjx_backend_can_disable_warm_start_shift(self) -> None:
+        captured: list[torch.Tensor] = []
+        spider_config = _spider_config()
+        spider_config.use_warm_start = False
+
+        def optimizer(**kwargs):
+            controls = kwargs["controls"].detach().clone()
+            captured.append(controls)
+            updated = torch.zeros_like(controls)
+            updated[:, 0] = torch.arange(controls.shape[0], dtype=torch.float32)
+            chunk = torch.zeros(21, QPOS_DIM - 1)
+            chunk[:, 0] = 0.25
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25), "accepted": True},
+            )
+
+        _run_with_fakes(
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+            spider_config=spider_config,
+        )
+
+        self.assertGreaterEqual(len(captured), 2)
+        self.assertTrue(torch.allclose(captured[1][:, 0], torch.zeros(40)))
+
     def test_mjx_backend_accepts_jax_optimizer_arrays(self) -> None:
         try:
             import jax.numpy as jnp
@@ -929,6 +956,7 @@ def _run_with_fakes(
     *,
     optimizer,
     rollout_factory,
+    spider_config=None,
     runtime=None,
     rollout_scorer=None,
     rollout_reference_factory=None,
@@ -943,7 +971,7 @@ def _run_with_fakes(
     if rollout_reference_factory is not None:
         kwargs["rollout_reference_factory"] = rollout_reference_factory
     return run_g1_wbc_mjx_mpc(
-        spider_config=_spider_config(),
+        spider_config=spider_config or _spider_config(),
         motion=_motion(),
         actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
         rollout_config=SimpleNamespace(device="cpu", max_steps=800),
