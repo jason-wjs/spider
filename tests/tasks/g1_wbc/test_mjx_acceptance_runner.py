@@ -40,6 +40,16 @@ def _baseline_manifest(tmp_path: Path) -> Path:
         for seed in (0, 1, 2):
             output_dir = tmp_path / "baseline" / motion / f"seed_{seed}"
             _write_artifacts(output_dir)
+            metrics = _metrics(success=True)
+            (output_dir / "metrics.json").write_text(
+                json.dumps(
+                    _baseline_metrics_payload(
+                        motion=str(motion_path),
+                        checkpoint=str(checkpoint),
+                        metrics=metrics,
+                    )
+                )
+            )
             artifact_mtime_ns = {
                 "metrics_json": (output_dir / "metrics.json").stat().st_mtime_ns,
                 "rollout_npz": (output_dir / "rollout.npz").stat().st_mtime_ns,
@@ -127,7 +137,7 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                     ],
                     "status": "ok",
                     "returncode": 0,
-                    "metrics": _metrics(success=True),
+                    "metrics": metrics,
                     "mpc_accepted": True,
                     "accepted_windows": 40,
                     "mpc_used_baseline_fallback": False,
@@ -285,6 +295,34 @@ def _metrics(*, success: bool) -> dict[str, float | bool]:
         "control_delta_mean": 0.01,
         "joint_acc_mean": 1.0,
         "joint_jerk_mean": 1.0,
+    }
+
+
+def _baseline_metrics_payload(
+    *,
+    motion: str,
+    checkpoint: str,
+    metrics: dict[str, float | bool],
+    accepted: bool = True,
+) -> dict[str, object]:
+    return {
+        "method": "g1_wbc_joint_global",
+        "motion": motion,
+        "device": "cuda:0",
+        "checkpoint": checkpoint,
+        "max_steps": 800,
+        "metrics": metrics,
+        "mpc": {
+            "mpc_backend": "mujoco_warp",
+            "mpc_optimizer": "legacy",
+            "accepted": accepted,
+            "accepted_windows": 40,
+            "num_windows": 40,
+            "used_baseline_fallback": False,
+            "steady_state_wall_time_sec": 120.0,
+            "runtime_visible_devices": ["0"],
+            "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
+        },
     }
 
 
@@ -572,6 +610,41 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "formal Stage 0 sweetpoint"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_baseline_metrics_artifact_mismatch(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            row = manifest["rows"][0]
+            metrics_path = Path(row["artifacts"]["metrics_json"])
+            bad_metrics = dict(row["metrics"])
+            bad_metrics["success"] = False
+            metrics_path.write_text(
+                json.dumps(
+                    _baseline_metrics_payload(
+                        motion=row["motion"],
+                        checkpoint=row["argv"][row["argv"].index("--checkpoint") + 1],
+                        metrics=bad_metrics,
+                        accepted=False,
+                    )
+                )
+            )
+            row["artifact_mtime_ns"]["metrics_json"] = metrics_path.stat().st_mtime_ns
+            row["artifact_sha256"]["metrics_json"] = _file_sha256(metrics_path)
+            manifest_path.write_text(json.dumps(manifest))
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "baseline_metrics_artifact"):
                 runner.build_acceptance_plan(args, manifest)
 
     def test_run_command_records_wall_time_for_replay_gate(self) -> None:

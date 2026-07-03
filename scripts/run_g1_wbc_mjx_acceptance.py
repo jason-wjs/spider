@@ -882,6 +882,8 @@ def _formal_stage0_row_failures(
     if not _same_path(_argv_value(argv, "--output-dir"), row.get("output_dir")):
         failures.append("--output-dir")
 
+    failures.extend(_baseline_metrics_artifact_failures(row, argv=argv))
+
     motion_path = _argv_value(argv, "--motion")
     if not _is_existing_file(motion_path):
         failures.append("motion_file")
@@ -894,6 +896,100 @@ def _formal_stage0_row_failures(
     if row.get("motion_name") != motion:
         failures.append("motion_name")
     return failures
+
+
+def _baseline_metrics_artifact_failures(
+    row: dict[str, Any],
+    *,
+    argv: list[str],
+) -> list[str]:
+    artifacts = row.get("artifacts")
+    metrics_path = artifacts.get("metrics_json") if isinstance(artifacts, dict) else None
+    if not isinstance(metrics_path, str):
+        return ["baseline_metrics_artifact"]
+    path = Path(metrics_path).expanduser()
+    if not path.is_file():
+        return ["baseline_metrics_artifact"]
+    try:
+        payload = json.loads(path.read_text())
+        parsed = _row_from_metrics(path)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, OverflowError):
+        return ["baseline_metrics_artifact"]
+    if not isinstance(payload, dict):
+        return ["baseline_metrics_artifact"]
+    if not _baseline_metrics_artifact_matches(row, argv=argv, payload=payload, parsed=parsed):
+        return ["baseline_metrics_artifact"]
+    return []
+
+
+def _baseline_metrics_artifact_matches(
+    row: dict[str, Any],
+    *,
+    argv: list[str],
+    payload: dict[str, Any],
+    parsed: dict[str, Any],
+) -> bool:
+    if not _metric_dicts_equivalent(parsed.get("metrics"), row.get("metrics")):
+        return False
+    if parsed.get("mpc_accepted") is not row.get("mpc_accepted"):
+        return False
+    if _safe_int(parsed.get("accepted_windows")) != _safe_int(row.get("accepted_windows")):
+        return False
+    if parsed.get("mpc_used_baseline_fallback") is not row.get(
+        "mpc_used_baseline_fallback"
+    ):
+        return False
+    if _safe_int(parsed.get("num_steps")) != _safe_int(row.get("num_steps")):
+        return False
+    if not _same_path(payload.get("motion"), _argv_value(argv, "--motion")):
+        return False
+    if not _same_path(payload.get("checkpoint"), _argv_value(argv, "--checkpoint")):
+        return False
+    if payload.get("method") != _argv_value(argv, "--method"):
+        return False
+    if payload.get("device") != _argv_value(argv, "--device"):
+        return False
+    if _safe_int(payload.get("max_steps")) != _safe_int(_argv_value(argv, "--max-steps")):
+        return False
+    mpc = parsed.get("mpc")
+    if not isinstance(mpc, dict):
+        return False
+    if mpc.get("mpc_backend") != _argv_value(argv, "--mpc-backend"):
+        return False
+    if mpc.get("mpc_optimizer") != _argv_value(argv, "--mpc-optimizer"):
+        return False
+    row_timing = row.get("steady_state_wall_time_sec")
+    if row_timing is not None and not _numeric_values_equivalent(
+        parsed.get("steady_state_wall_time_sec"),
+        row_timing,
+    ):
+        return False
+    return True
+
+
+def _metric_dicts_equivalent(left: Any, right: Any) -> bool:
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    if set(left) != set(right):
+        return False
+    return all(_metric_values_equivalent(left[key], right[key]) for key in left)
+
+
+def _metric_values_equivalent(left: Any, right: Any) -> bool:
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left is right
+    return _numeric_values_equivalent(left, right)
+
+
+def _numeric_values_equivalent(left: Any, right: Any) -> bool:
+    if (
+        isinstance(left, bool)
+        or isinstance(right, bool)
+        or not isinstance(left, (int, float))
+        or not isinstance(right, (int, float))
+    ):
+        return False
+    return math.isclose(float(left), float(right), rel_tol=1e-12, abs_tol=1e-12)
 
 
 def _mjx_argv_from_baseline_row(
