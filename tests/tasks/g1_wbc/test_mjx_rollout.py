@@ -1149,6 +1149,65 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertEqual(scores.shape, (2,))
         self.assertEqual(lax.calls, [{"steps": 3}])
 
+    def test_lax_scan_carries_contact_force_delta_after_first_step(self) -> None:
+        samples = np.zeros((1, 2, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=2)
+        reference["score_weights"] = JaxScoreWeights({"contact_force_delta": 1.0})
+        contact_forces = np.array(
+            [[[0.0, 0.0]], [[300.0, 400.0]]],
+            dtype=np.float32,
+        )
+        lax = _RecordingLax()
+        runtime = type(
+            "ScanRuntime",
+            (),
+            {
+                "jnp": _NumpyJnp(),
+                "jax": type("ScanJax", (), {"lax": lax})(),
+            },
+        )()
+
+        def force_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            next_robot, score_state = _physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+            score_state = dict(score_state)
+            score_state["contact_force"] = contact_forces[int(step_index)]
+            return next_robot, score_state
+
+        metrics = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=force_step,
+            return_metrics=True,
+        )
+
+        expected = (np.linalg.norm(np.array([300.0, 400.0], dtype=np.float32)) / 300.0)
+        expected /= 2.0
+        np.testing.assert_allclose(
+            metrics["contact_force_delta_mean"],
+            [expected],
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(metrics["score"], [-expected], rtol=1e-6)
+        self.assertEqual(lax.calls, [{"steps": 2}])
+
     def test_lax_scan_carry_keeps_base_ang_vel_structure_stable(self) -> None:
         samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
         reference = _rollout_reference(samples=2, horizon=3)
