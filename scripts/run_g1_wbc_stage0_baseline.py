@@ -142,6 +142,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Write the manifest without running evaluate.py.",
     )
+    parser.add_argument(
+        "--reuse-existing-ok",
+        action="store_true",
+        help=(
+            "Reuse existing completed row artifacts in output-dir instead of "
+            "rerunning that row. Incomplete or failed rows are rerun."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -447,6 +455,123 @@ def run_command(command: Stage0Command) -> dict[str, Any]:
     return row
 
 
+def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
+    """Return reusable row execution metadata when all row artifacts are complete."""
+
+    output_dir = Path(command.output_dir)
+    metrics_path = output_dir / "metrics.json"
+    rollout_path = output_dir / "rollout.npz"
+    command_path = output_dir / "mpc_command.npz"
+    if not (
+        metrics_path.is_file()
+        and rollout_path.is_file()
+        and command_path.is_file()
+    ):
+        return None
+    try:
+        payload = json.loads(metrics_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    metrics = payload.get("metrics")
+    mpc = payload.get("mpc")
+    if not isinstance(metrics, dict) or not isinstance(mpc, dict):
+        return None
+    if not _existing_row_provenance_matches(command, payload):
+        return None
+    try:
+        num_steps = int(metrics.get("num_steps", -1))
+        accepted_windows = int(mpc.get("accepted_windows", mpc.get("num_windows", -1)))
+    except (TypeError, ValueError):
+        return None
+    if num_steps != 800:
+        return None
+    if not bool(mpc.get("accepted", True)):
+        return None
+    if accepted_windows != 40:
+        return None
+    if bool(mpc.get("used_baseline_fallback", False)):
+        return None
+
+    row: dict[str, Any] = {
+        "returncode": 0,
+        "stdout": None,
+        "stderr": None,
+        "metrics": metrics,
+        "mpc_accepted": True,
+        "accepted_windows": accepted_windows,
+        "mpc_used_baseline_fallback": False,
+        "num_steps": num_steps,
+        "reused_existing": True,
+    }
+    if isinstance(mpc.get("steady_state_wall_time_sec"), (int, float)):
+        row["steady_state_wall_time_sec"] = float(mpc["steady_state_wall_time_sec"])
+    if isinstance(mpc.get("runtime_visible_devices"), list):
+        row["runtime_visible_devices"] = [
+            str(value)
+            for value in mpc["runtime_visible_devices"]
+        ]
+    if isinstance(mpc.get("runtime_gpu_name"), str):
+        row["runtime_gpu_name"] = mpc["runtime_gpu_name"]
+    return row
+
+
+def _existing_row_provenance_matches(
+    command: Stage0Command,
+    payload: dict[str, Any],
+) -> bool:
+    """Return whether an existing metrics payload belongs to this command."""
+
+    expected = _command_expected_provenance(command)
+    for key in ("motion", "checkpoint", "method"):
+        value = expected.get(key)
+        if value is None:
+            continue
+        actual = payload.get(key)
+        if actual is None:
+            return False
+        if str(actual) != str(value):
+            return False
+    mpc = payload.get("mpc", {})
+    if not isinstance(mpc, dict):
+        return False
+    for key in ("mpc_backend", "mpc_optimizer"):
+        value = expected.get(key)
+        if value is None:
+            continue
+        actual = mpc.get(key)
+        if actual is None or str(actual) != str(value):
+            return False
+    return True
+
+
+def _command_expected_provenance(command: Stage0Command) -> dict[str, str]:
+    """Extract metrics provenance fields expected from an evaluate.py command."""
+
+    values = {
+        "motion": command.motion,
+        "checkpoint": _argv_value(command.argv, "--checkpoint"),
+        "method": _argv_value(command.argv, "--method"),
+        "mpc_backend": _argv_value(command.argv, "--mpc-backend"),
+        "mpc_optimizer": _argv_value(command.argv, "--mpc-optimizer"),
+    }
+    return {
+        key: str(value)
+        for key, value in values.items()
+        if value is not None
+    }
+
+
+def _argv_value(argv: list[str], flag: str) -> str | None:
+    try:
+        index = argv.index(flag)
+    except ValueError:
+        return None
+    value_index = index + 1
+    if value_index >= len(argv):
+        return None
+    return str(argv[value_index])
+
+
 def write_manifest(
     output_dir: Path,
     rows: list[dict[str, Any]],
@@ -533,7 +658,13 @@ def main(argv: list[str] | None = None) -> int:
             row.update({"status": "dry_run", "returncode": None, "stdout": None, "stderr": None})
         else:
             Path(command.output_dir).mkdir(parents=True, exist_ok=True)
-            execution = run_command(command)
+            execution = (
+                load_existing_ok_row(command)
+                if args.reuse_existing_ok
+                else None
+            )
+            if execution is None:
+                execution = run_command(command)
             row.update(execution)
             row["status"] = "ok" if execution["returncode"] == 0 else "failed"
             if execution["returncode"] != 0 and worst_returncode == 0:

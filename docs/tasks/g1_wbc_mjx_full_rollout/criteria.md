@@ -136,6 +136,12 @@ file path and hash are not sufficient evidence: the input set is formal only
 after the real `baseline_manifest.json` contains passing `baseline_envelopes`
 and `promoted_seeds`.
 
+Interrupted Stage0 runs may be resumed with `--reuse-existing-ok`, but only for
+rows whose existing `metrics.json`, `rollout.npz`, and `mpc_command.npz` are
+present, report `800` steps, `40` accepted windows, no baseline fallback, and
+match the current command provenance for motion, checkpoint, method, backend,
+and optimizer. Incomplete or provenance-mismatched rows must be rerun.
+
 Historical sweetpoint evidence available in `wbc_results` comes from the
 versioned testbed motion set now stored under
 `wbc_results/assets/motion_data/{jump,walk}/motion.npz` and from the

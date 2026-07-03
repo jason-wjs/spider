@@ -441,6 +441,134 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertEqual(row["runtime_gpu_name"], "NVIDIA H100 80GB HBM3")
         self.assertIsInstance(row["command_start_time_ns"], int)
 
+    def test_main_reuses_existing_ok_rows_when_requested(self) -> None:
+        import torch
+
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, reward_weights):
+                path.write_text("{}")
+            torch.save(
+                {
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": torch.zeros(1, 886),
+                        "obs_normalizer._std": torch.ones(1, 886),
+                        "mlp.0.weight": torch.zeros(1, 1),
+                    }
+                },
+                checkpoint,
+            )
+            argv = [
+                "--jump-motion",
+                str(jump_motion),
+                "--walk-motion",
+                str(walk_motion),
+                "--checkpoint",
+                str(checkpoint),
+                "--reward-weights",
+                str(reward_weights),
+                "--output-dir",
+                str(output_root),
+                "--reuse-existing-ok",
+            ]
+            parsed = runner.parse_args(argv)
+            for command in runner.build_stage0_commands(parsed):
+                output_dir = Path(command.output_dir)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "metrics.json").write_text(
+                    json.dumps(
+                        {
+                            "motion": command.motion,
+                            "checkpoint": command.argv[command.argv.index("--checkpoint") + 1],
+                            "method": "g1_wbc_joint_global",
+                            "metrics": _passing_metrics(),
+                            "mpc": {
+                                "mpc_backend": "mujoco_warp",
+                                "mpc_optimizer": "legacy",
+                                "accepted": True,
+                                "accepted_windows": 40,
+                                "used_baseline_fallback": False,
+                                "steady_state_wall_time_sec": 120.0,
+                                "runtime_visible_devices": ["0"],
+                                "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
+                            },
+                        }
+                    )
+                )
+                (output_dir / "rollout.npz").write_text("{}")
+                (output_dir / "mpc_command.npz").write_text("{}")
+
+            with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"}):
+                with mock.patch.object(runner, "validate_visible_gpu_is_idle", return_value=()):
+                    with mock.patch.object(
+                        runner,
+                        "run_command",
+                        side_effect=AssertionError("run_command should not be called"),
+                    ):
+                        exit_code = runner.main(argv)
+
+            manifest = json.loads((output_root / "baseline_manifest.json").read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual({row["status"] for row in manifest["rows"]}, {"ok"})
+        self.assertTrue(all(row["reused_existing"] for row in manifest["rows"]))
+        self.assertEqual(set(manifest["baseline_envelopes"]), {"jump", "walk"})
+        self.assertEqual(manifest["promoted_seeds"], {"jump": 0, "walk": 0})
+
+    def test_existing_row_reuse_rejects_mismatched_metrics_provenance(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            command = runner.Stage0Command(
+                motion_name="jump",
+                motion="/tmp/formal_jump.npz",
+                seed=0,
+                output_dir=str(output_dir),
+                argv=[
+                    "python",
+                    "-m",
+                    "spider.tasks.g1_wbc.evaluate",
+                    "--motion",
+                    "/tmp/formal_jump.npz",
+                    "--checkpoint",
+                    "/tmp/model.pt",
+                    "--method",
+                    "g1_wbc_joint_global",
+                    "--mpc-backend",
+                    "mujoco_warp",
+                    "--mpc-optimizer",
+                    "legacy",
+                ],
+                command_text="python -m spider.tasks.g1_wbc.evaluate",
+            )
+            (output_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "motion": "/tmp/stale_jump.npz",
+                        "checkpoint": "/tmp/model.pt",
+                        "method": "g1_wbc_joint_global",
+                        "metrics": _passing_metrics(),
+                        "mpc": {
+                            "accepted": True,
+                            "accepted_windows": 40,
+                            "used_baseline_fallback": False,
+                        },
+                    }
+                )
+            )
+            (output_dir / "rollout.npz").write_text("{}")
+            (output_dir / "mpc_command.npz").write_text("{}")
+
+            row = runner.load_existing_ok_row(command)
+
+        self.assertIsNone(row)
+
     def test_main_writes_ok_status_for_successful_real_run(self) -> None:
         import torch
 
