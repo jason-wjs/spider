@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -244,11 +245,15 @@ def run_g1_wbc_sampling_mpc(
 ) -> G1WbcMpcRun:
     """Run G1 WBC through SPIDER's generic sampled receding-horizon MPC."""
 
+    _synchronize_torch_device(config)
+    steady_start = time.perf_counter()
     receding = run_sampling_receding_mpc(
         config,
         task,
         total_steps=int(total_steps),
     )
+    _synchronize_torch_device(config)
+    steady_state_wall_time_sec = time.perf_counter() - steady_start
     result = task.build_result(
         receding.controls,
         receding.infos,
@@ -257,8 +262,20 @@ def run_g1_wbc_sampling_mpc(
     return G1WbcMpcRun(
         receding=receding,
         result=result,
-        metadata=sampling_mpc_metadata(config),
+        metadata={
+            **sampling_mpc_metadata(config),
+            "steady_state_wall_time_sec": steady_state_wall_time_sec,
+        },
     )
+
+
+def _synchronize_torch_device(config: Config) -> None:
+    device = getattr(config, "device", None)
+    if device is None:
+        return
+    torch_device = torch.device(device)
+    if torch_device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(torch_device)
 
 
 class G1WbcSamplingTask:

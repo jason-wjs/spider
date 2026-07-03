@@ -79,6 +79,36 @@ explicitly and record the exact configuration.
 The historical `8192/h80` baseline is a quality reference, not the speed
 denominator for this migration.
 
+Concrete local inputs verified for this worktree on 2026-07-03:
+
+```text
+jump_motion: /data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz
+walk_motion: /data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz
+checkpoint: /data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt
+reward_weights: /data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json
+```
+
+The checkpoint is an RSL-RL training package whose `actor_state_dict` contains
+`obs_normalizer.*` and `mlp.*` keys, so it is compatible with the current WBC
+MLP policy loader. Formal Stage 0 runs in this worktree should pass these paths
+explicitly instead of relying on the runner defaults, because the old packaged
+testbed path is not present in this worktree. The same reward-weight file also
+exists under the `2026-06-17-testbed-motion-baselines-xwj` artifact directory
+with the same contents, but the `2026-06-23` path is the preferred explicit
+formal input because it is the one referenced by current sweetpoint commands.
+
+Verified dry-run command:
+
+```bash
+PYTHONPATH=. ./.venv/bin/python scripts/run_g1_wbc_stage0_baseline.py \
+  --jump-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz \
+  --walk-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz \
+  --checkpoint /data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt \
+  --reward-weights /data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json \
+  --output-dir /tmp/g1_wbc_stage0_formal_inputs_dryrun \
+  --dry-run
+```
+
 ## Baseline Manifest Requirements
 
 Before any MJX result can be evaluated, Stage 0 must create a baseline manifest
@@ -105,6 +135,11 @@ Required fields:
 - fallback status
 - contact capacity/saturation diagnostics if available
 
+All manifest artifact paths must resolve to existing files at acceptance time.
+The MJX acceptance runner treats a missing baseline `metrics.json`,
+`rollout.npz`, or `mpc_command.npz` as an invalid benchmark even if the manifest
+contains otherwise valid metric fields.
+
 The manifest must contain at least three repeated runs per hard-gate motion,
 using seeds `0`, `1`, and `2`, unless a historical artifact is explicitly
 declared as the only available baseline. Historical single-run artifacts may be
@@ -125,7 +160,8 @@ Each baseline repeat must satisfy:
 - `accepted_windows=40`
 - `mpc_used_baseline_fallback=false`
 - no NaN or Inf in primary metrics
-- output contains `metrics.json`, `rollout.npz`, and `mpc_command.npz`
+- output contains `metrics.json`, `rollout.npz`, and `mpc_command.npz`, and
+  the manifest paths for those artifacts still exist as files
 
 The baseline group must satisfy:
 
@@ -394,4 +430,3 @@ The result fails regardless of average score if any of these occur:
 - has contact capacity saturation
 - has fewer than `800` rollout steps on a hard-gate motion
 - lacks enough metadata to reproduce the benchmark
-

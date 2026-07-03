@@ -219,6 +219,8 @@ def run_command(command: Stage0Command) -> dict[str, Any]:
         row["accepted_windows"] = int(mpc.get("accepted_windows", mpc.get("num_windows", -1)))
         row["mpc_used_baseline_fallback"] = bool(mpc.get("used_baseline_fallback", False))
         row["num_steps"] = int(metrics.get("num_steps", -1))
+        if isinstance(mpc.get("steady_state_wall_time_sec"), (int, float)):
+            row["steady_state_wall_time_sec"] = float(mpc["steady_state_wall_time_sec"])
     return row
 
 

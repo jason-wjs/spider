@@ -162,6 +162,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                             "accepted": True,
                             "accepted_windows": 40,
                             "used_baseline_fallback": False,
+                            "steady_state_wall_time_sec": 123.45,
                         },
                     }
                 )
@@ -184,6 +185,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertEqual(row["accepted_windows"], 40)
         self.assertFalse(row["mpc_used_baseline_fallback"])
         self.assertEqual(row["num_steps"], 800)
+        self.assertEqual(row["steady_state_wall_time_sec"], 123.45)
 
     def test_main_writes_ok_status_for_successful_real_run(self) -> None:
         runner = load_runner()
@@ -210,6 +212,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                     "accepted_windows": 40,
                     "mpc_used_baseline_fallback": False,
                     "num_steps": 800,
+                    "steady_state_wall_time_sec": 120.0,
                 }
 
             argv = [
@@ -232,6 +235,10 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual({row["status"] for row in manifest["rows"]}, {"ok"})
         self.assertTrue(all(row["artifacts"]["metrics_json"] for row in manifest["rows"]))
+        self.assertEqual(
+            {row["steady_state_wall_time_sec"] for row in manifest["rows"]},
+            {120.0},
+        )
 
 
 if __name__ == "__main__":
