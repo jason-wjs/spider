@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -176,6 +177,30 @@ def validate_input_paths(args: argparse.Namespace) -> tuple[str, ...]:
     return tuple(missing)
 
 
+def validate_runtime_environment(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return runtime environment errors that would make formal Stage 0 invalid."""
+
+    if args.dry_run or not str(args.device).startswith("cuda"):
+        return ()
+    visible = tuple(
+        value.strip()
+        for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if value.strip()
+    )
+    errors: list[str] = []
+    if len(visible) != 1:
+        errors.append(
+            "single GPU visibility: CUDA_VISIBLE_DEVICES must contain exactly "
+            f"one GPU for real Stage0 CUDA runs; got {visible or '<unset>'}"
+        )
+    if str(args.device) not in {"cuda", "cuda:0"}:
+        errors.append(
+            "single GPU visibility: use --device cuda:0 after narrowing "
+            f"CUDA_VISIBLE_DEVICES to one GPU; got {args.device}"
+        )
+    return tuple(errors)
+
+
 def attach_artifact_paths(row: dict[str, Any]) -> dict[str, Any]:
     """Attach known evaluate.py artifact paths, using None for missing files."""
 
@@ -258,6 +283,11 @@ def main(argv: list[str] | None = None) -> int:
     if missing_inputs:
         for missing in missing_inputs:
             print(f"missing input: {missing}", file=sys.stderr)
+        return 2
+    runtime_errors = validate_runtime_environment(args)
+    if runtime_errors:
+        for error in runtime_errors:
+            print(f"invalid runtime: {error}", file=sys.stderr)
         return 2
     commands = build_stage0_commands(args)
     rows: list[dict[str, Any]] = []

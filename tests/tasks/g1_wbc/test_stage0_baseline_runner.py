@@ -112,6 +112,47 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertIn("missing input: jump motion", stderr.getvalue())
         self.assertFalse((output_root / "baseline_manifest.json").exists())
 
+    def test_main_fails_fast_when_real_cuda_run_has_multiple_visible_gpus(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, checkpoint, reward_weights):
+                path.write_text("{}")
+
+            stderr = io.StringIO()
+            with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0,1"}):
+                with redirect_stderr(stderr):
+                    with mock.patch.object(
+                        runner,
+                        "run_command",
+                        side_effect=AssertionError("run_command should not be called"),
+                    ):
+                        exit_code = runner.main(
+                            [
+                                "--jump-motion",
+                                str(jump_motion),
+                                "--walk-motion",
+                                str(walk_motion),
+                                "--checkpoint",
+                                str(checkpoint),
+                                "--reward-weights",
+                                str(reward_weights),
+                                "--output-dir",
+                                str(output_root),
+                                "--device",
+                                "cuda:0",
+                            ]
+                        )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("single GPU visibility", stderr.getvalue())
+        self.assertFalse((output_root / "baseline_manifest.json").exists())
+
     def test_build_stage0_commands_forwards_motion_type_override(self) -> None:
         runner = load_runner()
         args = runner.parse_args(
@@ -231,8 +272,9 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 "--output-dir",
                 str(output_root),
             ]
-            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
-                exit_code = runner.main(argv)
+            with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"}):
+                with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                    exit_code = runner.main(argv)
 
             manifest = json.loads((output_root / "baseline_manifest.json").read_text())
 

@@ -101,11 +101,14 @@ testbed path is not present in this worktree. The same reward-weight file also
 exists under the `2026-06-17-testbed-motion-baselines-xwj` artifact directory
 with the same contents, but the `2026-06-23` path is the preferred explicit
 formal input because it is the one referenced by current sweetpoint commands.
+Real CUDA Stage 0 runs must narrow `CUDA_VISIBLE_DEVICES` to exactly one GPU and
+use `--device cuda:0`; the runner fails fast otherwise because such a manifest
+cannot satisfy formal single-GPU hardware evidence.
 
 Verified dry-run command:
 
 ```bash
-PYTHONPATH=. ./.venv/bin/python scripts/run_g1_wbc_stage0_baseline.py \
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. ./.venv/bin/python scripts/run_g1_wbc_stage0_baseline.py \
   --jump-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz \
   --walk-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz \
   --checkpoint /data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt \
