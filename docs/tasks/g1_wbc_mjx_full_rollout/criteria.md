@@ -112,14 +112,46 @@ weights. Aliases such as `--checkpoint bc` are not formal acceptance inputs
 unless they have already been resolved to a concrete checkpoint file in the
 manifest rows.
 
-Concrete formal inputs verified in this worktree on 2026-07-03:
+The Stage0 motion inputs must be motions for which the current MuJoCo-Warp
+sweetpoint can actually pass the Stage0 baseline eligibility gates below. A
+file path and hash are not sufficient evidence: the input set is formal only
+after the real `baseline_manifest.json` contains passing `baseline_envelopes`
+and `promoted_seeds`.
 
-| Input | Required path | SHA256 |
+Historical sweetpoint evidence available in `wbc_results` comes from the
+packaged testbed motion set
+`g1_wbc_testbed_motion_package_20260617/input_motions/{jump,walk}/motion.npz`
+and from the single-motion `homejrhangmr` run recorded under
+`2026-06-26-homejrhangmr-three-way-wjs`. If those exact testbed input motions
+are unavailable in the current filesystem, they must be restored or replaced
+by a newly generated motion package that passes Stage0 before MJX acceptance
+can launch.
+
+Current input status in this worktree on 2026-07-03:
+
+| Input | Path | SHA256 | Status |
+| --- | --- | --- | --- |
+| WBC MLP checkpoint | `/data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt` | `98738b9214d12146dc7f4669cb65dfde9d835f4a133e5f2cbaef4e60b1e5b88f` | accepted checkpoint input |
+| reward weights | `/data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json` | `bb0490a71a27a29480f13ce77bc00c13a900845f0f52641b5ec20d51ebaa535d` | accepted reward input |
+| jump motion candidate | `/data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz` | `07b3b8e1bf9ba3f94dfbe552819cd792f81a06a3c4ff6e5029b55b2897b7c544` | rejected as Stage0 sweetpoint input until a full Stage0 manifest passes |
+| walk motion candidate | `/data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz` | `a9baaa714d61da19c6114077cf0c919c965ad6802f770cc83ed695396c4c8c9f` | rejected as Stage0 sweetpoint input until a full Stage0 manifest passes |
+
+The rejected motion candidates above are long `wbc_results/assets` motions, not
+the historical packaged testbed motions used to derive the current jump/walk
+sweetpoint quality gates. The 2026-07-03 diagnostic run
+`/data_team/junsong/model-based/g1_wbc_mjx_runs/stage0_baseline_wbc_mlp_20260703_h100_gpu1`
+completed `jump/seed_0` and `jump/seed_1`; those two rows alone made the jump
+group mathematically unable to pass (`root_pos_error_mean` of `0.567` and
+`0.134` versus the group mean cap `0.065`). See
+`docs/tasks/g1_wbc_mjx_full_rollout/stage0_input_diagnosis_20260703.md`.
+
+Historical single-motion sweetpoint reference:
+
+| Input | Path | SHA256 |
 | --- | --- | --- |
-| jump motion | `/data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz` | `07b3b8e1bf9ba3f94dfbe552819cd792f81a06a3c4ff6e5029b55b2897b7c544` |
-| walk motion | `/data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz` | `a9baaa714d61da19c6114077cf0c919c965ad6802f770cc83ed695396c4c8c9f` |
-| WBC MLP checkpoint | `/data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt` | `98738b9214d12146dc7f4669cb65dfde9d835f4a133e5f2cbaef4e60b1e5b88f` |
-| reward weights | `/data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json` | `bb0490a71a27a29480f13ce77bc00c13a900845f0f52641b5ec20d51ebaa535d` |
+| homejrhangmr motion | `/data_zcy/wxy/test_motion/homejrhangmr_dataset_pbhc_contact_maskACCADFemale1Walking_c3dB19-walktopickupbox_posespkl/motion.npz` | `1fa518f5b80b675e3a89ff8aad501e031b64cd7ab9c0b5a1a9e2cd36331ff829` |
+| sweetpoint rollout artifact | `/data_team/junsong/model-based/wbc_results/assets/results/2026-06-26-homejrhangmr-three-way-wjs/sweetpoint_rollout.npz` | indexed in `configs/rollout_index.json` |
+| sweetpoint command artifact | `/data_team/junsong/model-based/wbc_results/assets/results/2026-06-26-homejrhangmr-three-way-wjs/sweetpoint_mpc_command.npz` | indexed in `configs/rollout_index.json` |
 
 The checkpoint must be a WBC MLP actor checkpoint with `actor_state_dict`,
 `obs_normalizer.*`, and `mlp.*` weights. The user-provided SparseTrack
@@ -130,20 +162,21 @@ but it is not a valid Stage0 checkpoint for this WBC MLP runner until a separate
 SparseTrack Transformer policy/observation adapter exists.
 
 The raw `/data_team/zcy/motion_data/...` motions are allowed for loader and
-runtime smoke tests, but they are not byte-identical to the packaged formal
-`jump` and `walk` inputs above. They must not replace the formal inputs unless
-the Stage0 manifest explicitly records their paths and hashes.
+runtime smoke tests, but they are not byte-identical to the packaged testbed
+`jump` and `walk` motions from the historical baseline. They must not replace
+Stage0 inputs unless the Stage0 manifest explicitly records their paths and
+hashes and the resulting baseline passes the gates below.
 
 Verified Stage0 dry-run command:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. ./.venv/bin/python scripts/run_g1_wbc_stage0_baseline.py \
-  --jump-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz \
-  --walk-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz \
+  --jump-motion /ABS/PATH/TO/g1_wbc_testbed_motion_package_20260617/input_motions/jump/motion.npz \
+  --walk-motion /ABS/PATH/TO/g1_wbc_testbed_motion_package_20260617/input_motions/walk/motion.npz \
   --motion-type isaaclab \
   --checkpoint /data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt \
   --reward-weights /data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json \
-  --output-dir /data_team/junsong/model-based/g1_wbc_mjx_runs/stage0_dryrun_wbc_mlp_20260703 \
+  --output-dir /data_team/junsong/model-based/g1_wbc_mjx_runs/stage0_dryrun_testbed_wbc_mlp \
   --device cuda:0 \
   --dry-run
 ```
