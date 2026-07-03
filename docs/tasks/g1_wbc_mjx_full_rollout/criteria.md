@@ -492,6 +492,15 @@ Required class on success:
 The formal report is `acceptance_report.json` from
 `scripts/run_g1_wbc_mjx_acceptance.py`.
 
+Interrupted acceptance runs may resume with `--reuse-existing-ok`. During a
+real run the runner must write `acceptance_report.partial.json` after each
+completed MJX/replay pair. Reuse is valid only for rows from an existing final
+or partial report whose status is `ok`, whose command argv/text match the
+current plan, whose artifact hashes still match disk, and whose `metrics.json`
+provenance matches the planned method, motion, checkpoint, device, max steps,
+backend, optimizer or replay command source. Any incomplete, failed,
+hash-mismatched, schema-invalid, or provenance-mismatched row must be rerun.
+
 Required top-level sections:
 
 - baseline manifest path

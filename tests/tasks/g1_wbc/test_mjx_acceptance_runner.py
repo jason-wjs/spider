@@ -650,6 +650,88 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(len(report["planned_runs"]), 6)
         self.assertFalse(report["motion_results"]["jump"]["mjx_passed"])
 
+    def test_main_reuses_existing_ok_rows_when_requested(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            _write_reusable_acceptance_outputs(runner, plan, output_dir=output_dir)
+
+            with mock.patch.object(
+                runner,
+                "run_command",
+                side_effect=AssertionError("run_command should not be called"),
+            ):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--reuse-existing-ok",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(report["passed"])
+        self.assertTrue(all(row["reused_existing"] for row in report["mjx_rows"]))
+        self.assertTrue(all(row["reused_existing"] for row in report["replay_rows"]))
+
+    def test_existing_acceptance_row_reuse_rejects_mismatched_provenance(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            mjx_rows, _replay_rows = _write_reusable_acceptance_outputs(
+                runner,
+                plan,
+                output_dir=output_dir,
+            )
+            planned = plan[0]
+            (Path(planned.output_dir) / "metrics.json").write_text(
+                json.dumps(
+                    _mjx_metrics_payload(planned, motion="/tmp/stale_motion.npz")
+                )
+            )
+
+            row = runner.load_existing_acceptance_row(
+                planned,
+                kind="mjx",
+                existing_rows=mjx_rows,
+            )
+
+        self.assertIsNone(row)
+
     def test_main_fails_fast_when_real_cuda_run_has_multiple_visible_gpus(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2445,6 +2527,149 @@ def _write_artifacts(output_dir: Path, *, include_command: bool = True) -> None:
             output_dir / "mpc_command.npz",
             **_valid_command_arrays(),
         )
+
+
+def _write_reusable_acceptance_outputs(
+    runner,
+    plan,
+    *,
+    output_dir: Path,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    mjx_rows: list[dict[str, object]] = []
+    replay_rows: list[dict[str, object]] = []
+    for planned in plan:
+        mjx_output = Path(planned.output_dir)
+        replay_output = Path(planned.replay_output_dir)
+        _write_artifacts(mjx_output)
+        _write_artifacts(replay_output, include_command=False)
+
+        mjx_payload = _mjx_metrics_payload(planned)
+        (mjx_output / "metrics.json").write_text(json.dumps(mjx_payload))
+        mjx_mpc = mjx_payload["mpc"]
+        mjx_rows.append(
+            runner._attach_artifacts(
+                {
+                    **runner.asdict(planned),
+                    "status": "ok",
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "command_wall_time_sec": 11.0,
+                    "metrics": mjx_payload["metrics"],
+                    "mpc": mjx_mpc,
+                    "metrics_method": mjx_payload["method"],
+                    "metrics_motion": mjx_payload["motion"],
+                    "metrics_device": mjx_payload["device"],
+                    "mpc_accepted": True,
+                    "accepted_windows": 40,
+                    "mpc_used_baseline_fallback": False,
+                    "num_steps": 800,
+                    "compile_init_wall_time_sec": mjx_mpc["compile_init_wall_time_sec"],
+                    "jit_warmup_enabled": True,
+                    "jit_warmup_wall_time_sec": mjx_mpc["jit_warmup_wall_time_sec"],
+                    "runtime_visible_devices": ["0"],
+                    "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
+                    "steady_state_wall_time_sec": mjx_mpc["steady_state_wall_time_sec"],
+                    **_mjx_contact_evidence(),
+                },
+                planned.output_dir,
+            )
+        )
+
+        replay_payload = _replay_metrics_payload(planned)
+        (replay_output / "metrics.json").write_text(json.dumps(replay_payload))
+        replay_rows.append(
+            runner._attach_artifacts(
+                {
+                    **runner.asdict(planned),
+                    "status": "ok",
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "command_wall_time_sec": 12.0,
+                    "metrics": replay_payload["metrics"],
+                    "mpc": replay_payload["mpc"],
+                    "metrics_method": "replay_command",
+                    "metrics_motion": replay_payload["motion"],
+                    "metrics_device": replay_payload["device"],
+                    "num_steps": 800,
+                },
+                planned.replay_output_dir,
+            )
+        )
+
+    partial = {
+        "schema_version": 1,
+        "run_status": "interrupted",
+        "planned_runs": [runner.asdict(item) for item in plan],
+        "mjx_rows": mjx_rows,
+        "replay_rows": replay_rows,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "acceptance_report.partial.json").write_text(json.dumps(partial))
+    return mjx_rows, replay_rows
+
+
+def _mjx_metrics_payload(planned, *, motion: str | None = None) -> dict[str, object]:
+    if motion is None:
+        motion = str(
+            Path(planned.mjx_argv[planned.mjx_argv.index("--motion") + 1]).resolve()
+        )
+    return {
+        "method": "g1_wbc_joint_global",
+        "motion": motion,
+        "device": "cuda:0",
+        "checkpoint": planned.mjx_argv[planned.mjx_argv.index("--checkpoint") + 1],
+        "max_steps": 800,
+        "metrics": {
+            **_metrics(success=True),
+            "control_dt_sec": 0.02,
+            "evaluated_motion_duration_sec": 16.0,
+        },
+        "mpc": {
+            "backend": "mjx",
+            "mpc_backend": "mjx",
+            "mpc_optimizer": "generic",
+            "accepted": True,
+            "accepted_windows": 40,
+            "num_windows": 40,
+            "used_baseline_fallback": False,
+            "compile_init_wall_time_sec": 2.0,
+            "jit_warmup_enabled": True,
+            "jit_warmup_wall_time_sec": 1.5,
+            "steady_state_wall_time_sec": 1.0,
+            "runtime_visible_devices": ["0"],
+            **_mjx_contact_evidence(),
+        },
+    }
+
+
+def _replay_metrics_payload(planned) -> dict[str, object]:
+    saved_command = Path(planned.output_dir) / "mpc_command.npz"
+    return {
+        "method": "replay_command",
+        "motion": str(
+            Path(
+                planned.replay_argv[planned.replay_argv.index("--motion") + 1]
+            ).resolve()
+        ),
+        "device": "cuda:0",
+        "checkpoint": planned.replay_argv[planned.replay_argv.index("--checkpoint") + 1],
+        "max_steps": 800,
+        "metrics": _metrics(success=True),
+        "mpc": {
+            "backend": (
+                "spider.tasks.g1_wbc.spider_task."
+                "G1WbcSamplingTask.replay_qpos_command_sequence"
+            ),
+            "saved_command": str(saved_command.resolve()),
+            "saved_command_sha256": _file_sha256(saved_command),
+            "replay_mode": "shared_execute_backend",
+            "control_steps": 20,
+            "num_command_frames": 801,
+            "num_replay_steps": 800,
+        },
+    }
 
 
 def _valid_rollout_arrays() -> dict[str, np.ndarray]:

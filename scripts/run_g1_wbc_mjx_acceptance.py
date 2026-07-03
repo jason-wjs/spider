@@ -51,6 +51,8 @@ ARTIFACT_FRESHNESS_TOLERANCE_NS = 2_000_000_000
 FORMAL_BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
 TARGET_H100_SPEEDUP = "h100_speedup"
 TARGET_4090_REALTIME = "4090_realtime"
+ACCEPTANCE_REPORT_NAME = "acceptance_report.json"
+ACCEPTANCE_PARTIAL_REPORT_NAME = "acceptance_report.partial.json"
 REQUIRED_INPUT_SHA256_FIELDS = (
     "jump_motion",
     "walk_motion",
@@ -139,6 +141,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--reuse-existing-ok",
+        action="store_true",
+        help=(
+            "Reuse previously completed ok MJX/replay rows from this output-dir "
+            "when command, metrics provenance, artifact hashes, and schema match."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -212,9 +222,40 @@ def run_command(argv: list[str], *, cwd: Path) -> dict[str, Any]:
 
 def write_report(output_dir: Path, report: dict[str, Any]) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "acceptance_report.json"
-    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    path = output_dir / ACCEPTANCE_REPORT_NAME
+    _write_json_atomic(path, report)
     return path
+
+
+def write_partial_report(
+    output_dir: Path,
+    *,
+    plan: list[PlannedAcceptanceRun],
+    mjx_rows: list[dict[str, Any]],
+    replay_rows: list[dict[str, Any]],
+    run_status: str = "running",
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / ACCEPTANCE_PARTIAL_REPORT_NAME
+    _write_json_atomic(
+        path,
+        {
+            "schema_version": 1,
+            "run_status": str(run_status),
+            "planned_runs": [asdict(item) for item in plan],
+            "completed_mjx_rows": len(mjx_rows),
+            "completed_replay_rows": len(replay_rows),
+            "mjx_rows": mjx_rows,
+            "replay_rows": replay_rows,
+        },
+    )
+    return path
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    tmp_path.replace(path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -238,6 +279,11 @@ def main(argv: list[str] | None = None) -> int:
 
     mjx_rows: list[dict[str, Any]] = []
     replay_rows: list[dict[str, Any]] = []
+    existing_rows = (
+        load_existing_acceptance_rows(output_dir)
+        if args.reuse_existing_ok
+        else {"mjx": [], "replay": []}
+    )
     for planned in plan:
         if args.dry_run:
             mjx_row = {
@@ -255,16 +301,35 @@ def main(argv: list[str] | None = None) -> int:
         else:
             Path(planned.output_dir).mkdir(parents=True, exist_ok=True)
             Path(planned.replay_output_dir).mkdir(parents=True, exist_ok=True)
-            mjx_row = {
-                **asdict(planned),
-                **run_command(planned.mjx_argv, cwd=SPIDER_ROOT),
-            }
-            replay_row = {
-                **asdict(planned),
-                **run_command(planned.replay_argv, cwd=SPIDER_ROOT),
-            }
+            mjx_row = load_existing_acceptance_row(
+                planned,
+                kind="mjx",
+                existing_rows=existing_rows["mjx"],
+            )
+            if mjx_row is None:
+                mjx_row = {
+                    **asdict(planned),
+                    **run_command(planned.mjx_argv, cwd=SPIDER_ROOT),
+                }
+            replay_row = load_existing_acceptance_row(
+                planned,
+                kind="replay",
+                existing_rows=existing_rows["replay"],
+            )
+            if replay_row is None:
+                replay_row = {
+                    **asdict(planned),
+                    **run_command(planned.replay_argv, cwd=SPIDER_ROOT),
+                }
         mjx_rows.append(_attach_artifacts(mjx_row, planned.output_dir))
         replay_rows.append(_attach_artifacts(replay_row, planned.replay_output_dir))
+        if not args.dry_run:
+            write_partial_report(
+                output_dir,
+                plan=plan,
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+            )
 
     report = _build_report(
         baseline_manifest=baseline_manifest,
@@ -281,6 +346,215 @@ def main(argv: list[str] | None = None) -> int:
     report_path = write_report(output_dir, report)
     print(str(report_path))
     return 0 if bool(report["passed"]) else 1
+
+
+def load_existing_acceptance_rows(output_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """Load reusable row candidates from the newest prior report files."""
+
+    candidates = [
+        output_dir / ACCEPTANCE_REPORT_NAME,
+        output_dir / ACCEPTANCE_PARTIAL_REPORT_NAME,
+    ]
+    existing = [path for path in candidates if path.is_file()]
+    existing.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    rows_by_kind: dict[str, list[dict[str, Any]]] = {"mjx": [], "replay": []}
+    seen: dict[str, set[tuple[str, int]]] = {"mjx": set(), "replay": set()}
+    for path in existing:
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        for kind, field in (("mjx", "mjx_rows"), ("replay", "replay_rows")):
+            rows = payload.get(field)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                seed = _safe_int(row.get("seed"))
+                motion = row.get("motion")
+                if not isinstance(motion, str) or seed is None:
+                    continue
+                key = (motion, seed)
+                if key in seen[kind]:
+                    continue
+                row = dict(row)
+                row["reuse_source_report"] = str(path)
+                rows_by_kind[kind].append(row)
+                seen[kind].add(key)
+    return rows_by_kind
+
+
+def load_existing_acceptance_row(
+    planned: PlannedAcceptanceRun,
+    *,
+    kind: str,
+    existing_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return a verified reusable acceptance row for a planned run."""
+
+    if kind not in {"mjx", "replay"}:
+        raise ValueError(f"Unsupported acceptance row kind: {kind!r}")
+    for row in existing_rows:
+        if row.get("motion") != planned.motion:
+            continue
+        if _safe_int(row.get("seed")) != planned.seed:
+            continue
+        reusable = _verify_existing_acceptance_row(planned, kind=kind, row=row)
+        if reusable is not None:
+            return reusable
+    return None
+
+
+def _verify_existing_acceptance_row(
+    planned: PlannedAcceptanceRun,
+    *,
+    kind: str,
+    row: dict[str, Any],
+) -> dict[str, Any] | None:
+    argv = planned.mjx_argv if kind == "mjx" else planned.replay_argv
+    output_dir = Path(planned.output_dir if kind == "mjx" else planned.replay_output_dir)
+    argv_field = "mjx_argv" if kind == "mjx" else "replay_argv"
+    command_field = "mjx_command_text" if kind == "mjx" else "replay_command_text"
+    expected_artifacts = (
+        REQUIRED_ARTIFACT_FIELDS if kind == "mjx" else ("metrics_json", "rollout_npz")
+    )
+
+    if row.get("status") != "ok" or row.get("returncode") != 0:
+        return None
+    if row.get(argv_field) != argv:
+        return None
+    if row.get(command_field) != shlex.join(argv):
+        return None
+    row_output_field = "output_dir" if kind == "mjx" else "replay_output_dir"
+    expected_output_dir = (
+        planned.output_dir if kind == "mjx" else planned.replay_output_dir
+    )
+    if not _same_path(row.get(row_output_field), expected_output_dir):
+        return None
+    if not _artifacts_match_recorded_hashes(row, expected_artifacts):
+        return None
+
+    metrics_path = output_dir / "metrics.json"
+    try:
+        metrics_payload = json.loads(metrics_path.read_text())
+        parsed = _row_from_metrics(metrics_path)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not _acceptance_metrics_provenance_matches(
+        planned,
+        kind=kind,
+        payload=metrics_payload,
+        parsed=parsed,
+    ):
+        return None
+
+    reusable = dict(row)
+    reusable.update(parsed)
+    reusable["status"] = "ok"
+    reusable["returncode"] = 0
+    reusable["reused_existing"] = True
+    reusable["reuse_kind"] = kind
+    return reusable
+
+
+def _artifacts_match_recorded_hashes(
+    row: dict[str, Any],
+    fields: tuple[str, ...],
+) -> bool:
+    artifacts = row.get("artifacts")
+    hashes = row.get("artifact_sha256")
+    if not isinstance(artifacts, dict) or not isinstance(hashes, dict):
+        return False
+    for key in fields:
+        path = artifacts.get(key)
+        expected = hashes.get(key)
+        if not isinstance(path, str) or not Path(path).expanduser().is_file():
+            return False
+        if not isinstance(expected, str) or not expected.strip():
+            return False
+        if _file_sha256(Path(path).expanduser()) != expected:
+            return False
+    return True
+
+
+def _acceptance_metrics_provenance_matches(
+    planned: PlannedAcceptanceRun,
+    *,
+    kind: str,
+    payload: dict[str, Any],
+    parsed: dict[str, Any],
+) -> bool:
+    argv = planned.mjx_argv if kind == "mjx" else planned.replay_argv
+    if parsed.get("metrics_method") != _argv_value(argv, "--method"):
+        return False
+    if not _same_path(parsed.get("metrics_motion"), _argv_value(argv, "--motion")):
+        return False
+    if parsed.get("metrics_device") != _argv_value(argv, "--device"):
+        return False
+    if not _same_path(payload.get("checkpoint"), _argv_value(argv, "--checkpoint")):
+        return False
+    if _safe_int(payload.get("max_steps")) != _safe_int(_argv_value(argv, "--max-steps")):
+        return False
+    metrics = parsed.get("metrics")
+    mpc = parsed.get("mpc")
+    if not isinstance(metrics, dict) or not isinstance(mpc, dict):
+        return False
+    if _safe_int(parsed.get("num_steps", metrics.get("num_steps"))) != 800:
+        return False
+    if kind == "mjx":
+        return _mjx_metrics_provenance_matches(argv, parsed, mpc)
+    return _replay_metrics_provenance_matches(argv, parsed, mpc)
+
+
+def _mjx_metrics_provenance_matches(
+    argv: list[str],
+    parsed: dict[str, Any],
+    mpc: dict[str, Any],
+) -> bool:
+    if mpc.get("mpc_backend") != "mjx":
+        return False
+    expected_optimizer = _argv_value(argv, "--mpc-optimizer")
+    if expected_optimizer is not None and mpc.get("mpc_optimizer") != expected_optimizer:
+        return False
+    if parsed.get("mpc_accepted") is not True:
+        return False
+    if _safe_int(parsed.get("accepted_windows")) != 40:
+        return False
+    if parsed.get("mpc_used_baseline_fallback") is not False:
+        return False
+    for field in (
+        "steady_state_wall_time_sec",
+        "compile_init_wall_time_sec",
+        "jit_warmup_wall_time_sec",
+    ):
+        if not _valid_timing(_row_value(parsed, field)):
+            return False
+    return True
+
+
+def _replay_metrics_provenance_matches(
+    argv: list[str],
+    parsed: dict[str, Any],
+    mpc: dict[str, Any],
+) -> bool:
+    if mpc.get("replay_mode") != "shared_execute_backend":
+        return False
+    saved = mpc.get("saved_command")
+    expected_saved = _argv_value(argv, "--saved-command")
+    if not _same_path(saved if isinstance(saved, str) else None, expected_saved):
+        return False
+    if not _is_existing_file(saved):
+        return False
+    saved_path = Path(str(saved)).expanduser()
+    if mpc.get("saved_command_sha256") != _file_sha256(saved_path):
+        return False
+    expected_control = _safe_int(_argv_value(argv, "--replay-control-steps"))
+    if _safe_int(mpc.get("control_steps")) != expected_control:
+        return False
+    if _safe_int(mpc.get("num_replay_steps")) != _safe_int(parsed.get("num_steps")):
+        return False
+    return True
 
 
 def validate_runtime_environment(args: argparse.Namespace) -> tuple[str, ...]:
