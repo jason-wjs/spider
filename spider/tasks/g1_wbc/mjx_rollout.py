@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from spider.tasks.g1_wbc.constants import ACTION_DIM, QPOS_DIM
+from spider.tasks.g1_wbc.constants import ACTION_DIM, POLICY_DT, QPOS_DIM
 from spider.tasks.g1_wbc.mjx_obs import (
     JaxObsIndices,
     JaxObsState,
@@ -176,6 +176,7 @@ def score_candidate_controls(
         _required(reference, "joint_high"),
         jnp=jnp,
     )
+    commanded_joint_vel = _commanded_joint_velocity(commanded_qpos, jnp=jnp)
     prev_control = _ensure_batch(
         jnp.asarray(
             reference.get("prev_control", jnp.zeros((sample_count, QPOS_DIM - 1)))
@@ -189,7 +190,11 @@ def score_candidate_controls(
         weights = JaxScoreWeights(dict(weights))
     accumulator = init_score_accumulator((sample_count,), jnp=jnp)
     obs_initialized = reference.get("obs_initialized", False)
-    step_reference = _with_commanded_qpos(reference, commanded_qpos)
+    step_reference = _with_commanded_qpos(
+        reference,
+        commanded_qpos,
+        commanded_joint_vel,
+    )
 
     scan = _lax_scan(runtime)
     if scan is not None:
@@ -329,11 +334,20 @@ def _score_rollout_step(
     sample_count: int,
 ) -> dict[str, object]:
     jnp = runtime.jnp
+    commanded_qpos = _required(reference, "commanded_qpos")
+    command_qpos = commanded_qpos[:, step_index]
+    commanded_joint_vel = _required(reference, "commanded_joint_vel")
+    command_joint_vel = commanded_joint_vel[:, step_index]
     obs_reference = _time_slice_reference(
         _required(reference, "obs_reference"),
         step_index,
         sample_count,
         jnp=jnp,
+    )
+    obs_reference = _with_commanded_joint_reference(
+        obs_reference,
+        command_qpos,
+        command_joint_vel,
     )
     obs, next_obs_state = build_wbc_observation_from_state(
         robot_state=robot_state,
@@ -345,11 +359,10 @@ def _score_rollout_step(
         jnp=jnp,
     )
     action = jax_actor_forward(actor_params, obs, jnp=jnp)
-    commanded_qpos = _required(reference, "commanded_qpos")
     robot_state, physics_score_state = physics_step_fn(
         model_bundle,
         robot_state,
-        commanded_qpos[:, step_index],
+        command_qpos,
         action,
         step_index,
         runtime=runtime,
@@ -422,9 +435,30 @@ def _zero_obs_history(sample_count: int, *, jnp):
 def _with_commanded_qpos(
     reference: Mapping[str, object],
     commanded_qpos,
+    commanded_joint_vel,
 ) -> dict[str, object]:
     values = dict(reference)
     values["commanded_qpos"] = commanded_qpos
+    values["commanded_joint_vel"] = commanded_joint_vel
+    return values
+
+
+def _commanded_joint_velocity(commanded_qpos, *, jnp):
+    joint_pos = commanded_qpos[..., 7:]
+    if int(joint_pos.shape[1]) <= 1:
+        return jnp.zeros(joint_pos.shape)
+    joint_vel = (joint_pos[:, 1:] - joint_pos[:, :-1]) / POLICY_DT
+    return jnp.concatenate([joint_vel, joint_vel[:, -1:]], axis=1)
+
+
+def _with_commanded_joint_reference(
+    obs_reference: Mapping[str, object],
+    command_qpos,
+    command_joint_vel,
+) -> dict[str, object]:
+    values = dict(obs_reference)
+    values["joint_pos"] = command_qpos[:, 7:]
+    values["joint_vel"] = command_joint_vel
     return values
 
 

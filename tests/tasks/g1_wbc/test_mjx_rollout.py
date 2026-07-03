@@ -10,6 +10,7 @@ from spider.tasks.g1_wbc.constants import (
     LIMB_EE_BODY_NAMES,
     MUJOCO_BODY_NAMES,
     OBS_DIM,
+    POLICY_DT,
     QPOS_DIM,
     QVEL_DIM,
     TRACKING_ANCHOR_BODY_NAME,
@@ -305,6 +306,36 @@ def _feedback_actor() -> JaxActorParams:
     )
 
 
+def _command_joint_actor() -> JaxActorParams:
+    weight = np.zeros((OBS_DIM, ACTION_DIM), dtype=np.float32)
+    weight[0, 0] = 1.0
+    return JaxActorParams(
+        obs_mean=np.zeros((1, OBS_DIM), dtype=np.float32),
+        obs_std=np.ones((1, OBS_DIM), dtype=np.float32),
+        layers=(
+            (
+                weight,
+                np.zeros(ACTION_DIM, dtype=np.float32),
+            ),
+        ),
+    )
+
+
+def _command_joint_velocity_actor() -> JaxActorParams:
+    weight = np.zeros((OBS_DIM, ACTION_DIM), dtype=np.float32)
+    weight[ACTION_DIM, 0] = 1.0
+    return JaxActorParams(
+        obs_mean=np.zeros((1, OBS_DIM), dtype=np.float32),
+        obs_std=np.ones((1, OBS_DIM), dtype=np.float32),
+        layers=(
+            (
+                weight,
+                np.zeros(ACTION_DIM, dtype=np.float32),
+            ),
+        ),
+    )
+
+
 def _physics_step(model_bundle, robot_state, command_qpos, action, step_index, *, runtime):
     del model_bundle, robot_state, step_index, runtime
     samples = int(command_qpos.shape[0])
@@ -322,6 +353,40 @@ def _physics_step(model_bundle, robot_state, command_qpos, action, step_index, *
     }
     score_state = {
         "root_pos": command_qpos[:, :3],
+        "body_pos": body_pos[:, :2],
+        "ee_pos": body_pos[:, :1],
+        "contact": np.zeros((samples, 2), dtype=np.float32),
+    }
+    return next_robot, score_state
+
+
+def _action_root_physics_step(
+    model_bundle,
+    robot_state,
+    command_qpos,
+    action,
+    step_index,
+    *,
+    runtime,
+):
+    del model_bundle, robot_state, command_qpos, step_index, runtime
+    samples = int(action.shape[0])
+    bodies = len(MUJOCO_BODY_NAMES)
+    qpos = np.zeros((samples, QPOS_DIM), dtype=np.float32)
+    qpos[:, 3] = 1.0
+    qvel = np.zeros((samples, QVEL_DIM), dtype=np.float32)
+    qvel[:, 6:] = action
+    body_pos = np.zeros((samples, bodies, 3), dtype=np.float32)
+    body_pos[:, 0, 0] = action[:, 0]
+    next_robot = {
+        "qpos": qpos,
+        "qvel": qvel,
+        "body_pos_w": body_pos,
+        "body_quat_w": _identity_body_quat((samples, bodies)),
+        "body_ang_vel_w": np.zeros((samples, bodies, 3), dtype=np.float32),
+    }
+    score_state = {
+        "root_pos": body_pos[:, 0, :3],
         "body_pos": body_pos[:, :2],
         "ee_pos": body_pos[:, :1],
         "contact": np.zeros((samples, 2), dtype=np.float32),
@@ -568,6 +633,90 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertAlmostEqual(float(actions[0][0, 0]), expected[0], places=6)
         self.assertAlmostEqual(float(actions[1][0, 0]), expected[1], places=6)
         self.assertAlmostEqual(float(actions[2][0, 0]), expected[2], places=6)
+
+    def test_score_candidate_controls_feeds_sampled_joint_command_to_actor(
+        self,
+    ) -> None:
+        samples = np.zeros((2, 2, QPOS_DIM - 1), dtype=np.float32)
+        samples[1, :, 6] = 0.4
+        reference = _rollout_reference(samples=2, horizon=2)
+        reference["score_weights"] = JaxScoreWeights({"root_pos": 1.0})
+        actions: list[np.ndarray] = []
+
+        def recording_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            actions.append(np.asarray(action, dtype=np.float32).copy())
+            return _action_root_physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _command_joint_actor(),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=recording_step,
+        )
+
+        self.assertEqual(len(actions), 2)
+        np.testing.assert_allclose(actions[0][0, 0], 0.0)
+        self.assertGreater(float(actions[0][1, 0]), 0.0)
+        self.assertGreater(float(scores[0]), float(scores[1]))
+
+    def test_score_candidate_controls_feeds_sampled_joint_velocity_to_actor(
+        self,
+    ) -> None:
+        samples = np.zeros((2, 2, QPOS_DIM - 1), dtype=np.float32)
+        samples[1, 1, 6] = POLICY_DT
+        reference = _rollout_reference(samples=2, horizon=2)
+        reference["score_weights"] = JaxScoreWeights({"root_pos": 1.0})
+        actions: list[np.ndarray] = []
+
+        def recording_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            actions.append(np.asarray(action, dtype=np.float32).copy())
+            return _action_root_physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _command_joint_velocity_actor(),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=recording_step,
+        )
+
+        self.assertEqual(len(actions), 2)
+        np.testing.assert_allclose(actions[0][0, 0], 0.0)
+        self.assertAlmostEqual(float(actions[0][1, 0]), 1.0 / 1.01, places=6)
+        self.assertGreater(float(scores[0]), float(scores[1]))
 
     def test_score_candidate_controls_uses_lax_scan_when_available(self) -> None:
         samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
