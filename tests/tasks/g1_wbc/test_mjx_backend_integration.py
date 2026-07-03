@@ -22,6 +22,7 @@ from spider.tasks.g1_wbc.constants import (
 from spider.tasks.g1_wbc.mjx_backend import run_g1_wbc_mjx_mpc
 from spider.tasks.g1_wbc.mjx_components import build_mjx_rollout_components
 from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion, qvel_from_qpos_trajectory
+from spider.tasks.g1_wbc.mpc import REWARD_WEIGHT_PRESETS
 from spider.tasks.g1_wbc.policy import WbcActor
 from spider.tasks.g1_wbc.result_types import G1WbcMpcRun
 
@@ -421,6 +422,33 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(weights["contact_switch"], 1.2)
         self.assertEqual(weights["action_delta"], 0.6)
         self.assertEqual(weights["joint_jerk"], 0.0012)
+
+    def test_mjx_score_weights_cover_joint_global_default_preset(self) -> None:
+        expected_mapping = {
+            "bad_floor_contact": "bad_floor_contact",
+            "bad_floor_force_excess": "bad_floor_force_excess",
+            "contact_switch": "contact_switch",
+            "contact_force_delta": "contact_force_delta",
+            "contact_false_positive": "contact_false_positive",
+            "contact_false_negative": "contact_false_negative",
+            "control_delta": "control_delta",
+            "action_delta": "action_delta",
+            "joint_acc": "joint_acc",
+            "joint_jerk": "joint_jerk",
+            "body_global_pos_error": "body_global_pos",
+            "body_global_rot_error": "body_global_rot",
+            "ee_global_pos_error": "ee_global_pos",
+            "ee_global_rot_error": "ee_global_rot",
+        }
+        preset = REWARD_WEIGHT_PRESETS["g1_wbc_joint_global"]
+        weights = mjx_backend_module._mjx_score_weights(
+            "g1_wbc_joint_global",
+            preset,
+        )
+
+        self.assertEqual(sorted(preset), sorted(expected_mapping))
+        for source_name, target_name in expected_mapping.items():
+            self.assertEqual(weights[target_name], preset[source_name])
 
     def test_mjx_backend_emits_contact_capacity_metadata(self) -> None:
         def optimizer(**kwargs):
