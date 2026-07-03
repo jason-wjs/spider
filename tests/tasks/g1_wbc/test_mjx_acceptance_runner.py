@@ -276,6 +276,11 @@ def _rewrite_baseline_gpu(manifest_path: Path, gpu_name: str) -> None:
 
 
 class MjxAcceptanceRunnerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._env_patcher = mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"})
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+
     def test_build_acceptance_plan_covers_mjx_and_replay_backends(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -644,6 +649,37 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual(len(report["planned_runs"]), 6)
         self.assertFalse(report["motion_results"]["jump"]["mjx_passed"])
+
+    def test_main_fails_fast_when_real_cuda_run_has_multiple_visible_gpus(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0,1"}):
+                with mock.patch.object(
+                    runner,
+                    "run_command",
+                    side_effect=AssertionError("run_command should not be called"),
+                ):
+                    exit_code = runner.main(
+                        [
+                            "--baseline-manifest",
+                            str(manifest_path),
+                            "--output-dir",
+                            str(output_dir),
+                            "--device",
+                            "cuda:0",
+                        ]
+                    )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn("single_gpu_visibility", report["environment_failures"])
 
     def test_report_quality_gate_uses_frozen_baseline_envelope(self) -> None:
         runner = load_runner()

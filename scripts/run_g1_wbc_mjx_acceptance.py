@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import shlex
 import subprocess
 import sys
@@ -222,6 +223,18 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = args.output_dir.expanduser().resolve()
     manifest = json.loads(baseline_manifest.read_text())
     plan = build_acceptance_plan(args, manifest)
+    environment_failures = validate_runtime_environment(args)
+    if environment_failures:
+        report = _environment_failure_report(
+            baseline_manifest=baseline_manifest,
+            manifest=manifest,
+            args=args,
+            failures=environment_failures,
+        )
+        report["planned_runs"] = [asdict(item) for item in plan]
+        report_path = write_report(output_dir, report)
+        print(str(report_path))
+        return 1
 
     mjx_rows: list[dict[str, Any]] = []
     replay_rows: list[dict[str, Any]] = []
@@ -268,6 +281,56 @@ def main(argv: list[str] | None = None) -> int:
     report_path = write_report(output_dir, report)
     print(str(report_path))
     return 0 if bool(report["passed"]) else 1
+
+
+def validate_runtime_environment(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return failures that make a real CUDA acceptance run non-formal."""
+
+    if args.dry_run or not str(args.device).startswith("cuda"):
+        return ()
+    visible = tuple(
+        value.strip()
+        for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if value.strip()
+    )
+    failures: list[str] = []
+    if len(visible) != 1:
+        failures.append("single_gpu_visibility")
+    if str(args.device) not in {"cuda", "cuda:0"}:
+        failures.append("single_gpu_device")
+    return tuple(failures)
+
+
+def _environment_failure_report(
+    *,
+    baseline_manifest: Path,
+    manifest: dict[str, Any],
+    args: argparse.Namespace,
+    failures: tuple[str, ...],
+) -> dict[str, Any]:
+    baseline_envelopes = _baseline_envelopes_from_manifest(manifest)
+    return {
+        "schema_version": 1,
+        "backend": "mjx_canonical",
+        "baseline_manifest": str(baseline_manifest),
+        "baseline_envelopes": baseline_envelopes,
+        "classification": "invalid_benchmark",
+        "target": str(args.target),
+        "min_speedup": float(args.min_speedup),
+        "min_realtime_factor": float(args.min_realtime_factor),
+        "required_gpu_name_fragment": str(args.required_gpu_name_fragment),
+        "environment_failures": tuple(failures),
+        "motion_results": {},
+        "replay_results": {},
+        "speed_results": {},
+        "realtime_results": {},
+        "timing_summary": {},
+        "contact_summary": {},
+        "baseline_rows": list(manifest.get("rows", [])),
+        "mjx_rows": [],
+        "replay_rows": [],
+        "passed": False,
+    }
 
 
 def _baseline_run_matrix(rows: Any) -> dict[tuple[str, int], dict[str, Any]]:
