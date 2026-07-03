@@ -439,8 +439,10 @@ def run_command(command: Stage0Command) -> dict[str, Any]:
         metrics = payload.get("metrics", {})
         mpc = payload.get("mpc", {})
         row["metrics"] = metrics
-        row["mpc_accepted"] = bool(mpc.get("accepted", True))
-        row["accepted_windows"] = int(mpc.get("accepted_windows", mpc.get("num_windows", -1)))
+        row["mpc_accepted"] = mpc.get("accepted") is True
+        row["accepted_windows"] = int(
+            mpc.get("accepted_windows", mpc.get("num_windows", -1))
+        )
         row["mpc_used_baseline_fallback"] = bool(mpc.get("used_baseline_fallback", False))
         row["num_steps"] = int(metrics.get("num_steps", -1))
         if isinstance(mpc.get("steady_state_wall_time_sec"), (int, float)):
@@ -485,7 +487,7 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
         return None
     if num_steps != 800:
         return None
-    if not bool(mpc.get("accepted", True)):
+    if mpc.get("accepted") is not True:
         return None
     if accepted_windows != 40:
         return None
