@@ -29,6 +29,7 @@ def _baseline_manifest(tmp_path: Path) -> Path:
     for motion in ("jump", "walk"):
         for seed in (0, 1, 2):
             output_dir = tmp_path / "baseline" / motion / f"seed_{seed}"
+            _write_artifacts(output_dir)
             rows.append(
                 {
                     "motion_name": motion,
@@ -431,6 +432,67 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertFalse(report["replay_results"]["jump"]["passed"])
         self.assertIn("metrics_json", report["replay_results"]["jump"]["failures"])
+
+    def test_missing_baseline_artifact_paths_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            missing_path = root / "missing_baseline_rollout.npz"
+            manifest["rows"][0]["artifacts"]["rollout_npz"] = str(missing_path)
+            manifest_path.write_text(json.dumps(manifest))
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row["command_wall_time_sec"] = 1.0
+                else:
+                    row.update(
+                        {
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "runtime_visible_devices": ("0",),
+                            "steady_state_wall_time_sec": 1.0,
+                            **_mjx_contact_evidence(),
+                        }
+                    )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn("rollout_npz", report["motion_results"]["jump"]["baseline_failures"])
 
     def test_missing_one_mjx_timing_seed_fails_speed_gate(self) -> None:
         runner = load_runner()

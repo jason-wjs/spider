@@ -277,6 +277,12 @@ def _build_report(
         mjx_group = [row for row in mjx_rows if row.get("motion") == motion]
         replay_group = [row for row in replay_rows if row.get("motion") == motion]
         baseline_gate = evaluate_baseline_group(motion, baseline_group)
+        baseline_failures = _unique(
+            (
+                *baseline_gate.failures,
+                *_baseline_artifact_evidence_failures(baseline_group),
+            )
+        )
         mjx_gate = evaluate_mjx_group(
             motion,
             mjx_group,
@@ -315,8 +321,8 @@ def _build_report(
             min_speedup=min_speedup,
         )
         motion_results[motion] = {
-            "baseline_passed": baseline_gate.passed,
-            "baseline_failures": baseline_gate.failures,
+            "baseline_passed": not baseline_failures,
+            "baseline_failures": baseline_failures,
             "mjx_passed": not mjx_failures,
             "mjx_failures": mjx_failures,
         }
@@ -331,7 +337,7 @@ def _build_report(
         }
         passed = (
             passed
-            and baseline_gate.passed
+            and not baseline_failures
             and not mjx_failures
             and replay_passed
             and speed_gate.passed
@@ -732,6 +738,20 @@ def _mjx_contact_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...
             > float(counts["max_geom_pairs"])
         ):
             failures.append("mjx_contact_diagnostics")
+    return _unique(failures)
+
+
+def _baseline_artifact_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        artifacts = row.get("artifacts", {})
+        for key in REQUIRED_ARTIFACT_FIELDS:
+            if not isinstance(artifacts, dict):
+                failures.append(key)
+                continue
+            value = artifacts.get(key)
+            if not isinstance(value, str) or not Path(value).expanduser().is_file():
+                failures.append(key)
     return _unique(failures)
 
 
