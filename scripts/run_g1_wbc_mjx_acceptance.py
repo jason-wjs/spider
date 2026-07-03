@@ -958,6 +958,8 @@ def _replay_provenance_failures(
 
         if mpc.get("replay_mode") != "shared_execute_backend":
             failures.append("replay_mode")
+        if row.get("metrics_method") != "replay_command":
+            failures.append("replay_metrics_provenance")
 
         expected_saved = _argv_value(row.get("replay_argv", []), "--saved-command")
         saved = mpc.get("saved_command")
@@ -1120,6 +1122,7 @@ def _has_invalid_benchmark_failure(
         "replay_control_steps",
         "replay_command_npz_frames",
         "replay_mode",
+        "replay_metrics_provenance",
         "replay_num_command_frames",
         "replay_num_replay_steps",
         "replay_saved_command",
@@ -1387,6 +1390,9 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
     return {
         "metrics": metrics,
         "mpc": mpc,
+        "metrics_method": payload.get("method"),
+        "metrics_motion": payload.get("motion"),
+        "metrics_device": payload.get("device"),
         "mpc_accepted": mpc.get("accepted") is True,
         "accepted_windows": _safe_int(
             mpc.get("accepted_windows", mpc.get("num_windows", -1))

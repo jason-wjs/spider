@@ -323,6 +323,8 @@ The MuJoCo-Warp replay gate must:
 - not contribute to MJX speed timing
 - produce `metrics.json` and `rollout.npz`
 - report replay provenance in `metrics.json`
+- report top-level `method=replay_command` in `metrics.json`, with mismatch
+  reported as `replay_metrics_provenance`
 - use `replay_mode=shared_execute_backend`
 - use the planned replay control steps
 - report `num_command_frames >= num_replay_steps + 1`

@@ -1224,6 +1224,39 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["replay_results"]["jump"]["failures"],
         )
 
+    def test_replay_metrics_method_must_match_replay_command(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in replay_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_row["metrics_method"] = "g1_wbc_joint_global"
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "replay_metrics_provenance",
+            report["replay_results"]["jump"]["failures"],
+        )
+
     def test_missing_baseline_artifact_paths_fail_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2326,6 +2359,28 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(row["max_contact_points"], 512)
         self.assertEqual(row["active_contact_count"], 3)
 
+    def test_metrics_parser_preserves_top_level_provenance(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "metrics.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "method": "replay_command",
+                        "motion": "/tmp/jump.npz",
+                        "device": "cuda:0",
+                        "metrics": _metrics(success=True),
+                        "mpc": {},
+                    }
+                )
+            )
+
+            row = runner._row_from_metrics(path)
+
+        self.assertEqual(row["metrics_method"], "replay_command")
+        self.assertEqual(row["metrics_motion"], "/tmp/jump.npz")
+        self.assertEqual(row["metrics_device"], "cuda:0")
+
     def test_metrics_parser_missing_mpc_safety_fields_fails_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2498,6 +2553,7 @@ def _replay_evidence(
         saved_command = argv[argv.index("--saved-command") + 1]
     return {
         "command_wall_time_sec": 1.0,
+        "metrics_method": "replay_command",
         "mpc": {
             "backend": (
                 "spider.tasks.g1_wbc.spider_task."
