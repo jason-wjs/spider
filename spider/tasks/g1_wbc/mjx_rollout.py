@@ -380,10 +380,6 @@ def rollout_candidate_controls(
         jnp=jnp,
     )
     prev_joint_vel = _joint_vel(robot_state)
-    accumulator = init_score_accumulator((sample_count,), jnp=jnp)
-    weights = reference.get("score_weights", JaxScoreWeights({}))
-    if not isinstance(weights, JaxScoreWeights):
-        weights = JaxScoreWeights(dict(weights))
     obs_initialized = reference.get("obs_initialized", False)
     step_reference = _with_commanded_qpos(
         reference,
@@ -395,20 +391,18 @@ def rollout_candidate_controls(
     qpos_trace = [robot_state["qpos"]]
     qvel_trace = [robot_state["qvel"]]
     for step_index in range(horizon):
-        next_values = _score_rollout_step(
+        next_values = _rollout_trace_step(
             step_index,
             robot_state=robot_state,
             obs_state=obs_state,
             prev_control=prev_control,
             prev_joint_vel=prev_joint_vel,
-            accumulator=accumulator,
             samples=samples,
             reference=step_reference,
             obs_indices=obs_indices,
             default_joint_pos=default_joint_pos,
             actor_params=actor_params,
             model_bundle=model_bundle,
-            weights=weights,
             obs_initialized=obs_initialized if step_index == 0 else True,
             physics_step_fn=physics_step_fn,
             runtime=runtime,
@@ -418,7 +412,6 @@ def rollout_candidate_controls(
         obs_state = next_values["obs_state"]
         prev_control = next_values["prev_control"]
         prev_joint_vel = next_values["prev_joint_vel"]
-        accumulator = next_values["accumulator"]
         qpos_trace.append(robot_state["qpos"])
         qvel_trace.append(robot_state["qvel"])
 
@@ -529,6 +522,74 @@ def _score_rollout_step(
         "prev_control": step_control,
         "prev_joint_vel": _joint_vel(robot_state),
         "accumulator": accumulator,
+    }
+
+
+def _rollout_trace_step(
+    step_index,
+    *,
+    robot_state,
+    obs_state: JaxObsState,
+    prev_control,
+    prev_joint_vel,
+    samples,
+    reference: Mapping[str, object],
+    obs_indices: JaxObsIndices,
+    default_joint_pos,
+    actor_params,
+    model_bundle,
+    obs_initialized,
+    physics_step_fn: PhysicsStepFn,
+    runtime,
+    sample_count: int,
+) -> dict[str, object]:
+    jnp = runtime.jnp
+    commanded_qpos = _required(reference, "commanded_qpos")
+    command_qpos = commanded_qpos[:, step_index]
+    commanded_joint_vel = _required(reference, "commanded_joint_vel")
+    command_joint_vel = commanded_joint_vel[:, step_index]
+    command_reference = _time_slice_command_reference(
+        reference.get("command_reference", {}),
+        step_index,
+        jnp=jnp,
+    )
+    obs_reference = _time_slice_reference(
+        _required(reference, "obs_reference"),
+        step_index,
+        sample_count,
+        jnp=jnp,
+    )
+    obs_reference = _with_commanded_joint_reference(
+        obs_reference,
+        command_qpos,
+        command_joint_vel,
+        command_reference,
+    )
+    obs, next_obs_state = build_wbc_observation_from_state(
+        robot_state=robot_state,
+        reference_state=obs_reference,
+        obs_state=obs_state,
+        indices=obs_indices,
+        default_joint_pos=default_joint_pos,
+        initialized=obs_initialized,
+        jnp=jnp,
+    )
+    action = jax_actor_forward(actor_params, obs, jnp=jnp)
+    robot_state, _physics_score_state = physics_step_fn(
+        model_bundle,
+        robot_state,
+        command_qpos,
+        action,
+        step_index,
+        runtime=runtime,
+    )
+    robot_state = _batched_robot_state(robot_state, sample_count, jnp=jnp)
+    step_control = samples[:, step_index]
+    return {
+        "robot_state": robot_state,
+        "obs_state": JaxObsState(history=next_obs_state.history, last_action=action),
+        "prev_control": step_control,
+        "prev_joint_vel": _joint_vel(robot_state),
     }
 
 

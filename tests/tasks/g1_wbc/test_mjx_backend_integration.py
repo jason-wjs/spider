@@ -266,7 +266,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(result.metadata["backend"], "mjx")
         self.assertTrue(result.metadata["accepted"])
         self.assertFalse(result.metadata["used_baseline_fallback"])
-        self.assertTrue(result.metadata["use_guided_candidate"])
+        self.assertFalse(result.metadata["use_guided_candidate"])
         self.assertEqual(result.result.num_windows, 40)
         self.assertEqual(result.metadata["accepted_windows"], 40)
         self.assertEqual(result.result.rollout.qpos.shape, (801, 1, QPOS_DIM))
@@ -591,9 +591,12 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 "guided_controls": guided_controls,
             }
 
+        spider_config = _spider_config()
+        spider_config.use_guided_candidate = True
         result = _run_with_fakes(
             optimizer=None,
             rollout_factory=_fake_rollout_result,
+            spider_config=spider_config,
             runtime=_FakeOptimizerRuntime(),
             rollout_scorer=rollout_scorer,
             rollout_reference_factory=rollout_reference_factory,
@@ -684,6 +687,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         def default_components(**kwargs):
             calls.append("components")
             self.assertIs(kwargs["runtime"], runtime)
+            self.assertTrue(kwargs["use_guided_candidate"])
+            self.assertEqual(kwargs["guided_joint_gain"], 0.5)
             return SimpleNamespace(
                 rollout_scorer=rollout_scorer,
                 rollout_reference_factory=rollout_reference_factory,
@@ -695,6 +700,9 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             return _fake_rollout_result
 
         runtime = _FakeOptimizerRuntime()
+        spider_config = _spider_config()
+        spider_config.use_guided_candidate = True
+        spider_config.guided_joint_gain = 0.5
         with (
             mock.patch.object(
                 mjx_backend_module,
@@ -708,7 +716,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             ),
         ):
             result = run_g1_wbc_mjx_mpc(
-                spider_config=_spider_config(),
+                spider_config=spider_config,
                 motion=_motion(),
                 actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
                 rollout_config=SimpleNamespace(device="cpu", max_steps=800),

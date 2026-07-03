@@ -67,6 +67,7 @@ def run_g1_wbc_mjx_mpc(
                 runtime=runtime,
                 method=method,
                 reward_weights=reward_weights,
+                **_guided_component_kwargs(spider_config),
             )
             if rollout_scorer is None:
                 rollout_scorer = components.rollout_scorer
@@ -281,9 +282,7 @@ def run_g1_wbc_mjx_mpc(
             "control_steps": control_steps,
             "use_warm_start": use_warm_start,
             "final_noise_scale": float(getattr(spider_config, "final_noise_scale", 1.0)),
-            "use_guided_candidate": bool(
-                getattr(spider_config, "use_guided_candidate", True)
-            ),
+            "use_guided_candidate": _use_guided_candidate(spider_config),
             "compile_init_wall_time_sec": compile_init_wall_time_sec,
             "jit_warmup_enabled": jit_warmup_enabled,
             "jit_warmup_wall_time_sec": jit_warmup_wall_time_sec,
@@ -310,7 +309,7 @@ def _window_config_from_spider(spider_config) -> JaxWindowOptimizerConfig:
         joint_sigma=float(spider_config.joint_noise_scale),
         iterations=int(spider_config.max_num_iterations),
         final_noise_scale=float(getattr(spider_config, "final_noise_scale", 1.0)),
-        use_guided_candidate=bool(getattr(spider_config, "use_guided_candidate", True)),
+        use_guided_candidate=_use_guided_candidate(spider_config),
     )
 
 
@@ -343,13 +342,43 @@ def _default_rollout_components(
     runtime,
     method: str,
     reward_weights: dict[str, float] | None,
+    use_guided_candidate: bool,
+    guided_root_pos_gain: float,
+    guided_root_rot_gain: float,
+    guided_joint_gain: float,
+    guided_root_pos_clip: float,
+    guided_root_rot_clip: float,
+    guided_joint_clip: float,
 ):
     from spider.tasks.g1_wbc.mjx_components import build_mjx_rollout_components
 
     return build_mjx_rollout_components(
         runtime=runtime,
         score_weights=_mjx_score_weights(method, reward_weights),
+        use_guided_candidate=use_guided_candidate,
+        guided_root_pos_gain=guided_root_pos_gain,
+        guided_root_rot_gain=guided_root_rot_gain,
+        guided_joint_gain=guided_joint_gain,
+        guided_root_pos_clip=guided_root_pos_clip,
+        guided_root_rot_clip=guided_root_rot_clip,
+        guided_joint_clip=guided_joint_clip,
     )
+
+
+def _guided_component_kwargs(spider_config) -> dict[str, float | bool]:
+    return {
+        "use_guided_candidate": _use_guided_candidate(spider_config),
+        "guided_root_pos_gain": float(getattr(spider_config, "guided_root_pos_gain", 0.5)),
+        "guided_root_rot_gain": float(getattr(spider_config, "guided_root_rot_gain", 0.5)),
+        "guided_joint_gain": float(getattr(spider_config, "guided_joint_gain", 0.5)),
+        "guided_root_pos_clip": float(getattr(spider_config, "guided_root_pos_clip", 0.05)),
+        "guided_root_rot_clip": float(getattr(spider_config, "guided_root_rot_clip", 0.12)),
+        "guided_joint_clip": float(getattr(spider_config, "guided_joint_clip", 0.35)),
+    }
+
+
+def _use_guided_candidate(spider_config) -> bool:
+    return bool(getattr(spider_config, "use_guided_candidate", False))
 
 
 def _default_static_rollout_factory(rollout_config):
