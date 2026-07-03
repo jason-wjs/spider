@@ -416,6 +416,7 @@ def _build_report(
         replay_failures = _unique(
             (
                 *replay_failures,
+                *_replay_provenance_failures(replay_group),
                 *_replay_quality_failures(
                     motion,
                     replay_group,
@@ -674,6 +675,44 @@ def _replay_quality_row(row: dict[str, Any]) -> dict[str, Any]:
     return quality_row
 
 
+def _replay_provenance_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        mpc = row.get("mpc")
+        if not isinstance(mpc, dict):
+            failures.append("replay_mode")
+            failures.append("replay_saved_command")
+            continue
+
+        if mpc.get("replay_mode") != "shared_execute_backend":
+            failures.append("replay_mode")
+
+        expected_saved = _argv_value(row.get("replay_argv", []), "--saved-command")
+        saved = mpc.get("saved_command")
+        if not _same_path(saved if isinstance(saved, str) else None, expected_saved):
+            failures.append("replay_saved_command")
+        elif not _is_existing_file(saved):
+            failures.append("replay_saved_command")
+
+        expected_control = _safe_int(
+            _argv_value(row.get("replay_argv", []), "--replay-control-steps")
+        )
+        if _safe_int(mpc.get("control_steps")) != expected_control:
+            failures.append("replay_control_steps")
+
+        replay_steps = _safe_int(mpc.get("num_replay_steps"))
+        if replay_steps != _safe_int(row.get("num_steps")):
+            failures.append("replay_num_replay_steps")
+        command_frames = _safe_int(mpc.get("num_command_frames"))
+        if (
+            command_frames is None
+            or replay_steps is None
+            or command_frames < replay_steps + 1
+        ):
+            failures.append("replay_num_command_frames")
+    return _unique(failures)
+
+
 def _has_invalid_benchmark_failure(
     motion_results: dict[str, dict[str, Any]],
     replay_results: dict[str, dict[str, Any]],
@@ -702,6 +741,11 @@ def _has_invalid_benchmark_failure(
         "mpc_command_npz",
         "num_steps",
         "repeat_count",
+        "replay_control_steps",
+        "replay_mode",
+        "replay_num_command_frames",
+        "replay_num_replay_steps",
+        "replay_saved_command",
         "returncode",
         "rollout_npz",
         "seed",
@@ -1018,7 +1062,9 @@ def _output_dir_from_argv(argv: list[str]) -> Path:
         raise ValueError("Command argv is missing --output-dir") from exc
 
 
-def _argv_value(argv: list[str], flag: str) -> str | None:
+def _argv_value(argv: Any, flag: str) -> str | None:
+    if not isinstance(argv, list):
+        return None
     try:
         index = argv.index(flag)
     except ValueError:

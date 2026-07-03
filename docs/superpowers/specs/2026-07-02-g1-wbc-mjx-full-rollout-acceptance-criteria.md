@@ -351,11 +351,18 @@ For each MJX run that passes MJX-side quality:
 - do not include replay time in MJX speed
 - compute the same primary metrics
 - compare replay metrics against the same baseline envelope
+- prove provenance by matching replay `mpc.saved_command` to the current MJX
+  run's planned `mpc_command.npz`
 
 The replay must satisfy the same quality criteria, except contact force scale
 may be reported separately if contact timing and tracking pass. If MJX metrics
 pass but MuJoCo-Warp replay fails, the implementation is classified as
 `mjx_contact_or_model_parity_failure`, not as a successful backend.
+
+Replay provenance is an invalid-benchmark gate. Each replay `metrics.json` must
+report `replay_mode=shared_execute_backend`, `control_steps` matching the planned
+`--replay-control-steps`, `num_replay_steps` matching the replay metrics step
+count, and `num_command_frames >= num_replay_steps + 1`.
 
 ### Speed Criteria
 

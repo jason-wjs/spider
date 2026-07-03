@@ -333,7 +333,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "num_steps": 800,
                 }
                 if is_replay:
-                    row["command_wall_time_sec"] = 1.0
+                    row.update(_replay_evidence(argv))
                 else:
                     row.update(
                         {
@@ -487,6 +487,74 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse(report["replay_results"]["jump"]["passed"])
         self.assertIn("metrics_json", report["replay_results"]["jump"]["failures"])
 
+    def test_replay_saved_command_mismatch_fails_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            stale_command = root / "stale_mpc_command.npz"
+            stale_command.write_text("stale")
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                seed = int(argv[argv.index("--seed") + 1])
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row.update(
+                        _replay_evidence(
+                            argv,
+                            saved_command=str(stale_command) if seed == 1 else None,
+                        )
+                    )
+                    return row
+                row.update(
+                    {
+                        "mpc_accepted": True,
+                        "accepted_windows": 40,
+                        "mpc_used_baseline_fallback": False,
+                        "compile_init_wall_time_sec": 2.0,
+                        "jit_warmup_enabled": True,
+                        "jit_warmup_wall_time_sec": 1.5,
+                        "runtime_visible_devices": ("0",),
+                        "steady_state_wall_time_sec": 1.0,
+                        **_mjx_contact_evidence(),
+                    }
+                )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "replay_saved_command",
+            report["replay_results"]["jump"]["failures"],
+        )
+
     def test_missing_baseline_artifact_paths_fail_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -512,7 +580,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "num_steps": 800,
                 }
                 if is_replay:
-                    row["command_wall_time_sec"] = 1.0
+                    row.update(_replay_evidence(argv))
                 else:
                     row.update(
                         {
@@ -615,7 +683,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "num_steps": 800,
                 }
                 if is_replay:
-                    row["command_wall_time_sec"] = 1.0
+                    row.update(_replay_evidence(argv))
                 else:
                     row.update(
                         {
@@ -678,7 +746,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "num_steps": 800,
                 }
                 if is_replay:
-                    row["command_wall_time_sec"] = 1.0
+                    row.update(_replay_evidence(argv))
                 else:
                     row.update(
                         {
@@ -940,7 +1008,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "num_steps": 800,
                 }
                 if is_replay:
-                    row["command_wall_time_sec"] = 1.0
+                    row.update(_replay_evidence(argv))
                 else:
                     row.update(
                         {
@@ -1089,6 +1157,32 @@ def _mjx_contact_evidence(
         "max_geom_pairs": max_geom_pairs,
         "contact_pair_count": contact_pair_count,
         "active_contact_count": active_contact_count,
+    }
+
+
+def _replay_evidence(
+    argv: list[str],
+    *,
+    saved_command: str | None = None,
+    control_steps: int = 20,
+    num_command_frames: int = 801,
+    num_replay_steps: int = 800,
+) -> dict[str, object]:
+    if saved_command is None:
+        saved_command = argv[argv.index("--saved-command") + 1]
+    return {
+        "command_wall_time_sec": 1.0,
+        "mpc": {
+            "backend": (
+                "spider.tasks.g1_wbc.spider_task."
+                "G1WbcSamplingTask.replay_qpos_command_sequence"
+            ),
+            "saved_command": str(Path(saved_command).expanduser().resolve()),
+            "replay_mode": "shared_execute_backend",
+            "control_steps": control_steps,
+            "num_command_frames": num_command_frames,
+            "num_replay_steps": num_replay_steps,
+        },
     }
 
 
