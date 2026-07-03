@@ -3494,7 +3494,32 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             row = runner._row_from_metrics(path)
 
         self.assertFalse(row["mpc_accepted"])
-        self.assertTrue(row["mpc_used_baseline_fallback"])
+        self.assertIsNot(row["mpc_used_baseline_fallback"], False)
+
+    def test_metrics_parser_invalid_accepted_windows_fails_closed(self) -> None:
+        runner = load_runner()
+        invalid_cases = (
+            ("missing_with_num_windows", {"num_windows": 40}),
+            ("string", {"accepted_windows": "40"}),
+            ("bool", {"accepted_windows": True}),
+        )
+        for name, mpc in invalid_cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    path = Path(tmp_dir) / "metrics.json"
+                    payload = {
+                        "metrics": _metrics(success=True),
+                        "mpc": {
+                            "accepted": True,
+                            "used_baseline_fallback": False,
+                            **mpc,
+                        },
+                    }
+                    path.write_text(json.dumps(payload))
+
+                    row = runner._row_from_metrics(path)
+
+                self.assertNotEqual(row["accepted_windows"], 40)
 
 
 def _write_artifacts(output_dir: Path, *, include_command: bool = True) -> None:

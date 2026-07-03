@@ -2095,6 +2095,7 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
     mpc = payload.get("mpc", {})
     if not isinstance(mpc, dict):
         mpc = {}
+    accepted_windows = _strict_json_int(mpc.get("accepted_windows"))
     return {
         "metrics": metrics,
         "mpc": mpc,
@@ -2104,10 +2105,10 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "metrics_checkpoint": payload.get("checkpoint"),
         "metrics_max_steps": payload.get("max_steps"),
         "mpc_accepted": mpc.get("accepted") is True,
-        "accepted_windows": _safe_int(
-            mpc.get("accepted_windows", mpc.get("num_windows", -1))
+        "accepted_windows": -1 if accepted_windows is None else accepted_windows,
+        "mpc_used_baseline_fallback": _strict_json_bool(
+            mpc.get("used_baseline_fallback")
         ),
-        "mpc_used_baseline_fallback": mpc.get("used_baseline_fallback") is not False,
         "num_steps": _safe_int(metrics.get("num_steps", -1)),
         "compile_init_wall_time_sec": mpc.get("compile_init_wall_time_sec"),
         "jit_warmup_enabled": mpc.get("jit_warmup_enabled"),
@@ -2129,6 +2130,16 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "contact_pair_count": mpc.get("contact_pair_count"),
         "active_contact_count": mpc.get("active_contact_count"),
     }
+
+
+def _strict_json_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _strict_json_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    return value if isinstance(value, int) else None
 
 
 def _mjx_timing_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
