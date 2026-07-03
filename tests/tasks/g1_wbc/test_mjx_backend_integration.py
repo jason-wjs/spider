@@ -21,7 +21,7 @@ from spider.tasks.g1_wbc.constants import (
 )
 from spider.tasks.g1_wbc.mjx_backend import run_g1_wbc_mjx_mpc
 from spider.tasks.g1_wbc.mjx_components import build_mjx_rollout_components
-from spider.tasks.g1_wbc.motion import G1Motion
+from spider.tasks.g1_wbc.motion import G1Motion, qvel_from_qpos_trajectory
 from spider.tasks.g1_wbc.policy import WbcActor
 from spider.tasks.g1_wbc.result_types import G1WbcMpcRun
 
@@ -274,6 +274,29 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertIsNone(result.metadata["runtime_gpu_name"])
         self.assertIn("model:wxy_parity", calls)
         self.assertIn("policy", calls)
+
+    def test_command_from_refined_qpos_exports_finite_difference_qvel(self) -> None:
+        refined_qpos = torch.zeros(3, QPOS_DIM)
+        refined_qpos[:, 3] = 1.0
+        refined_qpos[1:, 0] = torch.tensor([0.02, 0.04])
+        refined_qpos[1:, 7] = torch.tensor([0.02, 0.04])
+        rollout = _fake_rollout_result(
+            _motion(frames=3),
+            total_steps=2,
+            device=torch.device("cpu"),
+            refined_qpos=refined_qpos,
+        )
+
+        command = mjx_backend_module._command_from_refined_qpos(
+            _motion(frames=3),
+            refined_qpos,
+            rollout,
+        )
+
+        expected_qvel = qvel_from_qpos_trajectory(refined_qpos[:, None, :])
+        torch.testing.assert_close(command.qvel_trajectory, expected_qvel)
+        torch.testing.assert_close(command.joint_vel, expected_qvel[..., 6:])
+        torch.testing.assert_close(command.qpos_trajectory[:, 0], refined_qpos)
 
     def test_mjx_backend_emits_contact_capacity_metadata(self) -> None:
         def optimizer(**kwargs):

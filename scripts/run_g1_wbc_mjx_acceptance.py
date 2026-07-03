@@ -2252,6 +2252,10 @@ def _artifact_npz_schema_failures(
                     Path(command_path).expanduser(),
                 ):
                     failures.append("mpc_command_qpos_mismatch")
+                elif not _command_qvel_is_consistent(
+                    Path(command_path).expanduser(),
+                ):
+                    failures.append("mpc_command_qvel_mismatch")
             if (
                 rollout_valid
                 and command_valid
@@ -2353,6 +2357,104 @@ def _command_qpos_is_consistent(command_path: Path) -> bool:
             )
     except Exception:
         return False
+
+
+def _command_qvel_is_consistent(command_path: Path) -> bool:
+    try:
+        with np.load(command_path) as command:
+            refined_qpos = _squeeze_single_batch_axis(command["refined_qpos"])
+            command_qvel = _squeeze_single_batch_axis(
+                command["command_qvel_trajectory"]
+            )
+            expected_qvel = _qvel_from_qpos_trajectory(refined_qpos)
+            if command_qvel.shape != expected_qvel.shape:
+                return False
+            return bool(
+                np.allclose(
+                    command_qvel,
+                    expected_qvel,
+                    atol=1.0e-5,
+                    rtol=1.0e-5,
+                )
+            )
+    except Exception:
+        return False
+
+
+def _qvel_from_qpos_trajectory(qpos: np.ndarray) -> np.ndarray:
+    qpos = np.asarray(qpos, dtype=np.float32)
+    if qpos.ndim != 2 or qpos.shape[-1] != QPOS_DIM:
+        raise ValueError(f"Expected qpos shape (frames, {QPOS_DIM}), got {qpos.shape}")
+    qvel = np.zeros((qpos.shape[0], QVEL_DIM), dtype=np.float32)
+    if qpos.shape[0] <= 1:
+        return qvel
+    lin_vel = _differentiate(qpos[:, :3])
+    delta_quat = _quat_mul(qpos[1:, 3:7], _quat_inv(qpos[:-1, 3:7]))
+    ang_vel = _axis_angle_from_quat(delta_quat) / POLICY_DT
+    ang_vel = np.concatenate([ang_vel, ang_vel[-1:]], axis=0)
+    qvel[:, :6] = _world_velocity_to_qvel(
+        qpos[:, :7],
+        np.concatenate([lin_vel, ang_vel], axis=-1),
+    )
+    qvel[:, 6:] = _differentiate(qpos[:, 7:])
+    return qvel
+
+
+def _differentiate(values: np.ndarray) -> np.ndarray:
+    if values.shape[0] <= 1:
+        return np.zeros_like(values, dtype=np.float32)
+    velocity = (values[1:] - values[:-1]) / POLICY_DT
+    return np.concatenate([velocity, velocity[-1:]], axis=0).astype(np.float32)
+
+
+def _quat_inv(quat: np.ndarray) -> np.ndarray:
+    conjugate = np.concatenate([quat[..., 0:1], -quat[..., 1:]], axis=-1)
+    return conjugate / np.sum(quat * quat, axis=-1, keepdims=True).clip(min=1.0e-9)
+
+
+def _quat_mul(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    q1, q2 = np.broadcast_arrays(q1, q2)
+    w1, x1, y1, z1 = (q1[..., index] for index in range(4))
+    w2, x2, y2, z2 = (q2[..., index] for index in range(4))
+    ww = (z1 + x1) * (x2 + y2)
+    yy = (w1 - y1) * (w2 + z2)
+    zz = (w1 + y1) * (w2 - z2)
+    xx = ww + yy + zz
+    qq = 0.5 * (xx + (z1 - x1) * (x2 - y2))
+    w = qq - ww + (z1 - y1) * (y2 - z2)
+    x = qq - xx + (x1 + w1) * (x2 + w2)
+    y = qq - yy + (w1 - x1) * (y2 + z2)
+    z = qq - zz + (z1 + y1) * (w2 - x2)
+    return np.stack([w, x, y, z], axis=-1)
+
+
+def _axis_angle_from_quat(quat: np.ndarray) -> np.ndarray:
+    quat = quat * (1.0 - 2.0 * (quat[..., 0:1] < 0.0))
+    mag = np.linalg.norm(quat[..., 1:], axis=-1)
+    half_angle = np.arctan2(mag, quat[..., 0])
+    angle = 2.0 * half_angle
+    denom = np.where(
+        np.abs(angle) > 1.0e-6,
+        np.sin(half_angle) / np.where(np.abs(angle) > 1.0e-6, angle, 1.0),
+        0.5 - angle * angle / 48.0,
+    )
+    return quat[..., 1:4] / denom[..., None]
+
+
+def _world_velocity_to_qvel(qpos: np.ndarray, world_vel: np.ndarray) -> np.ndarray:
+    return np.concatenate(
+        [
+            world_vel[..., :3],
+            _quat_apply_inverse(qpos[..., 3:7], world_vel[..., 3:6]),
+        ],
+        axis=-1,
+    )
+
+
+def _quat_apply_inverse(quat: np.ndarray, vec: np.ndarray) -> np.ndarray:
+    xyz = quat[..., 1:]
+    t = np.cross(xyz, vec) * 2.0
+    return vec - quat[..., 0:1] * t + np.cross(xyz, t)
 
 
 def _squeeze_single_batch_axis(array) -> np.ndarray:

@@ -21,7 +21,7 @@ from spider.tasks.g1_wbc.mjx_contacts import get_contact_profile
 from spider.tasks.g1_wbc.mjx_optimizer import JaxWindowOptimizerConfig, optimize_window
 from spider.tasks.g1_wbc.mjx_policy import convert_wbc_actor_to_jax
 from spider.tasks.g1_wbc.mjx_runtime import require_mjx_runtime
-from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion
+from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion, qvel_from_qpos_trajectory
 from spider.tasks.g1_wbc.result_types import G1WbcMpcRun, G1WbcSpiderResult
 
 
@@ -947,22 +947,17 @@ def _command_from_refined_qpos(
     refined_qpos: torch.Tensor,
     rollout,
 ) -> G1CommandBatch:
+    qvel_trajectory = qvel_from_qpos_trajectory(refined_qpos[:, None, :])
     return G1CommandBatch(
         path=motion.path,
         motion_type=motion.motion_type,
         fps=motion.fps,
         joint_pos=refined_qpos[:, None, 7:].contiguous(),
-        joint_vel=torch.zeros_like(refined_qpos[:, None, 7:]),
+        joint_vel=qvel_trajectory[..., 6:].contiguous(),
         body_pos_w=rollout.body_pos_w.detach().clone(),
         body_quat_w=rollout.body_quat_w.detach().clone(),
         body_lin_vel_w=rollout.body_lin_vel_w.detach().clone(),
         body_ang_vel_w=rollout.body_ang_vel_w.detach().clone(),
         qpos_trajectory=refined_qpos[:, None, :].contiguous(),
-        qvel_trajectory=torch.zeros(
-            refined_qpos.shape[0],
-            1,
-            rollout.qvel.shape[-1],
-            dtype=refined_qpos.dtype,
-            device=refined_qpos.device,
-        ),
+        qvel_trajectory=qvel_trajectory.contiguous(),
     )

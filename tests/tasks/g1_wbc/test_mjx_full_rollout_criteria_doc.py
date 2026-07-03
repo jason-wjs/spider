@@ -39,6 +39,7 @@ class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
             "mpc_command_npz_schema",
             "mpc_rollout_qpos_mismatch",
             "mpc_command_qpos_mismatch",
+            "mpc_command_qvel_mismatch",
             "replay_saved_command_source",
             "replay_saved_command_hash",
             "replay_command_npz_frames",

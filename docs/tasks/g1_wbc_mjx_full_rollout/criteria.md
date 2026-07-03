@@ -263,6 +263,9 @@ Invalid command content is reported as `mpc_command_npz_schema`.
 Within a command NPZ, `refined_qpos` must match `command_qpos_trajectory`
 within the runtime acceptance tolerance. Mismatch is reported as
 `mpc_command_qpos_mismatch`.
+`command_qvel_trajectory` must match the finite-difference MuJoCo qvel
+trajectory derived from `refined_qpos` at the policy timestep. Mismatch is
+reported as `mpc_command_qvel_mismatch`.
 For MJX and Stage0 MPC rows, `rollout.npz["qpos"][:, 0]` must match
 `mpc_command.npz["refined_qpos"]` within the runtime acceptance tolerance.
 Mismatch is reported as `mpc_rollout_qpos_mismatch`.
