@@ -26,6 +26,7 @@ from spider.tasks.g1_wbc.mjx_policy import JaxActorParams
 from spider.tasks.g1_wbc.mjx_rollout import (
     controls_to_qpos,
     make_rollout_scorer,
+    rollout_candidate_controls,
     score_candidate_controls,
 )
 from spider.tasks.g1_wbc.mjx_scoring import JaxScoreWeights
@@ -523,6 +524,57 @@ class MjxRolloutTest(unittest.TestCase):
         )
 
         np.testing.assert_allclose(commanded_root_x, [0.0, 1.0, 2.0])
+
+    def test_rollout_candidate_controls_returns_qpos_trace(self) -> None:
+        samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=3)
+        base_qpos = np.zeros((3, QPOS_DIM), dtype=np.float32)
+        base_qpos[:, 0] = np.array([0.0, 1.0, 2.0], dtype=np.float32)
+        base_qpos[:, 3] = 1.0
+        reference["base_qpos"] = base_qpos
+
+        def offset_physics_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            del model_bundle, robot_state, action, step_index, runtime
+            samples = int(command_qpos.shape[0])
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.asarray(command_qpos, dtype=np.float32).copy()
+            qpos[:, 0] += 0.2
+            qvel = np.zeros((samples, QVEL_DIM), dtype=np.float32)
+            body_pos = np.zeros((samples, bodies, 3), dtype=np.float32)
+            next_robot = {
+                "qpos": qpos,
+                "qvel": qvel,
+                "body_pos_w": body_pos,
+                "body_quat_w": _identity_body_quat((samples, bodies)),
+                "body_ang_vel_w": np.zeros((samples, bodies, 3), dtype=np.float32),
+            }
+            return next_robot, {
+                "root_pos": qpos[:, :3],
+                "body_pos": body_pos[:, :2],
+                "ee_pos": body_pos[:, :1],
+                "contact": np.zeros((samples, 2), dtype=np.float32),
+            }
+
+        trace = rollout_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=offset_physics_step,
+        )
+
+        self.assertEqual(trace["qpos"].shape, (4, 1, QPOS_DIM))
+        np.testing.assert_allclose(trace["qpos"][0, 0], reference["initial_robot_state"]["qpos"][0])
+        np.testing.assert_allclose(trace["qpos"][1:, 0, 0], [0.2, 1.2, 2.2])
 
     def test_score_candidate_controls_treats_reference_base_qpos_as_window_when_square(
         self,

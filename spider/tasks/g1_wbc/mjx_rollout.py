@@ -317,6 +317,117 @@ def score_candidate_controls(
     return metrics["score"]
 
 
+def rollout_candidate_controls(
+    samples,
+    reference: Mapping[str, object],
+    actor_params,
+    model_bundle,
+    *,
+    runtime,
+    physics_step_fn: PhysicsStepFn,
+    command_reference_fn: CommandReferenceFn | None = None,
+) -> dict[str, object]:
+    """Roll out sampled high-level controls and return robot-state traces."""
+
+    jnp = runtime.jnp
+    samples = jnp.asarray(samples)
+    _validate_samples(samples)
+    sample_count = int(samples.shape[0])
+    horizon = int(samples.shape[1])
+
+    robot_state = _batched_robot_state(
+        _required(reference, "initial_robot_state"),
+        sample_count,
+        jnp=jnp,
+    )
+    obs_state = _initial_obs_state(reference, sample_count, jnp=jnp)
+    obs_indices = _required(reference, "obs_indices")
+    if not isinstance(obs_indices, JaxObsIndices):
+        raise TypeError("reference['obs_indices'] must be a JaxObsIndices")
+    default_joint_pos = _required(reference, "default_joint_pos")
+    base_qpos = (
+        _reference_base_qpos(
+            reference["base_qpos"],
+            sample_count=sample_count,
+            horizon=horizon,
+            jnp=jnp,
+        )
+        if "base_qpos" in reference
+        else robot_state["qpos"]
+    )
+    commanded_qpos = controls_to_qpos(
+        samples,
+        base_qpos,
+        _required(reference, "joint_low"),
+        _required(reference, "joint_high"),
+        jnp=jnp,
+    )
+    commanded_qvel = _commanded_qvel(commanded_qpos, jnp=jnp)
+    commanded_joint_vel = commanded_qvel[..., 6:]
+    command_reference = _command_reference(
+        command_reference_fn,
+        model_bundle,
+        commanded_qpos,
+        commanded_qvel,
+        runtime=runtime,
+        jnp=jnp,
+    )
+    prev_control = _ensure_batch(
+        jnp.asarray(
+            reference.get("prev_control", jnp.zeros((sample_count, QPOS_DIM - 1)))
+        ),
+        sample_count,
+        jnp=jnp,
+    )
+    prev_joint_vel = _joint_vel(robot_state)
+    accumulator = init_score_accumulator((sample_count,), jnp=jnp)
+    weights = reference.get("score_weights", JaxScoreWeights({}))
+    if not isinstance(weights, JaxScoreWeights):
+        weights = JaxScoreWeights(dict(weights))
+    obs_initialized = reference.get("obs_initialized", False)
+    step_reference = _with_commanded_qpos(
+        reference,
+        commanded_qpos,
+        commanded_joint_vel,
+        command_reference,
+    )
+
+    qpos_trace = [robot_state["qpos"]]
+    qvel_trace = [robot_state["qvel"]]
+    for step_index in range(horizon):
+        next_values = _score_rollout_step(
+            step_index,
+            robot_state=robot_state,
+            obs_state=obs_state,
+            prev_control=prev_control,
+            prev_joint_vel=prev_joint_vel,
+            accumulator=accumulator,
+            samples=samples,
+            reference=step_reference,
+            obs_indices=obs_indices,
+            default_joint_pos=default_joint_pos,
+            actor_params=actor_params,
+            model_bundle=model_bundle,
+            weights=weights,
+            obs_initialized=obs_initialized if step_index == 0 else True,
+            physics_step_fn=physics_step_fn,
+            runtime=runtime,
+            sample_count=sample_count,
+        )
+        robot_state = next_values["robot_state"]
+        obs_state = next_values["obs_state"]
+        prev_control = next_values["prev_control"]
+        prev_joint_vel = next_values["prev_joint_vel"]
+        accumulator = next_values["accumulator"]
+        qpos_trace.append(robot_state["qpos"])
+        qvel_trace.append(robot_state["qvel"])
+
+    return {
+        "qpos": jnp.stack(qpos_trace, axis=0),
+        "qvel": jnp.stack(qvel_trace, axis=0),
+    }
+
+
 def _with_physics_step_count(
     metrics: Mapping[str, object],
     *,
@@ -808,5 +919,6 @@ def _required(values: Mapping[str, object], name: str):
 __all__ = [
     "controls_to_qpos",
     "make_rollout_scorer",
+    "rollout_candidate_controls",
     "score_candidate_controls",
 ]
