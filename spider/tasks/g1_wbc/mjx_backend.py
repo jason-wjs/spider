@@ -462,12 +462,14 @@ def _any_info_flag(infos: list[dict[str, Any]], name: str) -> bool:
 
 
 def _window_accepted(info: dict[str, Any]) -> bool:
+    if "accepted" not in info:
+        raise ValueError("MJX optimizer info must include boolean accepted metadata")
     accepted = _python_scalar(info.get("accepted"))
     if isinstance(accepted, bool):
         return accepted
     if isinstance(accepted, (int, float)) and math.isfinite(float(accepted)):
         return bool(accepted)
-    return True
+    raise ValueError("MJX optimizer info accepted metadata must be boolean-like")
 
 
 def _rollout_active_contact_count(rollout) -> int:

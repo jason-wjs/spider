@@ -135,7 +135,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 return SimpleNamespace(
                     updated_controls=updated,
                     execute_chunk=chunk,
-                    info={"best_score": torch.tensor(1.0)},
+                    info={"best_score": torch.tensor(1.0), "accepted": True},
                 )
 
             def rollout_factory(motion, total_steps, *, device, refined_qpos):
@@ -286,6 +286,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 execute_chunk=chunk,
                 info={
                     "best_score": torch.tensor(1.25),
+                    "accepted": True,
                     "active_contact_count": torch.tensor(7),
                     "contact_pair_count": torch.tensor(13),
                 },
@@ -317,7 +318,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             return SimpleNamespace(
                 updated_controls=updated,
                 execute_chunk=chunk,
-                info={"best_score": torch.tensor(1.25)},
+                info={"best_score": torch.tensor(1.25), "accepted": True},
             )
 
         result = run_g1_wbc_mjx_mpc(
@@ -591,6 +592,37 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 rollout_factory=_fake_rollout_result,
             )
 
+    def test_mjx_backend_rejects_missing_or_invalid_accepted_metadata(self) -> None:
+        invalid_values = {
+            "missing": None,
+            "none": None,
+            "nan": torch.tensor(float("nan")),
+            "string": "false",
+        }
+        for name, accepted in invalid_values.items():
+            with self.subTest(name=name):
+                include_field = name != "missing"
+
+                def optimizer(**kwargs):
+                    del kwargs
+                    updated = torch.zeros(40, QPOS_DIM - 1)
+                    chunk = torch.zeros(21, QPOS_DIM - 1)
+                    chunk[:, 0] = 0.25
+                    info = {"best_score": torch.tensor(1.25)}
+                    if include_field:
+                        info["accepted"] = accepted
+                    return SimpleNamespace(
+                        updated_controls=updated,
+                        execute_chunk=chunk,
+                        info=info,
+                    )
+
+                with self.assertRaisesRegex(ValueError, "accepted"):
+                    _run_with_fakes(
+                        optimizer=optimizer,
+                        rollout_factory=_fake_rollout_result,
+                    )
+
     def test_mjx_backend_shifts_controls_between_windows(self) -> None:
         captured: list[torch.Tensor] = []
 
@@ -604,7 +636,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             return SimpleNamespace(
                 updated_controls=updated,
                 execute_chunk=chunk,
-                info={"best_score": torch.tensor(1.25)},
+                info={"best_score": torch.tensor(1.25), "accepted": True},
             )
 
         _run_with_fakes(optimizer=optimizer, rollout_factory=_fake_rollout_result)
@@ -629,7 +661,10 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             return SimpleNamespace(
                 updated_controls=jnp.zeros((40, QPOS_DIM - 1), dtype=jnp.float32),
                 execute_chunk=jnp.zeros((21, QPOS_DIM - 1), dtype=jnp.float32),
-                info={"best_score": jnp.asarray(1.25, dtype=jnp.float32)},
+                info={
+                    "best_score": jnp.asarray(1.25, dtype=jnp.float32),
+                    "accepted": True,
+                },
             )
 
         result = _run_with_fakes(
@@ -926,7 +961,7 @@ def _fake_optimizer(**kwargs):
     return SimpleNamespace(
         updated_controls=updated,
         execute_chunk=chunk,
-        info={"best_score": torch.tensor(1.25)},
+        info={"best_score": torch.tensor(1.25), "accepted": True},
     )
 
 
@@ -935,7 +970,11 @@ def _missing_score_optimizer(**kwargs):
     updated = torch.zeros(40, QPOS_DIM - 1)
     chunk = torch.zeros(21, QPOS_DIM - 1)
     chunk[:, 0] = 0.25
-    return SimpleNamespace(updated_controls=updated, execute_chunk=chunk, info={})
+    return SimpleNamespace(
+        updated_controls=updated,
+        execute_chunk=chunk,
+        info={"accepted": True},
+    )
 
 
 def _nan_score_optimizer(**kwargs):
@@ -946,7 +985,7 @@ def _nan_score_optimizer(**kwargs):
     return SimpleNamespace(
         updated_controls=updated,
         execute_chunk=chunk,
-        info={"best_score": torch.tensor(float("nan"))},
+        info={"best_score": torch.tensor(float("nan")), "accepted": True},
     )
 
 
@@ -958,7 +997,7 @@ def _vector_score_optimizer(**kwargs):
     return SimpleNamespace(
         updated_controls=updated,
         execute_chunk=chunk,
-        info={"best_score": torch.tensor([1.0, 2.0])},
+        info={"best_score": torch.tensor([1.0, 2.0]), "accepted": True},
     )
 
 
