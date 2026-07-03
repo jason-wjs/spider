@@ -397,9 +397,36 @@ def write_manifest(
     }
     if metadata:
         payload.update(metadata)
+    baseline_summary = build_baseline_summary(rows)
+    if baseline_summary:
+        payload.update(baseline_summary)
     manifest_path = output_dir / "baseline_manifest.json"
     manifest_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return manifest_path
+
+
+def build_baseline_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return frozen baseline envelopes for a passing formal Stage 0 run."""
+
+    from spider.tasks.g1_wbc.acceptance import evaluate_baseline_group
+
+    baseline_envelopes: dict[str, dict[str, dict[str, float]]] = {}
+    promoted_seeds: dict[str, int | None] = {}
+    gate_failures: dict[str, list[str]] = {}
+    for motion in MOTIONS:
+        group = [row for row in rows if row.get("motion_name") == motion]
+        gate = evaluate_baseline_group(motion, group)
+        if gate.passed:
+            baseline_envelopes[motion] = gate.envelope
+            promoted_seeds[motion] = gate.promoted_seed
+        else:
+            gate_failures[motion] = list(gate.failures)
+    if gate_failures:
+        return {"baseline_gate_failures": gate_failures}
+    return {
+        "baseline_envelopes": baseline_envelopes,
+        "promoted_seeds": promoted_seeds,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

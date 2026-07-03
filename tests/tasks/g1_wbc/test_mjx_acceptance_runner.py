@@ -136,11 +136,108 @@ def _baseline_manifest(tmp_path: Path) -> Path:
             "checkpoint": _file_sha256(checkpoint),
             "reward_weights": _file_sha256(reward_weights),
         },
+        "baseline_envelopes": _baseline_envelopes(),
+        "promoted_seeds": {"jump": 0, "walk": 0},
         "rows": rows,
     }
     path = tmp_path / "baseline_manifest.json"
     path.write_text(json.dumps(manifest))
     return path
+
+
+def _baseline_envelopes() -> dict[str, dict[str, dict[str, float]]]:
+    metric_stats = {
+        "score": {"mean": -1.0, "std": 0.0, "min": -1.0, "max": -1.0, "median": -1.0},
+        "root_pos_error_mean": {
+            "mean": 0.01,
+            "std": 0.0,
+            "min": 0.01,
+            "max": 0.01,
+            "median": 0.01,
+        },
+        "body_global_pos_error_mean": {
+            "mean": 0.01,
+            "std": 0.0,
+            "min": 0.01,
+            "max": 0.01,
+            "median": 0.01,
+        },
+        "ee_global_pos_error_mean": {
+            "mean": 0.01,
+            "std": 0.0,
+            "min": 0.01,
+            "max": 0.01,
+            "median": 0.01,
+        },
+        "ee_local_pos_error_mean": {
+            "mean": 0.01,
+            "std": 0.0,
+            "min": 0.01,
+            "max": 0.01,
+            "median": 0.01,
+        },
+        "contact_mismatch_rate": {
+            "mean": 0.01,
+            "std": 0.0,
+            "min": 0.01,
+            "max": 0.01,
+            "median": 0.01,
+        },
+        "contact_false_positive_rate": {
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "median": 0.0,
+        },
+        "contact_false_negative_rate": {
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "median": 0.0,
+        },
+        "bad_floor_contact_rate": {
+            "mean": 0.0,
+            "std": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "median": 0.0,
+        },
+        "control_delta_mean": {
+            "mean": 0.01,
+            "std": 0.0,
+            "min": 0.01,
+            "max": 0.01,
+            "median": 0.01,
+        },
+        "joint_acc_mean": {
+            "mean": 1.0,
+            "std": 0.0,
+            "min": 1.0,
+            "max": 1.0,
+            "median": 1.0,
+        },
+        "joint_jerk_mean": {
+            "mean": 1.0,
+            "std": 0.0,
+            "min": 1.0,
+            "max": 1.0,
+            "median": 1.0,
+        },
+    }
+    envelope = {
+        "success": {
+            "mean": 1.0,
+            "std": 0.0,
+            "min": 1.0,
+            "max": 1.0,
+            "median": 1.0,
+            "count": 3.0,
+        },
+        **metric_stats,
+    }
+    return {"jump": dict(envelope), "walk": dict(envelope)}
 
 
 def _metrics(*, success: bool) -> dict[str, float | bool]:
@@ -275,6 +372,46 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "manifest_input_sha256"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_missing_frozen_baseline_envelopes(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest.pop("baseline_envelopes")
+            manifest.pop("promoted_seeds")
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "baseline_envelopes"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_mismatched_frozen_baseline_envelope(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["baseline_envelopes"]["jump"]["score"]["mean"] = -9.0
+            manifest["promoted_seeds"]["walk"] = 2
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "baseline_envelopes"):
                 runner.build_acceptance_plan(args, manifest)
 
     def test_build_acceptance_plan_rejects_noncanonical_manifest_input_hashes(self) -> None:
@@ -505,6 +642,91 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual(len(report["planned_runs"]), 6)
         self.assertFalse(report["motion_results"]["jump"]["mjx_passed"])
+
+    def test_report_quality_gate_uses_frozen_baseline_envelope(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            frozen = _baseline_envelopes()
+            frozen["jump"]["root_pos_error_mean"] = {
+                "mean": 0.005,
+                "std": 0.0,
+                "min": 0.005,
+                "max": 0.005,
+                "median": 0.005,
+            }
+            mjx_rows = []
+            replay_rows = []
+            for motion in ("jump", "walk"):
+                for seed in (0, 1, 2):
+                    output_dir = root / "acceptance" / motion / f"seed_{seed}" / "mjx"
+                    replay_output_dir = root / "acceptance" / motion / f"seed_{seed}" / "replay"
+                    _write_artifacts(output_dir)
+                    _write_artifacts(replay_output_dir, include_command=False)
+                    metrics = _metrics(success=True)
+                    if motion == "jump":
+                        metrics["root_pos_error_mean"] = 0.006
+                    mjx_rows.append(
+                        {
+                            "motion": motion,
+                            "seed": seed,
+                            "status": "ok",
+                            "returncode": 0,
+                            "metrics": metrics,
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "num_steps": 800,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "runtime_visible_devices": ("0",),
+                            "steady_state_wall_time_sec": 1.0,
+                            "artifacts": {
+                                "metrics_json": str(output_dir / "metrics.json"),
+                                "rollout_npz": str(output_dir / "rollout.npz"),
+                                "mpc_command_npz": str(output_dir / "mpc_command.npz"),
+                            },
+                            **_mjx_contact_evidence(),
+                        }
+                    )
+                    replay_rows.append(
+                        {
+                            "motion": motion,
+                            "seed": seed,
+                            "status": "ok",
+                            "returncode": 0,
+                            "metrics": metrics,
+                            "num_steps": 800,
+                            "artifacts": {
+                                "metrics_json": str(replay_output_dir / "metrics.json"),
+                                "rollout_npz": str(replay_output_dir / "rollout.npz"),
+                            },
+                            **_replay_evidence(
+                                [
+                                    "python",
+                                    "--saved-command",
+                                    str(output_dir / "mpc_command.npz"),
+                                ]
+                            ),
+                        }
+                    )
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=frozen,
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertIn("root_pos_error_mean", report["motion_results"]["jump"]["mjx_failures"])
 
     def test_missing_mjx_timing_or_artifacts_fail_closed(self) -> None:
         runner = load_runner()

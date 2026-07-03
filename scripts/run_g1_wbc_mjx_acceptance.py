@@ -248,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     report = _build_report(
         baseline_manifest=baseline_manifest,
         baseline_rows=list(manifest.get("rows", [])),
+        baseline_envelopes=_baseline_envelopes_from_manifest(manifest),
         mjx_rows=mjx_rows,
         replay_rows=replay_rows,
         min_speedup=float(args.min_speedup),
@@ -308,6 +309,7 @@ def _validate_formal_baseline_manifest(
     if seeds != SEEDS:
         failures.append("seeds")
     failures.extend(_formal_manifest_provenance_failures(manifest, matrix))
+    failures.extend(_formal_manifest_baseline_envelope_failures(manifest, matrix))
 
     for (motion, seed), row in matrix.items():
         failures.extend(_formal_stage0_row_failures(row, motion=motion, seed=seed))
@@ -346,6 +348,93 @@ def _formal_manifest_provenance_failures(
         if not _manifest_input_hashes_match(input_hashes, matrix):
             failures.append("manifest_input_sha256")
     return failures
+
+
+def _formal_manifest_baseline_envelope_failures(
+    manifest: dict[str, Any],
+    matrix: dict[tuple[str, int], dict[str, Any]],
+) -> list[str]:
+    failures: list[str] = []
+    baseline_envelopes = _baseline_envelopes_from_manifest(manifest)
+    promoted_seeds = manifest.get("promoted_seeds")
+    if set(baseline_envelopes) != set(MOTIONS):
+        failures.append("baseline_envelopes")
+    if not isinstance(promoted_seeds, dict):
+        failures.append("promoted_seeds")
+        promoted_seeds = {}
+
+    for motion in MOTIONS:
+        group = [matrix[(motion, seed)] for seed in SEEDS]
+        gate = evaluate_baseline_group(motion, group)
+        if not gate.passed:
+            failures.append("baseline_envelopes")
+            continue
+        frozen = baseline_envelopes.get(motion)
+        if frozen is None or not _envelopes_equivalent(frozen, gate.envelope):
+            failures.append("baseline_envelopes")
+        if _safe_int(promoted_seeds.get(motion)) != gate.promoted_seed:
+            failures.append("promoted_seeds")
+    return failures
+
+
+def _baseline_envelopes_from_manifest(
+    manifest: dict[str, Any],
+) -> dict[str, dict[str, dict[str, float]]]:
+    raw = manifest.get("baseline_envelopes")
+    if not isinstance(raw, dict):
+        return {}
+    baseline_envelopes: dict[str, dict[str, dict[str, float]]] = {}
+    for motion in MOTIONS:
+        envelope = _normalise_metric_envelope(raw.get(motion))
+        if envelope is not None:
+            baseline_envelopes[motion] = envelope
+    return baseline_envelopes
+
+
+def _normalise_metric_envelope(
+    value: Any,
+) -> dict[str, dict[str, float]] | None:
+    if not isinstance(value, dict):
+        return None
+    envelope: dict[str, dict[str, float]] = {}
+    for metric, stats in value.items():
+        if not isinstance(metric, str) or not isinstance(stats, dict):
+            return None
+        envelope[metric] = {}
+        for stat, stat_value in stats.items():
+            if (
+                not isinstance(stat, str)
+                or isinstance(stat_value, bool)
+                or not isinstance(stat_value, (int, float))
+            ):
+                return None
+            stat_float = float(stat_value)
+            if not math.isfinite(stat_float):
+                return None
+            envelope[metric][stat] = stat_float
+    return envelope
+
+
+def _envelopes_equivalent(
+    observed: dict[str, dict[str, float]],
+    expected: dict[str, dict[str, float]],
+) -> bool:
+    if set(observed) != set(expected):
+        return False
+    for metric, expected_stats in expected.items():
+        observed_stats = observed.get(metric)
+        if observed_stats is None or set(observed_stats) != set(expected_stats):
+            return False
+        for stat, expected_value in expected_stats.items():
+            observed_value = observed_stats[stat]
+            if not math.isclose(
+                float(observed_value),
+                float(expected_value),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                return False
+    return True
 
 
 def _manifest_input_hashes_match(
@@ -464,6 +553,7 @@ def _build_report(
     *,
     baseline_manifest: Path,
     baseline_rows: list[dict[str, Any]],
+    baseline_envelopes: dict[str, dict[str, dict[str, float]]],
     mjx_rows: list[dict[str, Any]],
     replay_rows: list[dict[str, Any]],
     min_speedup: float,
@@ -481,6 +571,7 @@ def _build_report(
         mjx_group = [row for row in mjx_rows if row.get("motion") == motion]
         replay_group = [row for row in replay_rows if row.get("motion") == motion]
         baseline_gate = evaluate_baseline_group(motion, baseline_group)
+        baseline_envelope = baseline_envelopes[motion]
         baseline_failures = _unique(
             (
                 *baseline_gate.failures,
@@ -502,7 +593,7 @@ def _build_report(
         mjx_gate = evaluate_mjx_group(
             motion,
             mjx_group,
-            baseline_gate.envelope,
+            baseline_envelope,
             MjxQualityPolicy.for_motion(motion),
         )
         mjx_failures = _unique(
@@ -538,7 +629,7 @@ def _build_report(
                 *_replay_quality_failures(
                     motion,
                     replay_group,
-                    baseline_gate.envelope,
+                    baseline_envelope,
                 ),
             )
         )
@@ -593,6 +684,7 @@ def _build_report(
         "schema_version": 1,
         "backend": "mjx_canonical",
         "baseline_manifest": str(baseline_manifest),
+        "baseline_envelopes": baseline_envelopes,
         "classification": classification,
         "target": target,
         "min_speedup": float(min_speedup),
