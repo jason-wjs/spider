@@ -118,6 +118,13 @@ baseline because it used only 40 steps and one seed, but it supports the
 optimizer-routing root cause and justifies rerunning the full six-row Stage0
 baseline through the corrected runner.
 
+An attempted full six-row Stage0 run at
+`/data_team/junsong/model-based/g1_wbc_mjx_runs/stage0_baseline_legacy_20260703_h100_gpu2`
+was interrupted before any artifact was written after discovering that the
+selected physical H100 already had unrelated compute processes. A follow-up
+guard now rejects formal Stage0 CUDA runs when the single visible GPU is not
+idle, so this aborted run must not be used as timing or quality evidence.
+
 ## Remaining Reproduction Hypotheses
 
 If the corrected legacy Stage0 path still fails, investigate:

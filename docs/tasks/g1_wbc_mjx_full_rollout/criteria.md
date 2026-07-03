@@ -45,6 +45,9 @@ per-window metadata semantics are actually active.
 - One motion inference command may use only one visible GPU.
 - Use `CUDA_VISIBLE_DEVICES=<one id>` and `--device cuda:0` for formal CUDA
   runs.
+- The single visible GPU for formal Stage0 and acceptance timing must have no
+  pre-existing compute processes. The Stage0 runner fails fast on GPU
+  contention because a busy H100 would invalidate denominator timing.
 - The current machine may have four H100 GPUs, but one motion inference command
   must never use multiple GPUs.
 - Do not run two MJX/JAX motion inference commands concurrently on the same

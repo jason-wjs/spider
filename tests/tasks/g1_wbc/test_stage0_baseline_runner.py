@@ -232,6 +232,67 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertIn("single GPU visibility", stderr.getvalue())
         self.assertFalse((output_root / "baseline_manifest.json").exists())
 
+    def test_main_fails_fast_when_visible_gpu_has_compute_processes(self) -> None:
+        import subprocess
+        import torch
+
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, reward_weights):
+                path.write_text("{}")
+            torch.save(
+                {
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": torch.zeros(1, 886),
+                        "obs_normalizer._std": torch.ones(1, 886),
+                        "mlp.0.weight": torch.zeros(1, 1),
+                    }
+                },
+                checkpoint,
+            )
+
+            busy_gpu = subprocess.CompletedProcess(
+                args=["nvidia-smi"],
+                returncode=0,
+                stdout="12345, python, 13269 MiB\n",
+                stderr="",
+            )
+            stderr = io.StringIO()
+            with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "2"}):
+                with mock.patch.object(runner.subprocess, "run", return_value=busy_gpu):
+                    with redirect_stderr(stderr):
+                        with mock.patch.object(
+                            runner,
+                            "run_command",
+                            side_effect=AssertionError("run_command should not be called"),
+                        ):
+                            exit_code = runner.main(
+                                [
+                                    "--jump-motion",
+                                    str(jump_motion),
+                                    "--walk-motion",
+                                    str(walk_motion),
+                                    "--checkpoint",
+                                    str(checkpoint),
+                                    "--reward-weights",
+                                    str(reward_weights),
+                                    "--output-dir",
+                                    str(output_root),
+                                    "--device",
+                                    "cuda:0",
+                                ]
+                            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("GPU contention", stderr.getvalue())
+        self.assertFalse((output_root / "baseline_manifest.json").exists())
+
     def test_main_fails_fast_when_checkpoint_is_not_wbc_actor_format(self) -> None:
         import torch
 
@@ -434,8 +495,9 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 str(output_root),
             ]
             with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"}):
-                with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
-                    exit_code = runner.main(argv)
+                with mock.patch.object(runner, "validate_visible_gpu_is_idle", return_value=()):
+                    with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                        exit_code = runner.main(argv)
 
             manifest = json.loads((output_root / "baseline_manifest.json").read_text())
 
@@ -503,8 +565,9 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 str(output_root),
             ]
             with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"}):
-                with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
-                    exit_code = runner.main(argv)
+                with mock.patch.object(runner, "validate_visible_gpu_is_idle", return_value=()):
+                    with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                        exit_code = runner.main(argv)
 
             manifest = json.loads((output_root / "baseline_manifest.json").read_text())
 

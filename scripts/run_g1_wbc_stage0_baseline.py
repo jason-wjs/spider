@@ -232,7 +232,46 @@ def validate_runtime_environment(args: argparse.Namespace) -> tuple[str, ...]:
             "single GPU visibility: use --device cuda:0 after narrowing "
             f"CUDA_VISIBLE_DEVICES to one GPU; got {args.device}"
         )
+    if len(visible) == 1:
+        contention_errors = validate_visible_gpu_is_idle(visible[0])
+        errors.extend(contention_errors)
     return tuple(errors)
+
+
+def validate_visible_gpu_is_idle(visible_gpu: str) -> tuple[str, ...]:
+    """Return errors when the only visible GPU already has compute processes."""
+
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--id",
+                str(visible_gpu),
+                "--query-compute-apps=pid,process_name,used_memory",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        return (f"GPU contention: unable to inspect GPU {visible_gpu}: {exc}",)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        return (f"GPU contention: unable to inspect GPU {visible_gpu}: {detail}",)
+    processes = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+    if not processes:
+        return ()
+    process_list = "; ".join(processes[:4])
+    extra = "" if len(processes) <= 4 else f"; +{len(processes) - 4} more"
+    return (
+        "GPU contention: formal Stage0 requires the single visible GPU to have "
+        f"no existing compute processes; GPU {visible_gpu} has {process_list}{extra}",
+    )
 
 
 def validate_checkpoint_format(args: argparse.Namespace) -> tuple[str, ...]:
