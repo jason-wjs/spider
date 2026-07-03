@@ -368,12 +368,18 @@ def load_existing_acceptance_rows(output_dir: Path) -> dict[str, list[dict[str, 
     existing = [path for path in candidates if path.is_file()]
     existing.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
     rows_by_kind: dict[str, list[dict[str, Any]]] = {"mjx": [], "replay": []}
-    seen: dict[str, set[tuple[str, int]]] = {"mjx": set(), "replay": set()}
     for path in existing:
         try:
             payload = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
+        if not isinstance(payload, dict):
+            continue
+        paired_partial_keys = (
+            _paired_acceptance_row_keys(payload)
+            if path.name == ACCEPTANCE_PARTIAL_REPORT_NAME
+            else None
+        )
         for kind, field in (("mjx", "mjx_rows"), ("replay", "replay_rows")):
             rows = payload.get(field)
             if not isinstance(rows, list):
@@ -381,18 +387,41 @@ def load_existing_acceptance_rows(output_dir: Path) -> dict[str, list[dict[str, 
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                seed = _safe_int(row.get("seed"))
-                motion = row.get("motion")
-                if not isinstance(motion, str) or seed is None:
+                key = _acceptance_row_key(row)
+                if key is None:
                     continue
-                key = (motion, seed)
-                if key in seen[kind]:
+                if paired_partial_keys is not None and key not in paired_partial_keys:
                     continue
                 row = dict(row)
                 row["reuse_source_report"] = str(path)
                 rows_by_kind[kind].append(row)
-                seen[kind].add(key)
     return rows_by_kind
+
+
+def _paired_acceptance_row_keys(payload: dict[str, Any]) -> set[tuple[str, int]]:
+    return _acceptance_row_keys(payload.get("mjx_rows")) & _acceptance_row_keys(
+        payload.get("replay_rows")
+    )
+
+
+def _acceptance_row_keys(rows: Any) -> set[tuple[str, int]]:
+    keys: set[tuple[str, int]] = set()
+    if not isinstance(rows, list):
+        return keys
+    for row in rows:
+        if isinstance(row, dict):
+            key = _acceptance_row_key(row)
+            if key is not None:
+                keys.add(key)
+    return keys
+
+
+def _acceptance_row_key(row: dict[str, Any]) -> tuple[str, int] | None:
+    motion = row.get("motion")
+    seed = _safe_int(row.get("seed"))
+    if not isinstance(motion, str) or seed is None:
+        return None
+    return motion, seed
 
 
 def load_existing_acceptance_row(
@@ -1733,8 +1762,14 @@ def _mean_timing_strict(
 
 def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
     payload = json.loads(metrics_path.read_text())
+    if not isinstance(payload, dict):
+        payload = {}
     metrics = payload.get("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
     mpc = payload.get("mpc", {})
+    if not isinstance(mpc, dict):
+        mpc = {}
     return {
         "metrics": metrics,
         "mpc": mpc,
@@ -2200,9 +2235,10 @@ def _valid_contact_count(value, *, positive: bool = False) -> bool:
 def _safe_int(value) -> int | None:
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+        exact = float(parsed) == float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
-    return parsed if float(parsed) == float(value) else None
+    return parsed if exact else None
 
 
 def _unique(values) -> tuple[str, ...]:

@@ -805,6 +805,123 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
 
         self.assertIsNone(row)
 
+    def test_existing_acceptance_row_reuse_checks_later_duplicate_candidates(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            _write_reusable_acceptance_outputs(runner, plan, output_dir=output_dir)
+            partial_path = output_dir / "acceptance_report.partial.json"
+            partial = json.loads(partial_path.read_text())
+            bad_duplicate = json.loads(json.dumps(partial["mjx_rows"][0]))
+            bad_duplicate["mjx_argv"] = ["python", "--stale"]
+            partial["mjx_rows"].insert(0, bad_duplicate)
+            partial_path.write_text(json.dumps(partial))
+
+            existing_rows = runner.load_existing_acceptance_rows(output_dir)
+            row = runner.load_existing_acceptance_row(
+                plan[0],
+                kind="mjx",
+                existing_rows=existing_rows["mjx"],
+            )
+
+        self.assertIsNotNone(row)
+        self.assertTrue(row["reused_existing"])
+
+    def test_existing_acceptance_row_reuse_rejects_malformed_metrics_shape(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            mjx_rows, _replay_rows = _write_reusable_acceptance_outputs(
+                runner,
+                plan,
+                output_dir=output_dir,
+            )
+            planned = plan[0]
+            metrics_path = Path(planned.output_dir) / "metrics.json"
+            metrics_path.write_text(
+                json.dumps(
+                    {
+                        "method": "g1_wbc_joint_global",
+                        "motion": planned.mjx_argv[
+                            planned.mjx_argv.index("--motion") + 1
+                        ],
+                        "device": "cuda:0",
+                        "checkpoint": planned.mjx_argv[
+                            planned.mjx_argv.index("--checkpoint") + 1
+                        ],
+                        "max_steps": 800,
+                        "metrics": [],
+                        "mpc": [],
+                    }
+                )
+            )
+            mjx_rows[0]["artifact_sha256"]["metrics_json"] = _file_sha256(metrics_path)
+
+            row = runner.load_existing_acceptance_row(
+                planned,
+                kind="mjx",
+                existing_rows=mjx_rows,
+            )
+
+        self.assertIsNone(row)
+
+    def test_existing_acceptance_rows_ignore_unpaired_partial_rows(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            _write_reusable_acceptance_outputs(runner, plan, output_dir=output_dir)
+            partial_path = output_dir / "acceptance_report.partial.json"
+            partial = json.loads(partial_path.read_text())
+            partial["replay_rows"] = []
+            partial_path.write_text(json.dumps(partial))
+
+            existing_rows = runner.load_existing_acceptance_rows(output_dir)
+
+        self.assertEqual(existing_rows["mjx"], [])
+        self.assertEqual(existing_rows["replay"], [])
+
     def test_main_fails_fast_when_real_cuda_run_has_multiple_visible_gpus(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
