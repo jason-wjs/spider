@@ -1329,6 +1329,46 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["motion_results"]["jump"]["baseline_failures"],
         )
 
+    def test_invalid_baseline_rollout_npz_fails_before_launching_mjx(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            row = manifest["rows"][0]
+            rollout_path = Path(row["artifacts"]["rollout_npz"])
+            rollout_path.write_text("not an npz")
+            row["artifact_sha256"]["rollout_npz"] = _file_sha256(rollout_path)
+            row["artifact_mtime_ns"]["rollout_npz"] = rollout_path.stat().st_mtime_ns
+            manifest_path.write_text(json.dumps(manifest))
+            output_dir = root / "acceptance"
+
+            with mock.patch.object(
+                runner,
+                "run_command",
+                side_effect=AssertionError("run_command should not be called"),
+            ):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "rollout_npz_schema",
+            report["motion_results"]["jump"]["baseline_failures"],
+        )
+
     def test_missing_baseline_freshness_evidence_fails_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:

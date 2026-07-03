@@ -287,6 +287,25 @@ def main(argv: list[str] | None = None) -> int:
         print(str(report_path))
         return 1
 
+    baseline_rows = list(manifest.get("rows", []))
+    baseline_envelopes = _baseline_envelopes_from_manifest(manifest)
+    if _baseline_artifact_preflight_failures(baseline_rows):
+        report = _build_report(
+            baseline_manifest=baseline_manifest,
+            baseline_rows=baseline_rows,
+            baseline_envelopes=baseline_envelopes,
+            mjx_rows=[],
+            replay_rows=[],
+            min_speedup=float(args.min_speedup),
+            target=str(args.target),
+            min_realtime_factor=float(args.min_realtime_factor),
+            required_gpu_name_fragment=str(args.required_gpu_name_fragment),
+        )
+        report["planned_runs"] = [asdict(item) for item in plan]
+        report_path = write_report(output_dir, report)
+        print(str(report_path))
+        return 1
+
     mjx_rows: list[dict[str, Any]] = []
     replay_rows: list[dict[str, Any]] = []
     existing_rows = (
@@ -343,8 +362,8 @@ def main(argv: list[str] | None = None) -> int:
 
     report = _build_report(
         baseline_manifest=baseline_manifest,
-        baseline_rows=list(manifest.get("rows", [])),
-        baseline_envelopes=_baseline_envelopes_from_manifest(manifest),
+        baseline_rows=baseline_rows,
+        baseline_envelopes=baseline_envelopes,
         mjx_rows=mjx_rows,
         replay_rows=replay_rows,
         min_speedup=float(args.min_speedup),
@@ -1097,19 +1116,7 @@ def _build_report(
         baseline_failures = _unique(
             (
                 *baseline_gate.failures,
-                *_baseline_artifact_evidence_failures(baseline_group),
-                *_artifact_freshness_failures(
-                    baseline_group,
-                    artifact_fields=REQUIRED_ARTIFACT_FIELDS,
-                ),
-                *_artifact_hash_failures(
-                    baseline_group,
-                    artifact_fields=REQUIRED_ARTIFACT_FIELDS,
-                ),
-                *_artifact_npz_schema_failures(
-                    baseline_group,
-                    require_command=True,
-                ),
+                *_baseline_artifact_failures(baseline_group),
                 *_baseline_runtime_evidence_failures(
                     baseline_group,
                     required_gpu_name_fragment=required_gpu_name_fragment,
@@ -2113,6 +2120,38 @@ def _runtime_evidence_failures(
         elif required and required not in gpu_name:
             failures.append(f"{prefix}_required_gpu")
     return _unique(failures)
+
+
+def _baseline_artifact_preflight_failures(
+    baseline_rows: list[dict[str, Any]],
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    for motion in MOTIONS:
+        baseline_group = [
+            row for row in baseline_rows if row.get("motion_name") == motion
+        ]
+        failures.extend(_baseline_artifact_failures(baseline_group))
+    return _unique(failures)
+
+
+def _baseline_artifact_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    return _unique(
+        (
+            *_baseline_artifact_evidence_failures(rows),
+            *_artifact_freshness_failures(
+                rows,
+                artifact_fields=REQUIRED_ARTIFACT_FIELDS,
+            ),
+            *_artifact_hash_failures(
+                rows,
+                artifact_fields=REQUIRED_ARTIFACT_FIELDS,
+            ),
+            *_artifact_npz_schema_failures(
+                rows,
+                require_command=True,
+            ),
+        )
+    )
 
 
 def _artifact_freshness_failures(
