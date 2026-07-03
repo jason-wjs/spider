@@ -946,10 +946,12 @@ class MjxBackendIntegrationTest(unittest.TestCase):
     def test_window_config_forwards_mpc_iterations(self) -> None:
         config = _spider_config()
         config.max_num_iterations = 3
+        config.final_noise_scale = 0.25
 
         window_config = mjx_backend_module._window_config_from_spider(config)
 
         self.assertEqual(window_config.iterations, 3)
+        self.assertEqual(window_config.final_noise_scale, 0.25)
 
 
 def _run_with_fakes(

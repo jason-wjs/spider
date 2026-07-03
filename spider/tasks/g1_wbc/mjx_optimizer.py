@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class JaxWindowOptimizerConfig:
     root_rot_sigma: float
     joint_sigma: float
     iterations: int = 1
+    final_noise_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -83,8 +84,9 @@ def optimize_window(
     info: dict[str, object] = {}
     accepted_iterations = 0
     for iteration in range(int(config.iterations)):
+        iteration_config = _iteration_noise_config(config, iteration)
         samples = sample_residual_controls(
-            config,
+            iteration_config,
             updated_controls,
             _iteration_key(key, iteration, config=config),
             runtime=runtime,
@@ -222,6 +224,11 @@ def _validate_config(config: JaxWindowOptimizerConfig) -> None:
         raise ValueError("JAX window optimizer knot_count must be at least 2")
     if int(config.iterations) < 1:
         raise ValueError("JAX window optimizer iterations must be positive")
+    if (
+        not math.isfinite(float(config.final_noise_scale))
+        or float(config.final_noise_scale) < 0.0
+    ):
+        raise ValueError("JAX window optimizer final_noise_scale must be non-negative")
 
 
 def _validate_scores(scores, config: JaxWindowOptimizerConfig, *, jnp) -> None:
@@ -231,6 +238,20 @@ def _validate_scores(scores, config: JaxWindowOptimizerConfig, *, jnp) -> None:
         raise ValueError(f"Expected rollout scores shape {expected}, got {actual}")
     if not _all_finite(scores, jnp=jnp):
         raise ValueError("JAX window optimizer rollout scores must be finite")
+
+
+def _iteration_noise_config(
+    config: JaxWindowOptimizerConfig,
+    iteration: int,
+) -> JaxWindowOptimizerConfig:
+    beta = float(config.final_noise_scale) ** (1.0 / float(config.iterations))
+    scale = beta ** int(iteration)
+    return replace(
+        config,
+        root_pos_sigma=float(config.root_pos_sigma) * scale,
+        root_rot_sigma=float(config.root_rot_sigma) * scale,
+        joint_sigma=float(config.joint_sigma) * scale,
+    )
 
 
 def _all_finite(value, *, jnp) -> bool:

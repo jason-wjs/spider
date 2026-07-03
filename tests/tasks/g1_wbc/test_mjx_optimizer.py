@@ -370,6 +370,47 @@ class MjxOptimizerTest(unittest.TestCase):
         self.assertTrue(result.info["accepted"])
         self.assertEqual(result.info["accepted_iterations"], 3)
 
+    def test_optimize_window_decays_noise_by_iteration(self) -> None:
+        random = _UnitStepRandom()
+        runtime = SimpleNamespace(
+            jnp=_NumpyJnp(),
+            jax=SimpleNamespace(random=random, nn=_FakeNN()),
+        )
+        config = JaxWindowOptimizerConfig(
+            samples=3,
+            horizon_steps=5,
+            control_steps=2,
+            knot_count=5,
+            temperature=0.5,
+            root_pos_sigma=1.0,
+            root_rot_sigma=1.0,
+            joint_sigma=1.0,
+            iterations=3,
+            final_noise_scale=0.125,
+        )
+        sample_means: list[float] = []
+
+        def rollout_fn(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            sample_means.append(float(np.asarray(samples[1], dtype=np.float32).mean()))
+            return np.array([100.0, 0.0, 0.0], dtype=np.float32)
+
+        result = optimize_window(
+            config,
+            {"rollout_fn": rollout_fn},
+            np.zeros((5, 8), dtype=np.float32),
+            reference={"unused": True},
+            actor_params=None,
+            model_bundle=None,
+            key=(0, 11),
+            runtime=runtime,
+        )
+
+        self.assertEqual(random.calls, 3)
+        np.testing.assert_allclose(sample_means, [1.0, 0.5, 0.25], rtol=1e-6)
+        self.assertEqual(result.info["accepted_iterations"], 0)
+        self.assertFalse(result.info["accepted"])
+
     def test_optimize_window_propagates_rollout_diagnostics(self) -> None:
         config = _config()
 
@@ -484,6 +525,24 @@ class MjxOptimizerTest(unittest.TestCase):
                     root_pos_sigma=0.01,
                     root_rot_sigma=0.02,
                     joint_sigma=0.03,
+                ),
+                np.zeros((5, 8), dtype=np.float32),
+                0,
+                runtime=_FakeRuntime,
+            )
+
+        with self.assertRaisesRegex(ValueError, "final_noise_scale"):
+            sample_residual_controls(
+                JaxWindowOptimizerConfig(
+                    samples=4,
+                    horizon_steps=5,
+                    control_steps=2,
+                    knot_count=3,
+                    temperature=0.5,
+                    root_pos_sigma=0.01,
+                    root_rot_sigma=0.02,
+                    joint_sigma=0.03,
+                    final_noise_scale=-0.1,
                 ),
                 np.zeros((5, 8), dtype=np.float32),
                 0,

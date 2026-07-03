@@ -280,6 +280,7 @@ def run_g1_wbc_mjx_mpc(
             "planning_horizon_steps": horizon,
             "control_steps": control_steps,
             "use_warm_start": use_warm_start,
+            "final_noise_scale": float(getattr(spider_config, "final_noise_scale", 1.0)),
             "compile_init_wall_time_sec": compile_init_wall_time_sec,
             "jit_warmup_enabled": jit_warmup_enabled,
             "jit_warmup_wall_time_sec": jit_warmup_wall_time_sec,
@@ -305,6 +306,7 @@ def _window_config_from_spider(spider_config) -> JaxWindowOptimizerConfig:
         root_rot_sigma=float(spider_config.rot_noise_scale),
         joint_sigma=float(spider_config.joint_noise_scale),
         iterations=int(spider_config.max_num_iterations),
+        final_noise_scale=float(getattr(spider_config, "final_noise_scale", 1.0)),
     )
 
 
