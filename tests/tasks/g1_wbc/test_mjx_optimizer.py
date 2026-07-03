@@ -244,6 +244,49 @@ class MjxOptimizerTest(unittest.TestCase):
         np.testing.assert_allclose(result.execute_chunk, expected[:3], rtol=1.0e-6)
         self.assertEqual(float(result.info["best_index"]), 2.0)
         self.assertEqual(float(result.info["best_score"]), 3.0)
+        self.assertTrue(result.info["accepted"])
+        self.assertEqual(float(result.info["control_score"]), 0.0)
+        self.assertEqual(float(result.info["score_improvement"]), 3.0)
+
+    def test_optimize_window_rejects_when_best_sample_is_current_controls(self) -> None:
+        random = _UnitStepRandom()
+        runtime = SimpleNamespace(
+            jnp=_NumpyJnp(),
+            jax=SimpleNamespace(random=random, nn=_FakeNN()),
+        )
+        config = JaxWindowOptimizerConfig(
+            samples=3,
+            horizon_steps=5,
+            control_steps=2,
+            knot_count=3,
+            temperature=0.5,
+            root_pos_sigma=1.0,
+            root_rot_sigma=1.0,
+            joint_sigma=1.0,
+        )
+        controls = np.full((5, 8), 0.25, dtype=np.float32)
+
+        def rollout_fn(samples, reference, actor_params, model_bundle):
+            del samples, reference, actor_params, model_bundle
+            return np.array([10.0, 1.0, 5.0], dtype=np.float32)
+
+        result = optimize_window(
+            config,
+            {"rollout_fn": rollout_fn},
+            controls,
+            reference=None,
+            actor_params=None,
+            model_bundle=None,
+            key=(0, 11),
+            runtime=runtime,
+        )
+
+        self.assertFalse(result.info["accepted"])
+        self.assertEqual(float(result.info["best_index"]), 0.0)
+        self.assertEqual(float(result.info["control_score"]), 10.0)
+        self.assertEqual(float(result.info["score_improvement"]), 0.0)
+        np.testing.assert_allclose(result.updated_controls, controls)
+        np.testing.assert_allclose(result.execute_chunk, controls[:3])
 
     def test_optimize_window_runs_configured_iterations(self) -> None:
         random = _UnitStepRandom()
@@ -289,6 +332,8 @@ class MjxOptimizerTest(unittest.TestCase):
             float(np.mean(first_candidates[1])) + 0.9,
         )
         self.assertGreater(float(np.mean(result.updated_controls)), 2.9)
+        self.assertTrue(result.info["accepted"])
+        self.assertEqual(result.info["accepted_iterations"], 3)
 
     def test_optimize_window_propagates_rollout_diagnostics(self) -> None:
         config = _config()
@@ -324,6 +369,25 @@ class MjxOptimizerTest(unittest.TestCase):
             return np.zeros((config.samples, 1), dtype=np.float32)
 
         with self.assertRaisesRegex(ValueError, "scores shape"):
+            optimize_window(
+                config,
+                {"rollout_fn": rollout_fn},
+                np.zeros((5, 8), dtype=np.float32),
+                reference=None,
+                actor_params=None,
+                model_bundle=None,
+                key=(0, 7),
+                runtime=_FakeRuntime,
+            )
+
+    def test_optimize_window_rejects_nonfinite_scores(self) -> None:
+        config = _config()
+
+        def rollout_fn(samples, reference, actor_params, model_bundle):
+            del samples, reference, actor_params, model_bundle
+            return np.array([0.0, np.nan, 1.0, 2.0], dtype=np.float32)
+
+        with self.assertRaisesRegex(ValueError, "finite"):
             optimize_window(
                 config,
                 {"rollout_fn": rollout_fn},

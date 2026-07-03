@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -80,6 +81,7 @@ def optimize_window(
     rollout_fn = state["rollout_fn"]
     updated_controls = controls
     info: dict[str, object] = {}
+    accepted_iterations = 0
     for iteration in range(int(config.iterations)):
         samples = sample_residual_controls(
             config,
@@ -89,14 +91,25 @@ def optimize_window(
         )
         rollout_result = rollout_fn(samples, reference, actor_params, model_bundle)
         scores = _rollout_scores(rollout_result, jnp=jnp)
-        _validate_scores(scores, config)
+        _validate_scores(scores, config, jnp=jnp)
         best_index = jnp.argmax(scores)
-        temperature = max(float(config.temperature), 1.0e-6)
-        weights = runtime.jax.nn.softmax(scores / temperature)
-        updated_controls = jnp.sum(samples * weights[:, None, None], axis=0)
+        control_score = scores[0]
+        best_score = scores[best_index]
+        score_improvement = best_score - control_score
+        iteration_accepted = _positive_score_improvement(score_improvement)
+        if iteration_accepted:
+            accepted_iterations += 1
+            temperature = max(float(config.temperature), 1.0e-6)
+            weights = runtime.jax.nn.softmax(scores / temperature)
+            updated_controls = jnp.sum(samples * weights[:, None, None], axis=0)
         info = {
             "best_index": best_index,
-            "best_score": scores[best_index],
+            "best_score": best_score,
+            "control_score": control_score,
+            "score_improvement": score_improvement if iteration_accepted else 0.0,
+            "accepted": accepted_iterations > 0,
+            "iteration_accepted": iteration_accepted,
+            "accepted_iterations": accepted_iterations,
             "mean_score": jnp.mean(scores),
             "iteration": int(iteration),
             "iterations": int(config.iterations),
@@ -194,11 +207,35 @@ def _validate_config(config: JaxWindowOptimizerConfig) -> None:
         raise ValueError("JAX window optimizer iterations must be positive")
 
 
-def _validate_scores(scores, config: JaxWindowOptimizerConfig) -> None:
+def _validate_scores(scores, config: JaxWindowOptimizerConfig, *, jnp) -> None:
     expected = (int(config.samples),)
     actual = tuple(int(dim) for dim in scores.shape)
     if actual != expected:
         raise ValueError(f"Expected rollout scores shape {expected}, got {actual}")
+    if not _all_finite(scores, jnp=jnp):
+        raise ValueError("JAX window optimizer rollout scores must be finite")
+
+
+def _all_finite(value, *, jnp) -> bool:
+    isfinite = getattr(jnp, "isfinite", None)
+    all_fn = getattr(jnp, "all", None)
+    if callable(isfinite) and callable(all_fn):
+        try:
+            return bool(all_fn(isfinite(value)))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return all(math.isfinite(float(item)) for item in value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _positive_score_improvement(value) -> bool:
+    try:
+        improvement = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(improvement) and improvement > 1.0e-9
 
 
 def _prng_key(key, *, runtime):

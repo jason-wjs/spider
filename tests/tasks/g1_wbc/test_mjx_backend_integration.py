@@ -376,7 +376,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         def rollout_scorer(samples, reference, actor_params, model_bundle):
             del reference, actor_params, model_bundle
             calls.append(tuple(int(dim) for dim in samples.shape))
-            return -np.sum(np.asarray(samples, dtype=np.float32) ** 2, axis=(1, 2))
+            return np.arange(int(samples.shape[0]), dtype=np.float32)
 
         result = _run_with_fakes(
             optimizer=None,
@@ -388,6 +388,22 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertTrue(result.metadata["accepted"])
         self.assertGreater(len(calls), 0)
         self.assertEqual(calls[0], (4, 40, QPOS_DIM - 1))
+
+    def test_default_optimizer_rejects_when_scorer_favors_current_controls(self) -> None:
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            return -np.sum(np.asarray(samples, dtype=np.float32) ** 2, axis=(1, 2))
+
+        result = _run_with_fakes(
+            optimizer=None,
+            rollout_factory=_fake_rollout_result,
+            runtime=_FakeOptimizerRuntime(),
+            rollout_scorer=rollout_scorer,
+        )
+
+        self.assertFalse(result.metadata["accepted"])
+        self.assertEqual(result.metadata["accepted_windows"], 0)
+        self.assertFalse(result.result.infos[0]["accepted"])
 
     def test_default_optimizer_warms_once_before_timed_windows(self) -> None:
         calls: list[dict[str, object]] = []
@@ -402,7 +418,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                     "first_candidate_max_abs": float(np.max(np.abs(sample_array[0]))),
                 }
             )
-            return -np.sum(sample_array**2, axis=(1, 2))
+            return np.arange(int(sample_array.shape[0]), dtype=np.float32)
 
         result = _run_with_fakes(
             optimizer=None,
@@ -438,10 +454,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             del actor_params, model_bundle
             references.append(dict(reference))
             scale = float(reference["score_scale"])
-            return -scale * np.sum(
-                np.asarray(samples, dtype=np.float32) ** 2,
-                axis=(1, 2),
-            )
+            return scale * np.arange(int(samples.shape[0]), dtype=np.float32)
 
         def rollout_reference_factory(**kwargs):
             return {
