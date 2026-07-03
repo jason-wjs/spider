@@ -42,6 +42,11 @@ requirements are unavailable.
   runs.
 - The current machine may have four H100 GPUs, but one motion inference command
   must never use multiple GPUs.
+- Do not run two MJX/JAX motion inference commands concurrently on the same
+  visible GPU during smoke or formal acceptance. Each command can still satisfy
+  the one-GPU rule, but concurrent JAX warmup on one H100 can exhaust memory or
+  fail cuSolver handle creation. Run such commands serially on one GPU, or give
+  independent commands different `CUDA_VISIBLE_DEVICES` values.
 - H100 reports must include runtime GPU names for Stage0 baseline, MJX, and
   replay rows when applicable.
 - The first milestone may require `H100` in the runtime GPU name.
@@ -106,6 +111,42 @@ The manifest must use explicit file paths for motion, checkpoint, and reward
 weights. Aliases such as `--checkpoint bc` are not formal acceptance inputs
 unless they have already been resolved to a concrete checkpoint file in the
 manifest rows.
+
+Concrete formal inputs verified in this worktree on 2026-07-03:
+
+| Input | Required path | SHA256 |
+| --- | --- | --- |
+| jump motion | `/data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz` | `07b3b8e1bf9ba3f94dfbe552819cd792f81a06a3c4ff6e5029b55b2897b7c544` |
+| walk motion | `/data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz` | `a9baaa714d61da19c6114077cf0c919c965ad6802f770cc83ed695396c4c8c9f` |
+| WBC MLP checkpoint | `/data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt` | `98738b9214d12146dc7f4669cb65dfde9d835f4a133e5f2cbaef4e60b1e5b88f` |
+| reward weights | `/data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json` | `bb0490a71a27a29480f13ce77bc00c13a900845f0f52641b5ec20d51ebaa535d` |
+
+The checkpoint must be a WBC MLP actor checkpoint with `actor_state_dict`,
+`obs_normalizer.*`, and `mlp.*` weights. The user-provided SparseTrack
+Transformer checkpoint
+`/data_team/junsong/general_controller/ScaleTrack-mj/ScaleTrack/logs/rsl_rl/mjlab_g1_bfm_transformer_tracking_exp/mjlab_myrsl_g1_global_transformer_sparse_tracking/model_11800.pt`
+is a valid reference for `SparseTrack-Tracking-Flat-G1-Global-Transformer-v0`,
+but it is not a valid Stage0 checkpoint for this WBC MLP runner until a separate
+SparseTrack Transformer policy/observation adapter exists.
+
+The raw `/data_team/zcy/motion_data/...` motions are allowed for loader and
+runtime smoke tests, but they are not byte-identical to the packaged formal
+`jump` and `walk` inputs above. They must not replace the formal inputs unless
+the Stage0 manifest explicitly records their paths and hashes.
+
+Verified Stage0 dry-run command:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=. ./.venv/bin/python scripts/run_g1_wbc_stage0_baseline.py \
+  --jump-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/jump/motion.npz \
+  --walk-motion /data_team/junsong/model-based/wbc_results/assets/motion_data/walk/motion.npz \
+  --motion-type isaaclab \
+  --checkpoint /data_team/junsong/model-based/wbc_results/assets/checkpoints/model_8000.pt \
+  --reward-weights /data_team/junsong/model-based/wbc_results/g1_body_tracking_wbc/spider/2026-06-23-mechanism-quality-speed-wjs/configs/g1_wbc_reward_weights_method_specific_v14_20260612.json \
+  --output-dir /data_team/junsong/model-based/g1_wbc_mjx_runs/stage0_dryrun_wbc_mlp_20260703 \
+  --device cuda:0 \
+  --dry-run
+```
 
 ## Stage0 Manifest Requirements
 
