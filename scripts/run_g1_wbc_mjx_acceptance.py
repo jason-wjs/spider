@@ -16,6 +16,8 @@ from pathlib import Path
 from statistics import mean, median, pstdev
 from typing import Any
 
+import numpy as np
+
 from spider.tasks.g1_wbc.acceptance import (
     MjxQualityPolicy,
     PRIMARY_ERROR_METRICS,
@@ -25,7 +27,13 @@ from spider.tasks.g1_wbc.acceptance import (
     evaluate_mjx_group,
     evaluate_speed_gate,
 )
-from spider.tasks.g1_wbc.constants import POLICY_DT
+from spider.tasks.g1_wbc.constants import (
+    ACTION_DIM,
+    MUJOCO_BODY_NAMES,
+    POLICY_DT,
+    QPOS_DIM,
+    QVEL_DIM,
+)
 
 SPIDER_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PYTHON_EXECUTABLE = (
@@ -584,6 +592,10 @@ def _build_report(
                     baseline_group,
                     artifact_fields=REQUIRED_ARTIFACT_FIELDS,
                 ),
+                *_artifact_npz_schema_failures(
+                    baseline_group,
+                    require_command=True,
+                ),
                 *_baseline_runtime_evidence_failures(
                     baseline_group,
                     required_gpu_name_fragment=required_gpu_name_fragment,
@@ -613,6 +625,10 @@ def _build_report(
                     mjx_group,
                     artifact_fields=REQUIRED_ARTIFACT_FIELDS,
                 ),
+                *_artifact_npz_schema_failures(
+                    mjx_group,
+                    require_command=True,
+                ),
             )
         )
         replay_failures = _row_evidence_failures(
@@ -633,6 +649,10 @@ def _build_report(
                 *_artifact_hash_failures(
                     replay_group,
                     artifact_fields=("metrics_json", "rollout_npz"),
+                ),
+                *_artifact_npz_schema_failures(
+                    replay_group,
+                    require_command=False,
                 ),
                 *_replay_quality_failures(
                     motion,
@@ -997,6 +1017,7 @@ def _has_invalid_benchmark_failure(
         "mpc_accepted",
         "mpc_command_npz",
         "mpc_command_npz_hash",
+        "mpc_command_npz_schema",
         "mpc_command_npz_stale",
         "num_steps",
         "repeat_count",
@@ -1008,6 +1029,7 @@ def _has_invalid_benchmark_failure(
         "returncode",
         "rollout_npz",
         "rollout_npz_hash",
+        "rollout_npz_schema",
         "rollout_npz_stale",
         "seed",
         "status",
@@ -1438,6 +1460,99 @@ def _artifact_hash_failures(
             if actual != expected:
                 failures.append(f"{key}_hash")
     return _unique(failures)
+
+
+def _artifact_npz_schema_failures(
+    rows: list[dict[str, Any]],
+    *,
+    require_command: bool,
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        metrics = row.get("metrics", {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        num_steps = _safe_int(row.get("num_steps", metrics.get("num_steps")))
+        artifacts = row.get("artifacts", {})
+        if not isinstance(artifacts, dict) or num_steps is None:
+            continue
+        rollout_path = artifacts.get("rollout_npz")
+        if isinstance(rollout_path, str) and Path(rollout_path).expanduser().is_file():
+            if not _valid_rollout_npz(Path(rollout_path).expanduser(), num_steps=num_steps):
+                failures.append("rollout_npz_schema")
+        if require_command:
+            command_path = artifacts.get("mpc_command_npz")
+            if isinstance(command_path, str) and Path(command_path).expanduser().is_file():
+                if not _valid_command_npz(Path(command_path).expanduser(), num_steps=num_steps):
+                    failures.append("mpc_command_npz_schema")
+    return _unique(failures)
+
+
+def _valid_rollout_npz(path: Path, *, num_steps: int) -> bool:
+    frames = int(num_steps) + 1
+    bodies = len(MUJOCO_BODY_NAMES)
+    required_shapes = {
+        "qpos": (frames, 1, QPOS_DIM),
+        "qvel": (frames, 1, QVEL_DIM),
+        "body_pos_w": (frames, 1, bodies, 3),
+        "body_quat_w": (frames, 1, bodies, 4),
+        "body_lin_vel_w": (frames, 1, bodies, 3),
+        "body_ang_vel_w": (frames, 1, bodies, 3),
+        "actions": (int(num_steps), 1, ACTION_DIM),
+        "controls": (int(num_steps), 1, ACTION_DIM),
+        "contact_indicator": (frames, 1, 2),
+        "contact_force": (frames, 1, 2),
+        "floor_contact_indicator": (frames, 1, 3),
+        "floor_contact_force": (frames, 1, 3),
+        "ref_indices": (frames, 1),
+    }
+    try:
+        with np.load(path) as data:
+            if "dt" not in data.files or np.asarray(data["dt"]).shape not in {(), (1,)}:
+                return False
+            return _npz_has_shapes(data, required_shapes)
+    except Exception:
+        return False
+
+
+def _valid_command_npz(path: Path, *, num_steps: int) -> bool:
+    frames = int(num_steps) + 1
+    bodies = len(MUJOCO_BODY_NAMES)
+    required_shapes = {
+        "refined_qpos": ((frames, QPOS_DIM), (frames, 1, QPOS_DIM)),
+        "candidate_scores": None,
+        "command_joint_pos": (frames, 1, ACTION_DIM),
+        "command_joint_vel": (frames, 1, ACTION_DIM),
+        "command_body_pos_w": (frames, 1, bodies, 3),
+        "command_body_quat_w": (frames, 1, bodies, 4),
+        "command_body_lin_vel_w": (frames, 1, bodies, 3),
+        "command_body_ang_vel_w": (frames, 1, bodies, 3),
+        "command_qpos_trajectory": ((frames, QPOS_DIM), (frames, 1, QPOS_DIM)),
+        "command_qvel_trajectory": ((frames, QVEL_DIM), (frames, 1, QVEL_DIM)),
+    }
+    try:
+        with np.load(path) as data:
+            return _npz_has_shapes(data, required_shapes)
+    except Exception:
+        return False
+
+
+def _npz_has_shapes(
+    data,
+    required_shapes: dict[str, tuple[int, ...] | tuple[tuple[int, ...], ...] | None],
+) -> bool:
+    for key, expected in required_shapes.items():
+        if key not in data.files:
+            return False
+        if expected is None:
+            if np.asarray(data[key]).size <= 0:
+                return False
+            continue
+        observed = tuple(np.asarray(data[key]).shape)
+        allowed = expected if expected and isinstance(expected[0], tuple) else (expected,)
+        if observed not in allowed:
+            return False
+    return True
 
 
 def _file_sha256(path: Path) -> str:

@@ -146,6 +146,18 @@ Required row evidence for each motion and seed:
 - `artifact_mtime_ns`
 - `artifact_sha256`
 
+`rollout.npz` must be a valid NPZ containing the rollout core schema:
+`qpos`, `qvel`, body position/quaternion/linear-velocity/angular-velocity
+arrays, `actions`, `controls`, foot contact arrays, floor contact arrays,
+`ref_indices`, and scalar `dt`, with shapes consistent with
+`num_steps + 1` frames. Invalid rollout content is reported as
+`rollout_npz_schema`.
+
+`mpc_command.npz` must be a valid NPZ containing `refined_qpos`,
+`candidate_scores`, command joint/body trajectories, and command
+`qpos`/`qvel` trajectories with shapes consistent with the same frame count.
+Invalid command content is reported as `mpc_command_npz_schema`.
+
 Formal acceptance recomputes input hashes from the manifest row argv paths.
 Hashes must be lowercase SHA256 hex strings. Acceptance also recomputes baseline
 artifact hashes and rejects stale or replaced baseline files.

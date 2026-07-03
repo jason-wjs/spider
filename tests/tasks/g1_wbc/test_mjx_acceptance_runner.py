@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 RUNNER_PATH = (
     Path(__file__).resolve().parents[3] / "scripts" / "run_g1_wbc_mjx_acceptance.py"
 )
@@ -1846,6 +1848,74 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(report["classification"], "invalid_benchmark")
         self.assertIn("metrics_json_hash", report["motion_results"]["jump"]["mjx_failures"])
 
+    def test_malformed_mjx_rollout_npz_fails_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in mjx_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_rollout = Path(bad_row["artifacts"]["rollout_npz"])
+            arrays = _valid_rollout_arrays()
+            arrays.pop("body_ang_vel_w")
+            np.savez_compressed(bad_rollout, **arrays)
+            bad_row["artifact_sha256"]["rollout_npz"] = _file_sha256(bad_rollout)
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn("rollout_npz_schema", report["motion_results"]["jump"]["mjx_failures"])
+
+    def test_malformed_mjx_command_npz_fails_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in mjx_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_command = Path(bad_row["artifacts"]["mpc_command_npz"])
+            arrays = _valid_command_arrays()
+            arrays.pop("command_qvel_trajectory")
+            np.savez_compressed(bad_command, **arrays)
+            bad_row["artifact_sha256"]["mpc_command_npz"] = _file_sha256(bad_command)
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn("mpc_command_npz_schema", report["motion_results"]["jump"]["mjx_failures"])
+
     def test_4090_target_reports_realtime_pass_classification(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2060,11 +2130,121 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
 
 def _write_artifacts(output_dir: Path, *, include_command: bool = True) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    names = ["metrics.json", "rollout.npz"]
+    (output_dir / "metrics.json").write_text("{}")
+    np.savez_compressed(output_dir / "rollout.npz", **_valid_rollout_arrays())
     if include_command:
-        names.append("mpc_command.npz")
-    for name in names:
-        (output_dir / name).write_text("{}")
+        np.savez_compressed(
+            output_dir / "mpc_command.npz",
+            **_valid_command_arrays(),
+        )
+
+
+def _valid_rollout_arrays() -> dict[str, np.ndarray]:
+    frames = 801
+    steps = 800
+    return {
+        "qpos": np.zeros((frames, 1, 36), dtype=np.float32),
+        "qvel": np.zeros((frames, 1, 35), dtype=np.float32),
+        "body_pos_w": np.zeros((frames, 1, 30, 3), dtype=np.float32),
+        "body_quat_w": np.zeros((frames, 1, 30, 4), dtype=np.float32),
+        "body_lin_vel_w": np.zeros((frames, 1, 30, 3), dtype=np.float32),
+        "body_ang_vel_w": np.zeros((frames, 1, 30, 3), dtype=np.float32),
+        "actions": np.zeros((steps, 1, 29), dtype=np.float32),
+        "controls": np.zeros((steps, 1, 29), dtype=np.float32),
+        "contact_indicator": np.zeros((frames, 1, 2), dtype=np.float32),
+        "contact_force": np.zeros((frames, 1, 2), dtype=np.float32),
+        "floor_contact_indicator": np.zeros((frames, 1, 3), dtype=np.float32),
+        "floor_contact_force": np.zeros((frames, 1, 3), dtype=np.float32),
+        "ref_indices": np.zeros((frames, 1), dtype=np.int64),
+        "dt": np.array(0.02, dtype=np.float32),
+    }
+
+
+def _valid_command_arrays() -> dict[str, np.ndarray]:
+    frames = 801
+    return {
+        "refined_qpos": np.zeros((frames, 36), dtype=np.float32),
+        "candidate_scores": np.zeros((1,), dtype=np.float32),
+        "command_joint_pos": np.zeros((frames, 1, 29), dtype=np.float32),
+        "command_joint_vel": np.zeros((frames, 1, 29), dtype=np.float32),
+        "command_body_pos_w": np.zeros((frames, 1, 30, 3), dtype=np.float32),
+        "command_body_quat_w": np.zeros((frames, 1, 30, 4), dtype=np.float32),
+        "command_body_lin_vel_w": np.zeros((frames, 1, 30, 3), dtype=np.float32),
+        "command_body_ang_vel_w": np.zeros((frames, 1, 30, 3), dtype=np.float32),
+        "command_qpos_trajectory": np.zeros((frames, 1, 36), dtype=np.float32),
+        "command_qvel_trajectory": np.zeros((frames, 1, 35), dtype=np.float32),
+    }
+
+
+def _acceptance_rows_with_artifacts(
+    root: Path,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    mjx_rows: list[dict[str, object]] = []
+    replay_rows: list[dict[str, object]] = []
+    for motion in ("jump", "walk"):
+        for seed in (0, 1, 2):
+            output_dir = root / "acceptance" / motion / f"seed_{seed}" / "mjx"
+            replay_output_dir = root / "acceptance" / motion / f"seed_{seed}" / "replay"
+            _write_artifacts(output_dir)
+            _write_artifacts(replay_output_dir, include_command=False)
+            mjx_artifacts = {
+                "metrics_json": str(output_dir / "metrics.json"),
+                "rollout_npz": str(output_dir / "rollout.npz"),
+                "mpc_command_npz": str(output_dir / "mpc_command.npz"),
+            }
+            replay_artifacts = {
+                "metrics_json": str(replay_output_dir / "metrics.json"),
+                "rollout_npz": str(replay_output_dir / "rollout.npz"),
+            }
+            replay_argv = [
+                "python",
+                "--saved-command",
+                str(output_dir / "mpc_command.npz"),
+                "--replay-control-steps",
+                "20",
+            ]
+            mjx_rows.append(
+                {
+                    "motion": motion,
+                    "seed": seed,
+                    "status": "ok",
+                    "returncode": 0,
+                    "metrics": _metrics(success=True),
+                    "mpc_accepted": True,
+                    "accepted_windows": 40,
+                    "mpc_used_baseline_fallback": False,
+                    "num_steps": 800,
+                    "compile_init_wall_time_sec": 2.0,
+                    "jit_warmup_enabled": True,
+                    "jit_warmup_wall_time_sec": 1.5,
+                    "runtime_visible_devices": ("0",),
+                    "steady_state_wall_time_sec": 1.0,
+                    "artifacts": mjx_artifacts,
+                    "artifact_sha256": {
+                        key: _file_sha256(Path(path))
+                        for key, path in mjx_artifacts.items()
+                    },
+                    **_mjx_contact_evidence(),
+                }
+            )
+            replay_rows.append(
+                {
+                    "motion": motion,
+                    "seed": seed,
+                    "status": "ok",
+                    "returncode": 0,
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                    "artifacts": replay_artifacts,
+                    "artifact_sha256": {
+                        key: _file_sha256(Path(path))
+                        for key, path in replay_artifacts.items()
+                    },
+                    "replay_argv": replay_argv,
+                    **_replay_evidence(replay_argv),
+                }
+            )
+    return mjx_rows, replay_rows
 
 
 def _mjx_contact_evidence(

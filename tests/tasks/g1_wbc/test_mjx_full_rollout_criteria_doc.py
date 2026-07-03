@@ -28,6 +28,8 @@ class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
             "RTX 4090",
             "MuJoCo-Warp replay",
             "worst_speedup",
+            "rollout_npz_schema",
+            "mpc_command_npz_schema",
             "pass_h100_milestone",
             "invalid_benchmark",
         )
