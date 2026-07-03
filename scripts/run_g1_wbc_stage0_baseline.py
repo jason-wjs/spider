@@ -157,6 +157,25 @@ def build_stage0_commands(args: argparse.Namespace) -> list[Stage0Command]:
     return commands
 
 
+def validate_input_paths(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return missing formal Stage 0 inputs before writing any manifest."""
+
+    missing: list[str] = []
+    for label, path in (
+        ("jump motion", args.jump_motion),
+        ("walk motion", args.walk_motion),
+        ("reward weights", args.reward_weights),
+    ):
+        if not Path(path).expanduser().is_file():
+            missing.append(f"{label}: {Path(path).expanduser()}")
+    checkpoint = str(args.checkpoint)
+    checkpoint_path = Path(checkpoint).expanduser()
+    if checkpoint_path.is_absolute() or checkpoint_path.exists():
+        if not checkpoint_path.is_file() and not checkpoint_path.is_dir():
+            missing.append(f"checkpoint: {checkpoint_path}")
+    return tuple(missing)
+
+
 def attach_artifact_paths(row: dict[str, Any]) -> dict[str, Any]:
     """Attach known evaluate.py artifact paths, using None for missing files."""
 
@@ -226,6 +245,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parse_args(argv)
     output_dir = args.output_dir.expanduser().resolve()
+    missing_inputs = validate_input_paths(args)
+    if missing_inputs:
+        for missing in missing_inputs:
+            print(f"missing input: {missing}", file=sys.stderr)
+        return 2
     commands = build_stage0_commands(args)
     rows: list[dict[str, Any]] = []
     worst_returncode = 0

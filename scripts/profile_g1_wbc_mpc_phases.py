@@ -39,6 +39,11 @@ def main(argv: list[str] | None = None) -> int:
     """Run the profiler CLI."""
 
     args = parse_args(argv)
+    missing_inputs = validate_input_paths(args)
+    if missing_inputs:
+        for missing in missing_inputs:
+            print(f"missing input: {missing}", file=sys.stderr)
+        return 2
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -181,6 +186,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.set_defaults(execute=False)
     return parser.parse_args(argv)
+
+
+def validate_input_paths(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return missing evaluate.py inputs before writing a profile."""
+
+    missing: list[str] = []
+    if not args.motion.expanduser().is_file():
+        missing.append(f"motion: {args.motion.expanduser()}")
+    if args.method != "no_mpc" and args.reward_weights is not None:
+        if not args.reward_weights.expanduser().is_file():
+            missing.append(f"reward weights: {args.reward_weights.expanduser()}")
+    checkpoint = str(args.checkpoint)
+    checkpoint_path = Path(checkpoint).expanduser()
+    if checkpoint_path.is_absolute() or checkpoint_path.exists():
+        if not checkpoint_path.is_file() and not checkpoint_path.is_dir():
+            missing.append(f"checkpoint: {checkpoint_path}")
+    return tuple(missing)
 
 
 def build_evaluate_command(args: argparse.Namespace, evaluate_output_dir: Path) -> list[str]:

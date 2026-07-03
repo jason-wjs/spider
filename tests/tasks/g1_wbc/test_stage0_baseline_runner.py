@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -83,6 +85,33 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 motion_type_index = command.argv.index("--motion-type")
                 self.assertEqual(command.argv[motion_type_index + 1], "isaaclab")
 
+    def test_main_fails_fast_when_stage0_input_paths_are_missing(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_root = Path(tmp_dir) / "stage0"
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                exit_code = runner.main(
+                    [
+                        "--jump-motion",
+                        str(Path(tmp_dir) / "missing_jump.npz"),
+                        "--walk-motion",
+                        str(Path(tmp_dir) / "missing_walk.npz"),
+                        "--checkpoint",
+                        str(Path(tmp_dir) / "missing_model.pt"),
+                        "--reward-weights",
+                        str(Path(tmp_dir) / "missing_rewards.json"),
+                        "--output-dir",
+                        str(output_root),
+                        "--dry-run",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("missing input: jump motion", stderr.getvalue())
+        self.assertFalse((output_root / "baseline_manifest.json").exists())
+
     def test_build_stage0_commands_forwards_motion_type_override(self) -> None:
         runner = load_runner()
         args = runner.parse_args(
@@ -159,7 +188,13 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
     def test_main_writes_ok_status_for_successful_real_run(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
             output_root = Path(tmp_dir) / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, reward_weights):
+                path.write_text("{}")
 
             def fake_run_command(command):
                 output_dir = Path(command.output_dir)
@@ -179,13 +214,13 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
 
             argv = [
                 "--jump-motion",
-                "/tmp/missing/jump.npz",
+                str(jump_motion),
                 "--walk-motion",
-                "/tmp/missing/walk.npz",
+                str(walk_motion),
                 "--checkpoint",
                 "model.pt",
                 "--reward-weights",
-                "/tmp/missing/reward.json",
+                str(reward_weights),
                 "--output-dir",
                 str(output_root),
             ]
