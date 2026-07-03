@@ -273,6 +273,35 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertIn("model:wxy_parity", calls)
         self.assertIn("policy", calls)
 
+    def test_mjx_backend_emits_contact_capacity_metadata(self) -> None:
+        def optimizer(**kwargs):
+            del kwargs
+            updated = torch.zeros(40, QPOS_DIM - 1)
+            chunk = torch.zeros(21, QPOS_DIM - 1)
+            chunk[:, 0] = 0.25
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={
+                    "best_score": torch.tensor(1.25),
+                    "active_contact_count": torch.tensor(7),
+                    "contact_pair_count": torch.tensor(13),
+                },
+            )
+
+        result = _run_with_fakes(
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+        )
+
+        self.assertEqual(result.metadata["max_contact_points"], 512)
+        self.assertEqual(result.metadata["max_geom_pairs"], 1024)
+        self.assertEqual(result.metadata["active_contact_count"], 7)
+        self.assertEqual(result.metadata["contact_pair_count"], 13)
+        self.assertFalse(result.metadata["contact_saturated"])
+        self.assertFalse(result.metadata["max_contact_points_saturated"])
+        self.assertFalse(result.metadata["max_geom_pairs_saturated"])
+
     def test_default_optimizer_consumes_explicit_rollout_scorer(self) -> None:
         calls: list[tuple[int, ...]] = []
 

@@ -34,6 +34,17 @@ DEFAULT_PYTHON_EXECUTABLE = (
 MOTIONS = ("jump", "walk")
 SEEDS = (0, 1, 2)
 MIN_SPEEDUP = 12.0
+MJX_CONTACT_SATURATION_FIELDS = (
+    "contact_saturated",
+    "max_contact_points_saturated",
+    "max_geom_pairs_saturated",
+)
+MJX_CONTACT_COUNT_FIELDS = (
+    "max_contact_points",
+    "max_geom_pairs",
+    "contact_pair_count",
+    "active_contact_count",
+)
 
 
 @dataclass(frozen=True)
@@ -277,6 +288,7 @@ def _build_report(
                 *mjx_gate.failures,
                 *_mjx_timing_evidence_failures(mjx_group),
                 *_mjx_runtime_evidence_failures(mjx_group),
+                *_mjx_contact_evidence_failures(mjx_group),
             )
         )
         replay_failures = _row_evidence_failures(
@@ -344,6 +356,7 @@ def _build_report(
             mjx_rows=mjx_rows,
             replay_rows=replay_rows,
         ),
+        "contact_summary": _contact_summary(mjx_rows=mjx_rows),
         "baseline_rows": baseline_rows,
         "mjx_rows": mjx_rows,
         "replay_rows": replay_rows,
@@ -394,6 +407,33 @@ def _timing_summary(
                 "steady_state_wall_time_sec": _timing_stats(
                     _timing_values(replay_group, "steady_state_wall_time_sec")
                 ),
+            },
+        }
+    return summary
+
+
+def _contact_summary(*, mjx_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for motion in MOTIONS:
+        mjx_group = [row for row in mjx_rows if row.get("motion") == motion]
+        summary[motion] = {
+            "mjx": {
+                "max_contact_points": _timing_stats(
+                    _contact_count_values(mjx_group, "max_contact_points")
+                ),
+                "max_geom_pairs": _timing_stats(
+                    _contact_count_values(mjx_group, "max_geom_pairs")
+                ),
+                "contact_pair_count": _timing_stats(
+                    _contact_count_values(mjx_group, "contact_pair_count")
+                ),
+                "active_contact_count": _timing_stats(
+                    _contact_count_values(mjx_group, "active_contact_count")
+                ),
+                "saturation_flags": {
+                    field: [_contact_flag_value(row, field) for row in mjx_group]
+                    for field in MJX_CONTACT_SATURATION_FIELDS
+                },
             },
         }
     return summary
@@ -522,9 +562,13 @@ def _has_invalid_benchmark_failure(
         "baseline_fallback",
         "baseline_wall_time",
         "compile_init_wall_time",
+        "contact_saturation",
         "fallback",
         "metrics_json",
+        "max_contact_points_saturation",
+        "max_geom_pairs_saturation",
         "mjx_compile_init_wall_time",
+        "mjx_contact_diagnostics",
         "mjx_jit_warmup_enabled",
         "mjx_jit_warmup_wall_time",
         "mjx_runtime_visible_devices",
@@ -626,6 +670,13 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "jit_warmup_wall_time_sec": mpc.get("jit_warmup_wall_time_sec"),
         "runtime_visible_devices": mpc.get("runtime_visible_devices"),
         "steady_state_wall_time_sec": mpc.get("steady_state_wall_time_sec"),
+        "contact_saturated": mpc.get("contact_saturated"),
+        "max_contact_points_saturated": mpc.get("max_contact_points_saturated"),
+        "max_geom_pairs_saturated": mpc.get("max_geom_pairs_saturated"),
+        "max_contact_points": mpc.get("max_contact_points"),
+        "max_geom_pairs": mpc.get("max_geom_pairs"),
+        "contact_pair_count": mpc.get("contact_pair_count"),
+        "active_contact_count": mpc.get("active_contact_count"),
     }
 
 
@@ -651,6 +702,36 @@ def _mjx_runtime_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...
         visible = tuple(str(value) for value in devices if str(value))
         if len(visible) != 1:
             failures.append("mjx_single_visible_gpu")
+    return _unique(failures)
+
+
+def _mjx_contact_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        for field in MJX_CONTACT_SATURATION_FIELDS:
+            if not isinstance(_row_value(row, field), bool):
+                failures.append("mjx_contact_diagnostics")
+        counts = {field: _row_value(row, field) for field in MJX_CONTACT_COUNT_FIELDS}
+        for field, value in counts.items():
+            if not _valid_contact_count(
+                value,
+                positive=field in {"max_contact_points", "max_geom_pairs"},
+            ):
+                failures.append("mjx_contact_diagnostics")
+        if (
+            _valid_contact_count(counts["active_contact_count"])
+            and _valid_contact_count(counts["max_contact_points"], positive=True)
+            and float(counts["active_contact_count"])
+            > float(counts["max_contact_points"])
+        ):
+            failures.append("mjx_contact_diagnostics")
+        if (
+            _valid_contact_count(counts["contact_pair_count"])
+            and _valid_contact_count(counts["max_geom_pairs"], positive=True)
+            and float(counts["contact_pair_count"])
+            > float(counts["max_geom_pairs"])
+        ):
+            failures.append("mjx_contact_diagnostics")
     return _unique(failures)
 
 
@@ -706,6 +787,10 @@ def _row_evidence_failures(
 
 
 def _timing_value(row: dict[str, Any], name: str):
+    return _row_value(row, name)
+
+
+def _row_value(row: dict[str, Any], name: str):
     mpc = row.get("mpc", {})
     return row.get(name, mpc.get(name) if isinstance(mpc, dict) else None)
 
@@ -723,6 +808,31 @@ def _has_valid_metric(metrics: dict[str, Any], name: str) -> bool:
     if isinstance(value, bool):
         return True
     return isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _contact_count_values(rows: list[dict[str, Any]], name: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = _row_value(row, name)
+        if _valid_contact_count(value):
+            values.append(float(value))
+    return values
+
+
+def _contact_flag_value(row: dict[str, Any], name: str) -> bool | None:
+    value = _row_value(row, name)
+    return value if isinstance(value, bool) else None
+
+
+def _valid_contact_count(value, *, positive: bool = False) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    if not math.isfinite(float(value)):
+        return False
+    lower_bound = 1.0 if positive else 0.0
+    if float(value) < lower_bound:
+        return False
+    return float(value).is_integer()
 
 
 def _safe_int(value) -> int | None:

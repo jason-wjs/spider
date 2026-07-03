@@ -17,6 +17,7 @@ from spider.tasks.g1_wbc.constants import (
     QVEL_DIM,
 )
 from spider.tasks.g1_wbc.math_utils import normalize, quat_from_axis_angle, quat_mul
+from spider.tasks.g1_wbc.mjx_contacts import get_contact_profile
 from spider.tasks.g1_wbc.mjx_optimizer import JaxWindowOptimizerConfig, optimize_window
 from spider.tasks.g1_wbc.mjx_policy import convert_wbc_actor_to_jax
 from spider.tasks.g1_wbc.mjx_runtime import require_mjx_runtime
@@ -219,6 +220,11 @@ def run_g1_wbc_mjx_mpc(
     _validate_rollout_shape(rollout, total_steps=total_steps, refined_qpos=refined_qpos)
     command = _command_from_refined_qpos(motion, refined_qpos, rollout)
     _validate_command_shape(command, total_steps=total_steps)
+    contact_metadata = _contact_metadata(
+        model_bundle=model_bundle,
+        infos=infos,
+        rollout=rollout,
+    )
     from spider.optimizers.receding import RecedingHorizonResult
     final_controls = _validated_controls(controls, horizon=horizon, device=device)
     receding = RecedingHorizonResult(
@@ -255,6 +261,7 @@ def run_g1_wbc_mjx_mpc(
             "runtime_visible_devices": tuple(
                 getattr(getattr(runtime, "status", None), "visible_devices", ())
             ),
+            **contact_metadata,
         },
     )
 
@@ -345,6 +352,162 @@ def _mjx_score_weights(
         "joint_acc": float(reward_weights.get("joint_acc", 0.0)),
     }
     return {name: value for name, value in mapping.items() if value != 0.0}
+
+
+def _contact_metadata(
+    *,
+    model_bundle,
+    infos: list[dict[str, Any]],
+    rollout,
+) -> dict[str, int | bool]:
+    profile = _resolved_contact_profile(model_bundle)
+    max_contact_points = _positive_profile_int(profile, "max_contact_points")
+    max_geom_pairs = _positive_profile_int(profile, "max_geom_pairs")
+    profile_pair_count = len(tuple(getattr(profile, "explicit_pair_names", ()) or ()))
+    model_pair_count = _optional_nonnegative_int(
+        getattr(getattr(model_bundle, "cpu_model", None), "npair", None)
+    )
+    info_pair_count = _max_info_count(
+        infos,
+        "contact_pair_count",
+        "mjx_contact_pair_count",
+    )
+    contact_pair_count = max(
+        value
+        for value in (profile_pair_count, model_pair_count, info_pair_count)
+        if value is not None
+    )
+    active_contact_count = max(
+        value
+        for value in (
+            _max_info_count(infos, "active_contact_count", "mjx_active_contact_count"),
+            _max_info_count(infos, "ncon", "contact_count", "mjx_contact_count"),
+            _rollout_active_contact_count(rollout),
+        )
+        if value is not None
+    )
+    max_contact_points_saturated = (
+        _any_info_flag(infos, "max_contact_points_saturated")
+        or active_contact_count >= max_contact_points
+    )
+    max_geom_pairs_saturated = (
+        _any_info_flag(infos, "max_geom_pairs_saturated")
+        or contact_pair_count >= max_geom_pairs
+    )
+    contact_saturated = (
+        _any_info_flag(infos, "contact_saturated")
+        or max_contact_points_saturated
+        or max_geom_pairs_saturated
+    )
+    return {
+        "contact_saturated": bool(contact_saturated),
+        "max_contact_points_saturated": bool(max_contact_points_saturated),
+        "max_geom_pairs_saturated": bool(max_geom_pairs_saturated),
+        "max_contact_points": int(max_contact_points),
+        "max_geom_pairs": int(max_geom_pairs),
+        "contact_pair_count": int(contact_pair_count),
+        "active_contact_count": int(active_contact_count),
+    }
+
+
+def _resolved_contact_profile(model_bundle):
+    profile = getattr(model_bundle, "profile", None)
+    if (
+        _optional_nonnegative_int(getattr(profile, "max_contact_points", None))
+        is not None
+        and _optional_nonnegative_int(getattr(profile, "max_geom_pairs", None))
+        is not None
+    ):
+        return profile
+    profile_name = str(getattr(profile, "name", "wxy_parity"))
+    return get_contact_profile(profile_name)
+
+
+def _positive_profile_int(profile, name: str) -> int:
+    value = _optional_nonnegative_int(getattr(profile, name, None))
+    if value is None or value <= 0:
+        raise ValueError(f"MJX contact profile must define positive {name}")
+    return int(value)
+
+
+def _max_info_count(infos: list[dict[str, Any]], *names: str) -> int | None:
+    values: list[int] = []
+    for info in infos:
+        for name in names:
+            value = _optional_nonnegative_int(info.get(name))
+            if value is not None:
+                values.append(value)
+    return max(values) if values else None
+
+
+def _any_info_flag(infos: list[dict[str, Any]], name: str) -> bool:
+    for info in infos:
+        value = _python_scalar(info.get(name))
+        if isinstance(value, bool):
+            if value:
+                return True
+        elif isinstance(value, (int, float)):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(numeric) and numeric != 0.0:
+                return True
+    return False
+
+
+def _rollout_active_contact_count(rollout) -> int:
+    indicator = getattr(rollout, "contact_indicator", None)
+    if indicator is None:
+        return 0
+    contact = _to_torch(indicator, device=torch.device("cpu"))
+    if contact.numel() == 0:
+        return 0
+    if contact.ndim == 0:
+        return int(float(contact.item()) > 0.5)
+    return int(torch.count_nonzero(contact > 0.5, dim=-1).max().item())
+
+
+def _optional_nonnegative_int(value) -> int | None:
+    scalar = _python_scalar(value)
+    if isinstance(scalar, bool) or scalar is None:
+        return None
+    try:
+        parsed = int(scalar)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    try:
+        numeric = float(scalar)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(numeric) or parsed < 0 or float(parsed) != numeric:
+        return None
+    return parsed
+
+
+def _python_scalar(value):
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().cpu()
+        if tensor.numel() != 1:
+            return None
+        return tensor.reshape(()).item()
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return item()
+        except Exception:
+            pass
+    try:
+        array = np.asarray(value)
+    except Exception:
+        return None
+    if array.shape != ():
+        return None
+    return array.item()
 
 
 def _validate_single_gpu_runtime(runtime, *, device: torch.device) -> None:

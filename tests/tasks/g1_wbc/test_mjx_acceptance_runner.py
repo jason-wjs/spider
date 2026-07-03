@@ -290,6 +290,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                             "jit_warmup_wall_time_sec": 1.5,
                             "runtime_visible_devices": ("0",),
                             "steady_state_wall_time_sec": 1.0,
+                            **_mjx_contact_evidence(),
                         }
                     )
                 return row
@@ -573,6 +574,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                             "jit_warmup_wall_time_sec": 1.5,
                             "runtime_visible_devices": ("0",),
                             "steady_state_wall_time_sec": 20.0,
+                            **_mjx_contact_evidence(),
                         }
                     )
                 return row
@@ -628,6 +630,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                         "jit_warmup_enabled": True,
                         "jit_warmup_wall_time_sec": 1.5,
                         "steady_state_wall_time_sec": 1.0,
+                        **_mjx_contact_evidence(),
                     }
                 )
                 if argv[argv.index("--seed") + 1] == "1":
@@ -659,6 +662,75 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         )
         self.assertIn(
             "mjx_single_visible_gpu",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+
+    def test_missing_or_saturated_mjx_contact_diagnostics_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                }
+                if is_replay:
+                    row["command_wall_time_sec"] = 1.0
+                    return row
+                row.update(
+                    {
+                        "mpc_accepted": True,
+                        "accepted_windows": 40,
+                        "mpc_used_baseline_fallback": False,
+                        "compile_init_wall_time_sec": 2.0,
+                        "jit_warmup_enabled": True,
+                        "jit_warmup_wall_time_sec": 1.5,
+                        "runtime_visible_devices": ("0",),
+                        "steady_state_wall_time_sec": 1.0,
+                    }
+                )
+                if argv[argv.index("--seed") + 1] == "1":
+                    row.update(
+                        _mjx_contact_evidence(max_contact_points_saturated=True)
+                    )
+                elif argv[argv.index("--seed") + 1] == "2":
+                    row.update(_mjx_contact_evidence(active_contact_count=4))
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "mjx_contact_diagnostics",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+        self.assertIn(
+            "max_contact_points_saturation",
             report["motion_results"]["jump"]["mjx_failures"],
         )
 
@@ -696,6 +768,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                             "jit_warmup_wall_time_sec": 1.5,
                             "runtime_visible_devices": ("0",),
                             "steady_state_wall_time_sec": 1.0 + seed,
+                            **_mjx_contact_evidence(active_contact_count=seed),
                         }
                     )
                 return row
@@ -737,6 +810,19 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(jump_timing["mjx"]["num_windows"]["values"], [40, 40, 40])
         self.assertEqual(jump_timing["mjx"]["runtime_visible_devices"], [["0"], ["0"], ["0"]])
         self.assertEqual(jump_timing["replay"]["command_wall_time_sec"]["values"], [1.0, 1.0, 1.0])
+        jump_contact = report["contact_summary"]["jump"]["mjx"]
+        self.assertEqual(jump_contact["max_contact_points"]["values"], [512, 512, 512])
+        self.assertEqual(jump_contact["max_geom_pairs"]["values"], [1024, 1024, 1024])
+        self.assertEqual(jump_contact["contact_pair_count"]["values"], [0, 0, 0])
+        self.assertEqual(jump_contact["active_contact_count"]["values"], [0, 1, 2])
+        self.assertEqual(
+            jump_contact["saturation_flags"],
+            {
+                "contact_saturated": [False, False, False],
+                "max_contact_points_saturated": [False, False, False],
+                "max_geom_pairs_saturated": [False, False, False],
+            },
+        )
 
     def test_metrics_parser_extracts_compile_and_warmup_timing(self) -> None:
         runner = load_runner()
@@ -755,6 +841,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                             "jit_warmup_wall_time_sec": 1.5,
                             "runtime_visible_devices": ["0"],
                             "steady_state_wall_time_sec": 1.0,
+                            **_mjx_contact_evidence(active_contact_count=3),
                         },
                     }
                 )
@@ -766,6 +853,9 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertTrue(row["jit_warmup_enabled"])
         self.assertEqual(row["jit_warmup_wall_time_sec"], 1.5)
         self.assertEqual(row["runtime_visible_devices"], ["0"])
+        self.assertFalse(row["contact_saturated"])
+        self.assertEqual(row["max_contact_points"], 512)
+        self.assertEqual(row["active_contact_count"], 3)
 
     def test_metrics_parser_missing_mpc_safety_fields_fails_closed(self) -> None:
         runner = load_runner()
@@ -793,6 +883,27 @@ def _write_artifacts(output_dir: Path, *, include_command: bool = True) -> None:
         names.append("mpc_command.npz")
     for name in names:
         (output_dir / name).write_text("{}")
+
+
+def _mjx_contact_evidence(
+    *,
+    contact_saturated: bool = False,
+    max_contact_points_saturated: bool = False,
+    max_geom_pairs_saturated: bool = False,
+    max_contact_points: int = 512,
+    max_geom_pairs: int = 1024,
+    contact_pair_count: int = 0,
+    active_contact_count: int = 0,
+) -> dict[str, int | bool]:
+    return {
+        "contact_saturated": contact_saturated,
+        "max_contact_points_saturated": max_contact_points_saturated,
+        "max_geom_pairs_saturated": max_geom_pairs_saturated,
+        "max_contact_points": max_contact_points,
+        "max_geom_pairs": max_geom_pairs,
+        "contact_pair_count": contact_pair_count,
+        "active_contact_count": active_contact_count,
+    }
 
 
 if __name__ == "__main__":
