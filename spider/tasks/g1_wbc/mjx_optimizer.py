@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 
@@ -64,22 +65,48 @@ def optimize_window(
     jnp = runtime.jnp
     rollout_fn = state["rollout_fn"]
     samples = sample_residual_controls(config, controls, key, runtime=runtime)
-    scores = jnp.asarray(rollout_fn(samples, reference, actor_params, model_bundle))
+    rollout_result = rollout_fn(samples, reference, actor_params, model_bundle)
+    scores = _rollout_scores(rollout_result, jnp=jnp)
     _validate_scores(scores, config)
     best_index = jnp.argmax(scores)
     temperature = max(float(config.temperature), 1.0e-6)
     weights = runtime.jax.nn.softmax(scores / temperature)
     updated_controls = jnp.sum(samples * weights[:, None, None], axis=0)
     execute_chunk = updated_controls[: int(config.control_steps) + 1]
+    info = {
+        "best_index": best_index,
+        "best_score": scores[best_index],
+        "mean_score": jnp.mean(scores),
+    }
+    info.update(_rollout_diagnostics(rollout_result, jnp=jnp))
     return JaxWindowResult(
         updated_controls=updated_controls,
         execute_chunk=execute_chunk,
-        info={
-            "best_index": best_index,
-            "best_score": scores[best_index],
-            "mean_score": jnp.mean(scores),
-        },
+        info=info,
     )
+
+
+def _rollout_scores(rollout_result, *, jnp):
+    if isinstance(rollout_result, Mapping):
+        return jnp.asarray(rollout_result["score"])
+    return jnp.asarray(rollout_result)
+
+
+def _rollout_diagnostics(rollout_result, *, jnp) -> dict[str, object]:
+    if not isinstance(rollout_result, Mapping):
+        return {}
+    diagnostics: dict[str, object] = {}
+    for name in ("active_contact_count", "contact_pair_count"):
+        if name in rollout_result:
+            diagnostics[name] = _jnp_max(jnp.asarray(rollout_result[name]), jnp=jnp)
+    return diagnostics
+
+
+def _jnp_max(value, *, jnp):
+    max_fn = getattr(jnp, "max", None)
+    if callable(max_fn):
+        return max_fn(value)
+    return value.max()
 
 
 def _control_sigma(config: JaxWindowOptimizerConfig, width: int, *, jnp):

@@ -369,6 +369,52 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertGreater(float(first[0]), float(first[1]))
         self.assertGreater(float(first[1]), float(first[2]))
 
+    def test_score_candidate_controls_can_return_contact_diagnostics(self) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+
+        def diagnostic_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            next_robot, score_state = _physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+            step = int(step_index)
+            score_state["active_contact_count"] = np.array(
+                [step + 1, 5 - step],
+                dtype=np.float32,
+            )
+            score_state["contact_pair_count"] = np.array(
+                [2 * step, 3 + step],
+                dtype=np.float32,
+            )
+            return next_robot, score_state
+
+        metrics = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=diagnostic_step,
+            return_metrics=True,
+        )
+
+        self.assertEqual(metrics["score"].shape, (2,))
+        np.testing.assert_allclose(metrics["active_contact_count"], [3.0, 5.0])
+        np.testing.assert_allclose(metrics["contact_pair_count"], [4.0, 5.0])
+
     def test_score_candidate_controls_feeds_previous_action_into_next_observation(
         self,
     ) -> None:
@@ -546,7 +592,8 @@ class MjxRolloutTest(unittest.TestCase):
         second = scorer(samples, reference, actor_params, model_bundle)
 
         self.assertEqual(jax.jit_calls, 1)
-        np.testing.assert_allclose(first, second)
+        np.testing.assert_allclose(first["score"], second["score"])
+        self.assertIn("active_contact_count", first)
 
 
 if __name__ == "__main__":

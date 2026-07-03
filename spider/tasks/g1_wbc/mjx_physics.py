@@ -95,6 +95,22 @@ def foot_contact_indicator_from_contact(
     )
 
 
+def contact_count_diagnostics(contact, *, jnp) -> dict[str, object]:
+    """Return fixed-buffer contact counts without synchronizing to host."""
+
+    geom = jnp.asarray(contact.geom)
+    dist = jnp.asarray(contact.dist)
+    includemargin = jnp.asarray(contact.includemargin)
+    if len(geom.shape) != 2 or int(geom.shape[-1]) != 2:
+        raise ValueError(f"Expected contact.geom shape (contacts, 2), got {geom.shape}")
+    valid = (geom[:, 0] >= 0) & (geom[:, 1] >= 0)
+    active = valid & (dist <= includemargin + 1.0e-5)
+    return {
+        "active_contact_count": jnp.sum(active),
+        "contact_pair_count": jnp.sum(valid),
+    }
+
+
 def joint_order_to_model_ctrl(bundle, joint_ctrl, *, jnp):
     """Map G1 joint-order controls into MuJoCo actuator-order ctrl slots."""
 
@@ -243,6 +259,7 @@ def make_mjx_physics_step_fn(
                     right_foot_geom_ids=contact_groups.right_foot_geom_ids,
                     jnp=jnp,
                 ),
+                **contact_count_diagnostics(data._impl.contact, jnp=jnp),
                 "model_ctrl": data.ctrl,
                 "time": data.time,
             }

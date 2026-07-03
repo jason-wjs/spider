@@ -32,6 +32,10 @@ class _NumpyJnp:
     def maximum(x, y):
         return np.maximum(x, y)
 
+    @staticmethod
+    def max(value, axis=None):
+        return np.max(value, axis=axis)
+
 
 def _step_state(offset: float = 0.0) -> dict[str, np.ndarray]:
     return {
@@ -176,6 +180,47 @@ class MjxScoringTest(unittest.TestCase):
             places=6,
         )
         self.assertAlmostEqual(float(metrics["score"]), -expected_root, places=6)
+
+    def test_accumulator_tracks_contact_diagnostic_maxima(self) -> None:
+        reference_state = _reference_state()
+        accumulator = init_score_accumulator((2,), jnp=_NumpyJnp)
+        base_step = {
+            name: np.stack([value, value], axis=0)
+            for name, value in _step_state().items()
+        }
+        batched_reference = {
+            name: np.stack([value, value], axis=0)
+            for name, value in reference_state.items()
+        }
+        first = {
+            **base_step,
+            "active_contact_count": np.array([1.0, 4.0], dtype=np.float32),
+            "contact_pair_count": np.array([3.0, 2.0], dtype=np.float32),
+        }
+        second = {
+            **base_step,
+            "active_contact_count": np.array([5.0, 2.0], dtype=np.float32),
+            "contact_pair_count": np.array([4.0, 8.0], dtype=np.float32),
+        }
+
+        accumulator = score_step(
+            accumulator,
+            first,
+            batched_reference,
+            JaxScoreWeights({"root_pos": 1.0}),
+            jnp=_NumpyJnp,
+        )
+        accumulator = score_step(
+            accumulator,
+            second,
+            batched_reference,
+            JaxScoreWeights({"root_pos": 1.0}),
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        np.testing.assert_allclose(metrics["active_contact_count"], [5.0, 4.0])
+        np.testing.assert_allclose(metrics["contact_pair_count"], [4.0, 8.0])
 
     def test_batched_score_keeps_sample_axis(self) -> None:
         first = _step_state(offset=0.0)

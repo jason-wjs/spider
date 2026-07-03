@@ -34,6 +34,10 @@ class _NumpyJnp:
     def mean(value):
         return np.mean(value)
 
+    @staticmethod
+    def max(value):
+        return np.max(value)
+
 
 class _FakeRandom:
     @staticmethod
@@ -170,6 +174,32 @@ class MjxOptimizerTest(unittest.TestCase):
         np.testing.assert_allclose(result.execute_chunk, expected[:3], rtol=1.0e-6)
         self.assertEqual(float(result.info["best_index"]), 2.0)
         self.assertEqual(float(result.info["best_score"]), 3.0)
+
+    def test_optimize_window_propagates_rollout_diagnostics(self) -> None:
+        config = _config()
+
+        def rollout_fn(samples, reference, actor_params, model_bundle):
+            del samples, reference, actor_params, model_bundle
+            return {
+                "score": np.array([0.0, 1.0, 3.0, -2.0], dtype=np.float32),
+                "active_contact_count": np.array([2, 5, 7, 1], dtype=np.float32),
+                "contact_pair_count": np.array([4, 6, 9, 3], dtype=np.float32),
+            }
+
+        result = optimize_window(
+            config,
+            {"rollout_fn": rollout_fn},
+            np.zeros((5, 8), dtype=np.float32),
+            reference=None,
+            actor_params=None,
+            model_bundle=None,
+            key=(0, 11),
+            runtime=_FakeRuntime,
+        )
+
+        self.assertEqual(float(result.info["best_score"]), 3.0)
+        self.assertEqual(float(result.info["active_contact_count"]), 7.0)
+        self.assertEqual(float(result.info["contact_pair_count"]), 9.0)
 
     def test_optimize_window_rejects_column_vector_scores(self) -> None:
         config = _config()

@@ -38,6 +38,7 @@ def make_rollout_scorer(*, runtime, physics_step_fn: PhysicsStepFn):
                 model_bundle,
                 runtime=runtime,
                 physics_step_fn=physics_step_fn,
+                return_metrics=True,
             )
         model_key = id(model_bundle)
         compiled = jitted_by_model_id.get(model_key)
@@ -51,6 +52,7 @@ def make_rollout_scorer(*, runtime, physics_step_fn: PhysicsStepFn):
                     model_bundle,
                     runtime=runtime,
                     physics_step_fn=physics_step_fn,
+                    return_metrics=True,
                 )
 
             compiled = jit(score_for_model)
@@ -103,6 +105,7 @@ def score_candidate_controls(
     *,
     runtime,
     physics_step_fn: PhysicsStepFn,
+    return_metrics: bool = False,
 ):
     """Score sampled high-level controls with a scan-compatible rollout loop."""
 
@@ -199,7 +202,8 @@ def score_candidate_controls(
 
         carry, _ = scan(scan_step, carry, jnp.arange(horizon))
         accumulator = carry[-1]
-        return finalize_score(accumulator, jnp=jnp)["score"]
+        metrics = finalize_score(accumulator, jnp=jnp)
+        return metrics if return_metrics else metrics["score"]
 
     for step_index in range(horizon):
         next_values = _score_rollout_step(
@@ -227,7 +231,8 @@ def score_candidate_controls(
         prev_joint_vel = next_values["prev_joint_vel"]
         accumulator = next_values["accumulator"]
 
-    return finalize_score(accumulator, jnp=jnp)["score"]
+    metrics = finalize_score(accumulator, jnp=jnp)
+    return metrics if return_metrics else metrics["score"]
 
 
 def _score_rollout_step(

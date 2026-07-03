@@ -41,6 +41,8 @@ ACCUMULATOR_KEYS = (
     "control_delta_sum",
     "joint_acc_sum",
     "count",
+    "active_contact_count",
+    "contact_pair_count",
 )
 
 
@@ -100,6 +102,14 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
     terms["control_delta_sum"] = terms["control_delta_sum"] + control_delta
     terms["joint_acc_sum"] = terms["joint_acc_sum"] + joint_acc
     terms["count"] = terms["count"] + 1.0
+    terms["active_contact_count"] = jnp.maximum(
+        terms["active_contact_count"],
+        _diagnostic_value(step_state, "active_contact_count", batch_shape, jnp=jnp),
+    )
+    terms["contact_pair_count"] = jnp.maximum(
+        terms["contact_pair_count"],
+        _diagnostic_value(step_state, "contact_pair_count", batch_shape, jnp=jnp),
+    )
 
     penalty = (
         _weight(weights, "root_pos", "root_pos_error") * root_error
@@ -139,6 +149,8 @@ def finalize_score(accumulator, *, jnp):
         "contact_mismatch": contact_mismatch,
         "control_delta": control_delta,
         "joint_acc": joint_acc,
+        "active_contact_count": terms["active_contact_count"],
+        "contact_pair_count": terms["contact_pair_count"],
     }
 
 
@@ -168,6 +180,20 @@ def _mean_feature_axes(value, *, batch_shape: tuple[int, ...], jnp):
     if len(reduce_axes) == len(value.shape):
         return jnp.mean(value)
     return jnp.mean(value, axis=reduce_axes)
+
+
+def _diagnostic_value(step_state, name: str, batch_shape: tuple[int, ...], *, jnp):
+    value = step_state.get(name)
+    if value is None:
+        return jnp.zeros(batch_shape)
+    value = jnp.asarray(value)
+    if not value.shape:
+        return value + jnp.zeros(batch_shape)
+    _validate_batch_prefix(value, batch_shape)
+    reduce_axes = tuple(range(len(batch_shape), len(value.shape)))
+    if reduce_axes:
+        return jnp.max(value, axis=reduce_axes)
+    return value
 
 
 def _require_accumulator(accumulator):
