@@ -95,6 +95,7 @@ def build_mjx_rollout_reference(
     }
     return {
         "initial_robot_state": initial_robot_state,
+        "base_qpos": _to_jnp(_slice_window(qpos, indices), jnp=jnp),
         "obs_reference": obs_reference,
         "score_reference": score_reference,
         "obs_state": None,

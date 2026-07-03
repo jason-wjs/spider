@@ -352,6 +352,22 @@ class MjxRolloutTest(unittest.TestCase):
         np.testing.assert_allclose(qpos[..., 4:7], 0.0)
         np.testing.assert_allclose(qpos[..., 7:], 0.5)
 
+    def test_controls_to_qpos_uses_window_base_qpos_trajectory(self) -> None:
+        controls = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
+        base_qpos = np.zeros((3, QPOS_DIM), dtype=np.float32)
+        base_qpos[:, 0] = np.array([0.0, 1.0, 2.0], dtype=np.float32)
+        base_qpos[:, 3] = 1.0
+
+        qpos = controls_to_qpos(
+            controls,
+            base_qpos,
+            joint_low=np.full(ACTION_DIM, -1.0, dtype=np.float32),
+            joint_high=np.full(ACTION_DIM, 1.0, dtype=np.float32),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(qpos[0, :, 0], [0.0, 1.0, 2.0])
+
     def test_score_candidate_controls_returns_one_score_per_sample(self) -> None:
         samples = np.zeros((3, 4, QPOS_DIM - 1), dtype=np.float32)
         samples[1, :, 0] = 0.2
@@ -380,6 +396,88 @@ class MjxRolloutTest(unittest.TestCase):
         np.testing.assert_allclose(first, second)
         self.assertGreater(float(first[0]), float(first[1]))
         self.assertGreater(float(first[1]), float(first[2]))
+
+    def test_score_candidate_controls_uses_reference_base_qpos_window(self) -> None:
+        samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=3)
+        base_qpos = np.zeros((3, QPOS_DIM), dtype=np.float32)
+        base_qpos[:, 0] = np.array([0.0, 1.0, 2.0], dtype=np.float32)
+        base_qpos[:, 3] = 1.0
+        reference["base_qpos"] = base_qpos
+        commanded_root_x: list[float] = []
+
+        def recording_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            commanded_root_x.append(float(command_qpos[0, 0]))
+            return _physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+
+        score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=recording_step,
+        )
+
+        np.testing.assert_allclose(commanded_root_x, [0.0, 1.0, 2.0])
+
+    def test_score_candidate_controls_treats_reference_base_qpos_as_window_when_square(
+        self,
+    ) -> None:
+        samples = np.zeros((3, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=3, horizon=3)
+        base_qpos = np.zeros((3, QPOS_DIM), dtype=np.float32)
+        base_qpos[:, 0] = np.array([0.0, 1.0, 2.0], dtype=np.float32)
+        base_qpos[:, 3] = 1.0
+        reference["base_qpos"] = base_qpos
+        commanded_root_x: list[np.ndarray] = []
+
+        def recording_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            commanded_root_x.append(np.asarray(command_qpos[:, 0]).copy())
+            return _physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+
+        score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=recording_step,
+        )
+
+        np.testing.assert_allclose(commanded_root_x[0], [0.0, 0.0, 0.0])
+        np.testing.assert_allclose(commanded_root_x[1], [1.0, 1.0, 1.0])
+        np.testing.assert_allclose(commanded_root_x[2], [2.0, 2.0, 2.0])
 
     def test_score_candidate_controls_can_return_contact_diagnostics(self) -> None:
         samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)

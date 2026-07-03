@@ -99,6 +99,11 @@ class MjxReferenceTest(unittest.TestCase):
             reference["initial_robot_state"]["qpos"],
             motion.qpos()[2].numpy(),
         )
+        self.assertEqual(reference["base_qpos"].shape, (4, QPOS_DIM))
+        np.testing.assert_allclose(
+            reference["base_qpos"][:, 0],
+            motion.qpos()[[2, 3, 4, 5], 0].numpy(),
+        )
         self.assertEqual(
             reference["initial_robot_state"]["body_pos_w"].shape,
             (len(MUJOCO_BODY_NAMES), 3),
@@ -146,6 +151,7 @@ class MjxReferenceTest(unittest.TestCase):
             reference["score_reference"]["root_pos"][:, 0],
             expected,
         )
+        np.testing.assert_allclose(reference["base_qpos"][:, 0], expected)
 
     def test_default_joint_pos_matches_wbc_knees_bent_pose(self) -> None:
         reference = build_mjx_rollout_reference(

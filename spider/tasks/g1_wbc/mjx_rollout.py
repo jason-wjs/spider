@@ -77,11 +77,12 @@ def controls_to_qpos(controls, base_qpos, joint_low, joint_high, *, jnp):
 
     samples = int(controls.shape[0])
     horizon = int(controls.shape[1])
-    base_qpos = _ensure_batch(jnp.asarray(base_qpos), samples, jnp=jnp)
-    if int(base_qpos.shape[-1]) != QPOS_DIM:
-        raise ValueError(f"Expected base qpos width {QPOS_DIM}, got {base_qpos.shape}")
-
-    base = jnp.repeat(jnp.expand_dims(base_qpos, axis=1), horizon, axis=1)
+    base = _base_qpos_trajectory(
+        jnp.asarray(base_qpos),
+        sample_count=samples,
+        horizon=horizon,
+        jnp=jnp,
+    )
     root_pos = base[..., :3] + controls[..., :3]
     delta_quat = _quat_from_axis_angle(controls[..., 3:6], jnp=jnp)
     root_quat = _normalize(
@@ -95,6 +96,39 @@ def controls_to_qpos(controls, base_qpos, joint_low, joint_high, *, jnp):
         _joint_limit_array(joint_high, jnp=jnp),
     )
     return jnp.concatenate([root_pos, root_quat, joints], axis=-1)
+
+
+def _base_qpos_trajectory(base_qpos, *, sample_count: int, horizon: int, jnp):
+    if int(base_qpos.shape[-1]) != QPOS_DIM:
+        raise ValueError(f"Expected base qpos width {QPOS_DIM}, got {base_qpos.shape}")
+    rank = len(base_qpos.shape)
+    if rank == 1:
+        base = jnp.repeat(jnp.expand_dims(base_qpos, axis=0), sample_count, axis=0)
+        return jnp.repeat(jnp.expand_dims(base, axis=1), horizon, axis=1)
+    if rank == 2:
+        first = int(base_qpos.shape[0])
+        if first == int(sample_count):
+            return jnp.repeat(jnp.expand_dims(base_qpos, axis=1), horizon, axis=1)
+        if first == int(horizon):
+            return jnp.repeat(jnp.expand_dims(base_qpos, axis=0), sample_count, axis=0)
+    if rank == 3 and tuple(int(dim) for dim in base_qpos.shape[:2]) == (
+        int(sample_count),
+        int(horizon),
+    ):
+        return base_qpos
+    raise ValueError(
+        "Expected base qpos shape "
+        f"({QPOS_DIM},), ({sample_count}, {QPOS_DIM}), "
+        f"({horizon}, {QPOS_DIM}), or "
+        f"({sample_count}, {horizon}, {QPOS_DIM}); got {base_qpos.shape}"
+    )
+
+
+def _reference_base_qpos(base_qpos, *, sample_count: int, horizon: int, jnp):
+    base_qpos = jnp.asarray(base_qpos)
+    if len(base_qpos.shape) == 2 and int(base_qpos.shape[0]) == int(horizon):
+        return jnp.repeat(jnp.expand_dims(base_qpos, axis=0), sample_count, axis=0)
+    return base_qpos
 
 
 def score_candidate_controls(
@@ -125,9 +159,19 @@ def score_candidate_controls(
     if not isinstance(obs_indices, JaxObsIndices):
         raise TypeError("reference['obs_indices'] must be a JaxObsIndices")
     default_joint_pos = _required(reference, "default_joint_pos")
+    base_qpos = (
+        _reference_base_qpos(
+            reference["base_qpos"],
+            sample_count=sample_count,
+            horizon=horizon,
+            jnp=jnp,
+        )
+        if "base_qpos" in reference
+        else robot_state["qpos"]
+    )
     commanded_qpos = controls_to_qpos(
         samples,
-        robot_state["qpos"],
+        base_qpos,
         _required(reference, "joint_low"),
         _required(reference, "joint_high"),
         jnp=jnp,
