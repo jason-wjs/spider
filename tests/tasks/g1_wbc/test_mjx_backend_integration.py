@@ -304,6 +304,72 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertFalse(result.metadata["max_contact_points_saturated"])
         self.assertFalse(result.metadata["max_geom_pairs_saturated"])
 
+    def test_mjx_backend_emits_replay_control_metadata(self) -> None:
+        config = _spider_config()
+        config.horizon_steps = 11
+        config.ctrl_steps = 7
+
+        def optimizer(**kwargs):
+            window_config = kwargs["config"]
+            updated = torch.zeros(int(window_config.horizon_steps), QPOS_DIM - 1)
+            chunk = torch.zeros(int(window_config.control_steps) + 1, QPOS_DIM - 1)
+            chunk[:, 0] = 0.25
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25)},
+            )
+
+        result = run_g1_wbc_mjx_mpc(
+            spider_config=config,
+            motion=_motion(frames=22),
+            actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
+            rollout_config=SimpleNamespace(device="cpu", max_steps=21),
+            execute_rollout_config=SimpleNamespace(device="cpu", max_steps=21),
+            method="g1_wbc_joint_global",
+            reward_weights=None,
+            total_steps=21,
+            seed=5,
+            runtime=SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
+            model_factory=lambda **kwargs: _fake_model_bundle(
+                profile_name=kwargs["profile_name"]
+            ),
+            policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+        )
+
+        self.assertEqual(result.metadata["planning_horizon_steps"], 11)
+        self.assertEqual(result.metadata["control_steps"], 7)
+
+    def test_mjx_backend_honors_window_rejection_metadata(self) -> None:
+        calls = 0
+
+        def optimizer(**kwargs):
+            nonlocal calls
+            del kwargs
+            calls += 1
+            updated = torch.zeros(40, QPOS_DIM - 1)
+            chunk = torch.zeros(21, QPOS_DIM - 1)
+            chunk[:, 0] = 0.25
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={
+                    "best_score": torch.tensor(1.25),
+                    "accepted": calls != 2,
+                },
+            )
+
+        result = _run_with_fakes(
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+        )
+
+        self.assertFalse(result.metadata["accepted"])
+        self.assertEqual(result.metadata["accepted_windows"], 39)
+        self.assertFalse(result.result.infos[1]["accepted"])
+
     def test_default_optimizer_consumes_explicit_rollout_scorer(self) -> None:
         calls: list[tuple[int, ...]] = []
 

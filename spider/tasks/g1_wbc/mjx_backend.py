@@ -178,12 +178,13 @@ def run_g1_wbc_mjx_mpc(
             joint_high=joint_high,
         )
         info = dict(window_result.info)
+        window_accepted = _window_accepted(info)
         info.update(
             {
                 "backend": "mjx",
                 "sim_step": sim_step,
                 "execute_steps": execute_steps,
-                "accepted": True,
+                "accepted": window_accepted,
             }
         )
         infos.append(info)
@@ -192,7 +193,7 @@ def run_g1_wbc_mjx_mpc(
             if use_jax_controls
             else _scalar_info(info, "best_score")
         )
-        accepted_windows += 1
+        accepted_windows += int(window_accepted)
         sim_step += execute_steps
         controls = (
             _shift_jax_controls(
@@ -249,11 +250,13 @@ def run_g1_wbc_mjx_mpc(
             "mpc_backend": "mjx",
             "method": method,
             "reward_weights": reward_weights,
-            "accepted": True,
+            "accepted": accepted_windows == len(infos),
             "physics_scan_enabled": bool(enable_physics_scan),
             "used_baseline_fallback": False,
             "accepted_windows": accepted_windows,
             "num_windows": len(infos),
+            "planning_horizon_steps": horizon,
+            "control_steps": control_steps,
             "compile_init_wall_time_sec": compile_init_wall_time_sec,
             "jit_warmup_enabled": jit_warmup_enabled,
             "jit_warmup_wall_time_sec": jit_warmup_wall_time_sec,
@@ -456,6 +459,15 @@ def _any_info_flag(infos: list[dict[str, Any]], name: str) -> bool:
             if math.isfinite(numeric) and numeric != 0.0:
                 return True
     return False
+
+
+def _window_accepted(info: dict[str, Any]) -> bool:
+    accepted = _python_scalar(info.get("accepted"))
+    if isinstance(accepted, bool):
+        return accepted
+    if isinstance(accepted, (int, float)) and math.isfinite(float(accepted)):
+        return bool(accepted)
+    return True
 
 
 def _rollout_active_contact_count(rollout) -> int:
