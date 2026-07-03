@@ -1154,6 +1154,39 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["replay_results"]["jump"]["failures"],
         )
 
+    def test_replay_saved_command_hash_must_match_matching_mjx_artifact(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in replay_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_row["mpc"]["saved_command_sha256"] = "0" * 64
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "replay_saved_command_hash",
+            report["replay_results"]["jump"]["failures"],
+        )
+
     def test_missing_baseline_artifact_paths_fail_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2434,6 +2467,7 @@ def _replay_evidence(
                 "G1WbcSamplingTask.replay_qpos_command_sequence"
             ),
             "saved_command": str(Path(saved_command).expanduser().resolve()),
+            "saved_command_sha256": _file_sha256(Path(saved_command)),
             "replay_mode": "shared_execute_backend",
             "control_steps": control_steps,
             "num_command_frames": num_command_frames,

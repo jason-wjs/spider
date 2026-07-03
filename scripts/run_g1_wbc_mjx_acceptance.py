@@ -948,6 +948,7 @@ def _replay_provenance_failures(
 ) -> tuple[str, ...]:
     failures: list[str] = []
     command_by_seed = _mjx_command_path_by_seed(mjx_rows)
+    command_hash_by_seed = _mjx_command_hash_by_seed(mjx_rows)
     for row in rows:
         mpc = row.get("mpc")
         if not isinstance(mpc, dict):
@@ -968,6 +969,10 @@ def _replay_provenance_failures(
         source_command = command_by_seed.get(seed)
         if not _same_path(saved if isinstance(saved, str) else None, source_command):
             failures.append("replay_saved_command_source")
+        source_hash = command_hash_by_seed.get(seed)
+        saved_hash = mpc.get("saved_command_sha256")
+        if saved_hash != source_hash:
+            failures.append("replay_saved_command_hash")
 
         expected_control = _safe_int(
             _argv_value(row.get("replay_argv", []), "--replay-control-steps")
@@ -1006,6 +1011,19 @@ def _mjx_command_path_by_seed(rows: list[dict[str, Any]]) -> dict[int, str]:
         if isinstance(command_path, str) and command_path.strip():
             command_by_seed[int(seed)] = command_path
     return command_by_seed
+
+
+def _mjx_command_hash_by_seed(rows: list[dict[str, Any]]) -> dict[int, str]:
+    hash_by_seed: dict[int, str] = {}
+    for row in rows:
+        seed = _safe_int(row.get("seed"))
+        artifact_hashes = row.get("artifact_sha256", {})
+        if seed is None or not isinstance(artifact_hashes, dict):
+            continue
+        command_hash = artifact_hashes.get("mpc_command_npz")
+        if isinstance(command_hash, str) and command_hash.strip():
+            hash_by_seed[int(seed)] = command_hash
+    return hash_by_seed
 
 
 def _npz_frame_count(path: Path, *, keys: tuple[str, ...]) -> int | None:
@@ -1070,6 +1088,7 @@ def _has_invalid_benchmark_failure(
         "replay_num_command_frames",
         "replay_num_replay_steps",
         "replay_saved_command",
+        "replay_saved_command_hash",
         "replay_saved_command_source",
         "returncode",
         "rollout_npz",

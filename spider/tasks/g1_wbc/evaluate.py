@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -84,6 +85,9 @@ def main() -> None:
         )
     elif args.method == "replay_command":
         assert actor is not None
+        if args.saved_command is None:
+            raise ValueError("--method replay_command requires --saved-command.")
+        saved_command_path = Path(args.saved_command).expanduser().resolve()
         qpos_trajectory, qvel_trajectory = _load_saved_command_trajectory(
             args.saved_command,
             device=device,
@@ -112,7 +116,8 @@ def main() -> None:
                 "spider.tasks.g1_wbc.spider_task."
                 "G1WbcSamplingTask.replay_qpos_command_sequence"
             ),
-            "saved_command": str(Path(args.saved_command).expanduser().resolve()),
+            "saved_command": str(saved_command_path),
+            "saved_command_sha256": _file_sha256(saved_command_path),
             "replay_mode": "shared_execute_backend",
             "control_steps": control_steps,
             "use_saved_qvel": bool(args.replay_use_saved_qvel),
@@ -668,6 +673,14 @@ def _load_saved_qpos(path: str | None, *, device: str) -> torch.Tensor:
     if qpos.ndim != 2 or qpos.shape[-1] != 36:
         raise ValueError(f"Expected saved qpos shape (T,36) or (T,1,36), got {qpos.shape}.")
     return torch.tensor(qpos, dtype=torch.float32, device=device)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _load_saved_command_trajectory(

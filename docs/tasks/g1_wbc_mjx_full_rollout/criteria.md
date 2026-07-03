@@ -318,6 +318,8 @@ The MuJoCo-Warp replay gate must:
 - use the MJX run's current `mpc_command.npz`
 - reject a replay saved command that does not match the same motion and seed's
   MJX artifact, reported as `replay_saved_command_source`
+- record `saved_command_sha256` in replay `metrics.json` and match it to the
+  MJX command artifact hash, reported as `replay_saved_command_hash`
 - not contribute to MJX speed timing
 - produce `metrics.json` and `rollout.npz`
 - report replay provenance in `metrics.json`

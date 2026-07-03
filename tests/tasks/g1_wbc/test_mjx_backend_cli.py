@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest import mock
 
 from spider.tasks.g1_wbc import evaluate
@@ -71,6 +73,18 @@ class MjxBackendCliTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "requires an MPC method"):
             evaluate._validate_backend_args(args)
+
+    def test_file_sha256_hashes_saved_command_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            command = Path(tmp_dir) / "mpc_command.npz"
+            command.write_bytes(b"saved command bytes")
+
+            digest = evaluate._file_sha256(command)
+
+        self.assertEqual(
+            digest,
+            "368e0095ec392ef10cec152a60864c463232a071f6266307cb5924a2e2ad487e",
+        )
 
 
 if __name__ == "__main__":
