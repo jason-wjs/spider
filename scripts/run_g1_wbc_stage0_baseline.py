@@ -43,6 +43,7 @@ DEFAULT_PYTHON_EXECUTABLE = (
     else Path(sys.executable)
 )
 BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
+RUNNER_PROVENANCE_FILENAME = "stage0_runner_provenance.json"
 MOTIONS = ("jump", "walk")
 SEEDS = (0, 1, 2)
 SWEETPOINT_ARGS = (
@@ -357,6 +358,63 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def build_stage0_runner_provenance(command: Stage0Command) -> dict[str, Any]:
+    """Return deterministic runner provenance required for row reuse."""
+
+    checkpoint = _argv_value(command.argv, "--checkpoint")
+    reward_weights = _argv_value(command.argv, "--mpc-reward-weights")
+    input_paths = {
+        "motion": command.motion,
+        "checkpoint": checkpoint,
+        "reward_weights": reward_weights,
+    }
+    return {
+        "schema_version": 1,
+        "kind": "g1_wbc_stage0_runner_provenance",
+        "motion_name": command.motion_name,
+        "motion": command.motion,
+        "seed": int(command.seed),
+        "output_dir": command.output_dir,
+        "argv": list(command.argv),
+        "command_text": command.command_text,
+        "input_paths": input_paths,
+        "input_sha256": {
+            key: _path_sha256_or_none(value)
+            for key, value in input_paths.items()
+        },
+    }
+
+
+def write_stage0_runner_provenance(command: Stage0Command) -> Path:
+    """Write runner-owned provenance after a successful real row run."""
+
+    output_dir = Path(command.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    provenance_path = output_dir / RUNNER_PROVENANCE_FILENAME
+    payload = build_stage0_runner_provenance(command)
+    provenance_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return provenance_path
+
+
+def clear_stage0_runner_provenance(command: Stage0Command) -> None:
+    """Remove stale runner provenance before rerunning a row."""
+
+    provenance_path = Path(command.output_dir) / RUNNER_PROVENANCE_FILENAME
+    try:
+        provenance_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _path_sha256_or_none(path: str | None) -> str | None:
+    if path is None:
+        return None
+    resolved = Path(path).expanduser()
+    if not resolved.is_file():
+        return None
+    return file_sha256(resolved)
+
+
 def build_manifest_metadata(args: argparse.Namespace) -> dict[str, Any]:
     """Build reproducibility metadata for the Stage 0 baseline manifest."""
 
@@ -470,6 +528,8 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
         and command_path.is_file()
     ):
         return None
+    if not _existing_runner_provenance_matches(command):
+        return None
     try:
         payload = json.loads(metrics_path.read_text())
     except (OSError, json.JSONDecodeError):
@@ -517,6 +577,19 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
     return row
 
 
+def _existing_runner_provenance_matches(command: Stage0Command) -> bool:
+    """Return whether runner-owned sidecar provenance matches this command."""
+
+    provenance_path = Path(command.output_dir) / RUNNER_PROVENANCE_FILENAME
+    try:
+        payload = json.loads(provenance_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return payload == build_stage0_runner_provenance(command)
+
+
 def _existing_row_provenance_matches(
     command: Stage0Command,
     payload: dict[str, Any],
@@ -524,7 +597,7 @@ def _existing_row_provenance_matches(
     """Return whether an existing metrics payload belongs to this command."""
 
     expected = _command_expected_provenance(command)
-    for key in ("motion", "checkpoint", "method"):
+    for key in ("motion", "motion_type", "checkpoint", "device", "method", "max_steps"):
         value = expected.get(key)
         if value is None:
             continue
@@ -536,7 +609,7 @@ def _existing_row_provenance_matches(
     mpc = payload.get("mpc", {})
     if not isinstance(mpc, dict):
         return False
-    for key in ("mpc_backend", "mpc_optimizer"):
+    for key in ("mpc_backend", "mpc_optimizer", "reward_weight_source"):
         value = expected.get(key)
         if value is None:
             continue
@@ -551,10 +624,14 @@ def _command_expected_provenance(command: Stage0Command) -> dict[str, str]:
 
     values = {
         "motion": command.motion,
+        "motion_type": _argv_value(command.argv, "--motion-type"),
         "checkpoint": _argv_value(command.argv, "--checkpoint"),
+        "device": _argv_value(command.argv, "--device"),
         "method": _argv_value(command.argv, "--method"),
+        "max_steps": _argv_value(command.argv, "--max-steps"),
         "mpc_backend": _argv_value(command.argv, "--mpc-backend"),
         "mpc_optimizer": _argv_value(command.argv, "--mpc-optimizer"),
+        "reward_weight_source": _argv_value(command.argv, "--mpc-reward-weights"),
     }
     return {
         key: str(value)
@@ -657,7 +734,14 @@ def main(argv: list[str] | None = None) -> int:
         row = asdict(command)
         row["dry_run"] = args.dry_run
         if args.dry_run:
-            row.update({"status": "dry_run", "returncode": None, "stdout": None, "stderr": None})
+            row.update(
+                {
+                    "status": "dry_run",
+                    "returncode": None,
+                    "stdout": None,
+                    "stderr": None,
+                }
+            )
         else:
             Path(command.output_dir).mkdir(parents=True, exist_ok=True)
             execution = (
@@ -666,7 +750,10 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             )
             if execution is None:
+                clear_stage0_runner_provenance(command)
                 execution = run_command(command)
+                if execution["returncode"] == 0:
+                    write_stage0_runner_provenance(command)
             row.update(execution)
             row["status"] = "ok" if execution["returncode"] == 0 else "failed"
             if execution["returncode"] != 0 and worst_returncode == 0:

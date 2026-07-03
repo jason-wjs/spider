@@ -534,12 +534,16 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                     json.dumps(
                         {
                             "motion": command.motion,
+                            "motion_type": "isaaclab",
                             "checkpoint": command.argv[command.argv.index("--checkpoint") + 1],
+                            "device": "cuda:0",
                             "method": "g1_wbc_joint_global",
+                            "max_steps": 800,
                             "metrics": _passing_metrics(),
                             "mpc": {
                                 "mpc_backend": "mujoco_warp",
                                 "mpc_optimizer": "legacy",
+                                "reward_weight_source": str(reward_weights.resolve()),
                                 "accepted": True,
                                 "accepted_windows": 40,
                                 "used_baseline_fallback": False,
@@ -552,6 +556,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 )
                 (output_dir / "rollout.npz").write_text("{}")
                 (output_dir / "mpc_command.npz").write_text("{}")
+                runner.write_stage0_runner_provenance(command)
 
             with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"}):
                 with mock.patch.object(runner, "validate_visible_gpu_is_idle", return_value=()):
@@ -569,6 +574,145 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertTrue(all(row["reused_existing"] for row in manifest["rows"]))
         self.assertEqual(set(manifest["baseline_envelopes"]), {"jump", "walk"})
         self.assertEqual(manifest["promoted_seeds"], {"jump": 0, "walk": 0})
+
+    def test_existing_row_reuse_rejects_missing_stage0_runner_provenance(self) -> None:
+        import torch
+
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, reward_weights):
+                path.write_text("{}")
+            torch.save(
+                {
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": torch.zeros(1, 886),
+                        "obs_normalizer._std": torch.ones(1, 886),
+                        "mlp.0.weight": torch.zeros(1, 1),
+                    }
+                },
+                checkpoint,
+            )
+            args = runner.parse_args(
+                [
+                    "--jump-motion",
+                    str(jump_motion),
+                    "--walk-motion",
+                    str(walk_motion),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--reward-weights",
+                    str(reward_weights),
+                    "--output-dir",
+                    str(output_root),
+                    "--reuse-existing-ok",
+                ]
+            )
+            command = next(
+                command
+                for command in runner.build_stage0_commands(args)
+                if command.motion_name == "jump" and command.seed == 0
+            )
+            output_dir = Path(command.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "motion": command.motion,
+                        "motion_type": "isaaclab",
+                        "checkpoint": command.argv[command.argv.index("--checkpoint") + 1],
+                        "device": "cuda:0",
+                        "method": "g1_wbc_joint_global",
+                        "max_steps": 800,
+                        "metrics": _passing_metrics(),
+                        "mpc": {
+                            "mpc_backend": "mujoco_warp",
+                            "mpc_optimizer": "legacy",
+                            "reward_weight_source": str(reward_weights.resolve()),
+                            "accepted": True,
+                            "accepted_windows": 40,
+                            "used_baseline_fallback": False,
+                        },
+                    }
+                )
+            )
+            (output_dir / "rollout.npz").write_text("{}")
+            (output_dir / "mpc_command.npz").write_text("{}")
+
+            row = runner.load_existing_ok_row(command)
+
+        self.assertIsNone(row)
+
+    def test_existing_row_reuse_rejects_stale_stage0_runner_argv_provenance(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, checkpoint, reward_weights):
+                path.write_text("{}")
+            args = runner.parse_args(
+                [
+                    "--jump-motion",
+                    str(jump_motion),
+                    "--walk-motion",
+                    str(walk_motion),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--reward-weights",
+                    str(reward_weights),
+                    "--output-dir",
+                    str(output_root),
+                    "--reuse-existing-ok",
+                ]
+            )
+            command = next(
+                command
+                for command in runner.build_stage0_commands(args)
+                if command.motion_name == "jump" and command.seed == 0
+            )
+            output_dir = Path(command.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "motion": command.motion,
+                        "motion_type": "isaaclab",
+                        "checkpoint": command.argv[command.argv.index("--checkpoint") + 1],
+                        "device": "cuda:0",
+                        "method": "g1_wbc_joint_global",
+                        "max_steps": 800,
+                        "metrics": _passing_metrics(),
+                        "mpc": {
+                            "mpc_backend": "mujoco_warp",
+                            "mpc_optimizer": "legacy",
+                            "reward_weight_source": str(reward_weights.resolve()),
+                            "accepted": True,
+                            "accepted_windows": 40,
+                            "used_baseline_fallback": False,
+                        },
+                    }
+                )
+            )
+            (output_dir / "rollout.npz").write_text("{}")
+            (output_dir / "mpc_command.npz").write_text("{}")
+            provenance_path = runner.write_stage0_runner_provenance(command)
+            provenance = json.loads(provenance_path.read_text())
+            samples_index = provenance["argv"].index("--mpc-samples") + 1
+            provenance["argv"][samples_index] = "256"
+            provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+
+            row = runner.load_existing_ok_row(command)
+
+        self.assertIsNone(row)
 
     def test_existing_row_reuse_rejects_mismatched_metrics_provenance(self) -> None:
         runner = load_runner()
@@ -613,6 +757,74 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
             )
             (output_dir / "rollout.npz").write_text("{}")
             (output_dir / "mpc_command.npz").write_text("{}")
+            runner.write_stage0_runner_provenance(command)
+
+            row = runner.load_existing_ok_row(command)
+
+        self.assertIsNone(row)
+
+    def test_existing_row_reuse_rejects_mismatched_reward_weights(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            formal_reward = output_dir / "formal_reward.json"
+            stale_reward = output_dir / "stale_reward.json"
+            formal_reward.write_text("{}")
+            stale_reward.write_text("{}")
+            command = runner.Stage0Command(
+                motion_name="jump",
+                motion="/tmp/formal_jump.npz",
+                seed=0,
+                output_dir=str(output_dir),
+                argv=[
+                    "python",
+                    "-m",
+                    "spider.tasks.g1_wbc.evaluate",
+                    "--motion",
+                    "/tmp/formal_jump.npz",
+                    "--motion-type",
+                    "isaaclab",
+                    "--checkpoint",
+                    "/tmp/model.pt",
+                    "--device",
+                    "cuda:0",
+                    "--method",
+                    "g1_wbc_joint_global",
+                    "--max-steps",
+                    "800",
+                    "--mpc-backend",
+                    "mujoco_warp",
+                    "--mpc-optimizer",
+                    "legacy",
+                    "--mpc-reward-weights",
+                    str(formal_reward),
+                ],
+                command_text="python -m spider.tasks.g1_wbc.evaluate",
+            )
+            (output_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "motion": "/tmp/formal_jump.npz",
+                        "motion_type": "isaaclab",
+                        "checkpoint": "/tmp/model.pt",
+                        "device": "cuda:0",
+                        "method": "g1_wbc_joint_global",
+                        "max_steps": 800,
+                        "metrics": _passing_metrics(),
+                        "mpc": {
+                            "mpc_backend": "mujoco_warp",
+                            "mpc_optimizer": "legacy",
+                            "reward_weight_source": str(stale_reward),
+                            "accepted": True,
+                            "accepted_windows": 40,
+                            "used_baseline_fallback": False,
+                        },
+                    }
+                )
+            )
+            (output_dir / "rollout.npz").write_text("{}")
+            (output_dir / "mpc_command.npz").write_text("{}")
+            runner.write_stage0_runner_provenance(command)
 
             row = runner.load_existing_ok_row(command)
 
@@ -672,6 +884,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                     )
                     (output_dir / "rollout.npz").write_text("{}")
                     (output_dir / "mpc_command.npz").write_text("{}")
+                    runner.write_stage0_runner_provenance(command)
 
                     row = runner.load_existing_ok_row(command)
 
@@ -736,10 +949,15 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                         exit_code = runner.main(argv)
 
             manifest = json.loads((output_root / "baseline_manifest.json").read_text())
+            provenance_files_exist = [
+                (Path(row["output_dir"]) / runner.RUNNER_PROVENANCE_FILENAME).is_file()
+                for row in manifest["rows"]
+            ]
 
         self.assertEqual(exit_code, 0)
         self.assertEqual({row["status"] for row in manifest["rows"]}, {"ok"})
         self.assertTrue(all(row["artifacts"]["metrics_json"] for row in manifest["rows"]))
+        self.assertTrue(all(provenance_files_exist))
         self.assertEqual(
             {row["steady_state_wall_time_sec"] for row in manifest["rows"]},
             {120.0},
