@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -265,6 +266,8 @@ def run_g1_wbc_sampling_mpc(
         metadata={
             **sampling_mpc_metadata(config),
             "steady_state_wall_time_sec": steady_state_wall_time_sec,
+            "runtime_visible_devices": _runtime_visible_devices(),
+            "runtime_gpu_name": _runtime_gpu_name(config),
         },
     )
 
@@ -276,6 +279,24 @@ def _synchronize_torch_device(config: Config) -> None:
     torch_device = torch.device(device)
     if torch_device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.synchronize(torch_device)
+
+
+def _runtime_visible_devices() -> tuple[str, ...]:
+    return tuple(
+        value.strip()
+        for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if value.strip()
+    )
+
+
+def _runtime_gpu_name(config: Config) -> str | None:
+    device = getattr(config, "device", None)
+    if device is None:
+        return None
+    torch_device = torch.device(device)
+    if torch_device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    return str(torch.cuda.get_device_name(torch_device))
 
 
 class G1WbcSamplingTask:

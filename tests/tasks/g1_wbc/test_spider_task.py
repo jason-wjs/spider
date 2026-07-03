@@ -65,6 +65,8 @@ class G1WbcSpiderTaskTest(unittest.TestCase):
         self.assertIn("steady_state_wall_time_sec", result.metadata)
         self.assertIsInstance(result.metadata["steady_state_wall_time_sec"], float)
         self.assertGreaterEqual(result.metadata["steady_state_wall_time_sec"], 0.0)
+        self.assertEqual(result.metadata["runtime_visible_devices"], ())
+        self.assertIsNone(result.metadata["runtime_gpu_name"])
 
 
 if __name__ == "__main__":

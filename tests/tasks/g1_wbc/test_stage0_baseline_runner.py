@@ -163,6 +163,8 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                             "accepted_windows": 40,
                             "used_baseline_fallback": False,
                             "steady_state_wall_time_sec": 123.45,
+                            "runtime_visible_devices": ["0"],
+                            "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
                         },
                     }
                 )
@@ -186,6 +188,8 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertFalse(row["mpc_used_baseline_fallback"])
         self.assertEqual(row["num_steps"], 800)
         self.assertEqual(row["steady_state_wall_time_sec"], 123.45)
+        self.assertEqual(row["runtime_visible_devices"], ["0"])
+        self.assertEqual(row["runtime_gpu_name"], "NVIDIA H100 80GB HBM3")
 
     def test_main_writes_ok_status_for_successful_real_run(self) -> None:
         runner = load_runner()

@@ -221,6 +221,13 @@ def run_command(command: Stage0Command) -> dict[str, Any]:
         row["num_steps"] = int(metrics.get("num_steps", -1))
         if isinstance(mpc.get("steady_state_wall_time_sec"), (int, float)):
             row["steady_state_wall_time_sec"] = float(mpc["steady_state_wall_time_sec"])
+        if isinstance(mpc.get("runtime_visible_devices"), list):
+            row["runtime_visible_devices"] = [
+                str(value)
+                for value in mpc["runtime_visible_devices"]
+            ]
+        if isinstance(mpc.get("runtime_gpu_name"), str):
+            row["runtime_gpu_name"] = mpc["runtime_gpu_name"]
     return row
 
 

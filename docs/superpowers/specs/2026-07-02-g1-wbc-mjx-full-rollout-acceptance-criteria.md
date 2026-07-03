@@ -130,6 +130,7 @@ Required fields:
 - reward weight path and hash
 - MuJoCo, MuJoCo-Warp, Torch, CUDA, driver, JAX, and MJX versions when available
 - GPU model and visible GPU ids
+- baseline runtime GPU name and visible device ids from the MuJoCo-Warp run
 - wall-clock timing
 - compile/init timing if any
 - `metrics.json`
