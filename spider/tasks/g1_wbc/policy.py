@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import torch
 from torch import nn
@@ -60,7 +62,8 @@ def load_wbc_actor(
 ) -> WbcActor:
     ckpt_path = resolve_checkpoint_path(checkpoint)
     checkpoint_data = torch.load(ckpt_path, map_location="cpu")
-    state_dict = checkpoint_data.get("actor_state_dict", checkpoint_data)
+    state_dict = _actor_state_dict(checkpoint_data, ckpt_path)
+    _validate_wbc_actor_state_dict(state_dict, ckpt_path)
     actor = WbcActor()
 
     actor.obs_mean.copy_(state_dict["obs_normalizer._mean"])
@@ -78,3 +81,47 @@ def load_wbc_actor(
     actor.to(device)
     actor.eval()
     return actor
+
+
+def _actor_state_dict(
+    checkpoint_data: object,
+    ckpt_path: Path,
+) -> Mapping[str, Any]:
+    if not isinstance(checkpoint_data, Mapping):
+        raise ValueError(f"Unsupported G1 WBC checkpoint format for {ckpt_path}: not a dict.")
+    for key in ("actor_state_dict", "model_state_dict", "state_dict"):
+        value = checkpoint_data.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return checkpoint_data
+
+
+def _validate_wbc_actor_state_dict(state_dict: Mapping[str, Any], ckpt_path: Path) -> None:
+    keys = {str(key) for key in state_dict}
+    has_obs_normalizer = {
+        "obs_normalizer._mean",
+        "obs_normalizer._std",
+    }.issubset(keys)
+    has_mlp = any(key.startswith("mlp.") for key in keys)
+    if has_obs_normalizer and has_mlp:
+        return
+    description = _describe_checkpoint_keys(keys)
+    raise ValueError(
+        "Unsupported G1 WBC checkpoint format for "
+        f"{ckpt_path}: {description}. Expected a WBC MLP actor checkpoint with "
+        "obs_normalizer._mean, obs_normalizer._std, and mlp.* weights. "
+        "SparseTrack transformer checkpoints require a separate policy/observation adapter."
+    )
+
+
+def _describe_checkpoint_keys(keys: set[str]) -> str:
+    if any(key.startswith("actor.transformer_blocks.") for key in keys):
+        return "looks like a SparseTrack transformer checkpoint"
+    if any(key.startswith("actor_task_embedder.") for key in keys):
+        return "looks like a SparseTrack transformer checkpoint"
+    if any(key.startswith("actor.") for key in keys):
+        return "looks like an RSL-RL/SparseTrack actor checkpoint"
+    if not keys:
+        return "empty state dict"
+    sample = ", ".join(sorted(keys)[:4])
+    return f"unrecognized keys [{sample}]"
