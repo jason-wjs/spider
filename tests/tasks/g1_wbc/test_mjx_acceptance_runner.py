@@ -1081,6 +1081,79 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["replay_results"]["jump"]["failures"],
         )
 
+    def test_replay_saved_command_must_match_matching_mjx_row(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in replay_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            other_command = next(
+                row["artifacts"]["mpc_command_npz"]
+                for row in mjx_rows
+                if row["motion"] == "walk" and row["seed"] == 2
+            )
+            saved_idx = bad_row["replay_argv"].index("--saved-command") + 1
+            bad_row["replay_argv"][saved_idx] = other_command
+            bad_row.update(_replay_evidence(bad_row["replay_argv"]))
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "replay_saved_command_source",
+            report["replay_results"]["jump"]["failures"],
+        )
+
+    def test_replay_command_frame_count_must_match_saved_command_npz(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in replay_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_row["mpc"]["num_command_frames"] = 900
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "replay_command_npz_frames",
+            report["replay_results"]["jump"]["failures"],
+        )
+
     def test_missing_baseline_artifact_paths_fail_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:

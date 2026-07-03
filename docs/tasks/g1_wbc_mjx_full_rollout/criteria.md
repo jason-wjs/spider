@@ -313,12 +313,16 @@ Every selected MJX command must be replayed through MuJoCo-Warp using
 The MuJoCo-Warp replay gate must:
 
 - use the MJX run's current `mpc_command.npz`
+- reject a replay saved command that does not match the same motion and seed's
+  MJX artifact, reported as `replay_saved_command_source`
 - not contribute to MJX speed timing
 - produce `metrics.json` and `rollout.npz`
 - report replay provenance in `metrics.json`
 - use `replay_mode=shared_execute_backend`
 - use the planned replay control steps
 - report `num_command_frames >= num_replay_steps + 1`
+- match `num_command_frames` to the saved command NPZ frame count, reported as
+  `replay_command_npz_frames`
 - compare replay quality against the same frozen baseline envelope
 
 If MJX metrics pass but MuJoCo-Warp replay fails, the result is a parity

@@ -641,7 +641,7 @@ def _build_report(
         replay_failures = _unique(
             (
                 *replay_failures,
-                *_replay_provenance_failures(replay_group),
+                *_replay_provenance_failures(replay_group, mjx_group),
                 *_artifact_freshness_failures(
                     replay_group,
                     artifact_fields=("metrics_json", "rollout_npz"),
@@ -942,8 +942,12 @@ def _replay_quality_row(row: dict[str, Any]) -> dict[str, Any]:
     return quality_row
 
 
-def _replay_provenance_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+def _replay_provenance_failures(
+    rows: list[dict[str, Any]],
+    mjx_rows: list[dict[str, Any]],
+) -> tuple[str, ...]:
     failures: list[str] = []
+    command_by_seed = _mjx_command_path_by_seed(mjx_rows)
     for row in rows:
         mpc = row.get("mpc")
         if not isinstance(mpc, dict):
@@ -960,6 +964,10 @@ def _replay_provenance_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
             failures.append("replay_saved_command")
         elif not _is_existing_file(saved):
             failures.append("replay_saved_command")
+        seed = _safe_int(row.get("seed"))
+        source_command = command_by_seed.get(seed)
+        if not _same_path(saved if isinstance(saved, str) else None, source_command):
+            failures.append("replay_saved_command_source")
 
         expected_control = _safe_int(
             _argv_value(row.get("replay_argv", []), "--replay-control-steps")
@@ -977,7 +985,40 @@ def _replay_provenance_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
             or command_frames < replay_steps + 1
         ):
             failures.append("replay_num_command_frames")
+        command_npz_frames = (
+            _npz_frame_count(Path(saved).expanduser(), keys=("refined_qpos",))
+            if isinstance(saved, str)
+            else None
+        )
+        if command_frames is not None and command_npz_frames != command_frames:
+            failures.append("replay_command_npz_frames")
     return _unique(failures)
+
+
+def _mjx_command_path_by_seed(rows: list[dict[str, Any]]) -> dict[int, str]:
+    command_by_seed: dict[int, str] = {}
+    for row in rows:
+        seed = _safe_int(row.get("seed"))
+        artifacts = row.get("artifacts", {})
+        if seed is None or not isinstance(artifacts, dict):
+            continue
+        command_path = artifacts.get("mpc_command_npz")
+        if isinstance(command_path, str) and command_path.strip():
+            command_by_seed[int(seed)] = command_path
+    return command_by_seed
+
+
+def _npz_frame_count(path: Path, *, keys: tuple[str, ...]) -> int | None:
+    try:
+        with np.load(path) as data:
+            for key in keys:
+                if key in data.files:
+                    shape = tuple(np.asarray(data[key]).shape)
+                    if shape:
+                        return int(shape[0])
+    except Exception:
+        return None
+    return None
 
 
 def _has_invalid_benchmark_failure(
@@ -1023,10 +1064,12 @@ def _has_invalid_benchmark_failure(
         "num_steps",
         "repeat_count",
         "replay_control_steps",
+        "replay_command_npz_frames",
         "replay_mode",
         "replay_num_command_frames",
         "replay_num_replay_steps",
         "replay_saved_command",
+        "replay_saved_command_source",
         "returncode",
         "rollout_npz",
         "rollout_npz_hash",
