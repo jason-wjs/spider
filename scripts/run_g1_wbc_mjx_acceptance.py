@@ -1019,6 +1019,7 @@ def _has_invalid_benchmark_failure(
         "mpc_command_npz_hash",
         "mpc_command_npz_schema",
         "mpc_command_npz_stale",
+        "mpc_rollout_qpos_mismatch",
         "num_steps",
         "repeat_count",
         "replay_control_steps",
@@ -1477,14 +1478,35 @@ def _artifact_npz_schema_failures(
         if not isinstance(artifacts, dict) or num_steps is None:
             continue
         rollout_path = artifacts.get("rollout_npz")
+        rollout_valid = False
         if isinstance(rollout_path, str) and Path(rollout_path).expanduser().is_file():
-            if not _valid_rollout_npz(Path(rollout_path).expanduser(), num_steps=num_steps):
+            rollout_valid = _valid_rollout_npz(
+                Path(rollout_path).expanduser(),
+                num_steps=num_steps,
+            )
+            if not rollout_valid:
                 failures.append("rollout_npz_schema")
         if require_command:
             command_path = artifacts.get("mpc_command_npz")
+            command_valid = False
             if isinstance(command_path, str) and Path(command_path).expanduser().is_file():
-                if not _valid_command_npz(Path(command_path).expanduser(), num_steps=num_steps):
+                command_valid = _valid_command_npz(
+                    Path(command_path).expanduser(),
+                    num_steps=num_steps,
+                )
+                if not command_valid:
                     failures.append("mpc_command_npz_schema")
+            if (
+                rollout_valid
+                and command_valid
+                and isinstance(rollout_path, str)
+                and isinstance(command_path, str)
+                and not _rollout_matches_command_npz(
+                    Path(rollout_path).expanduser(),
+                    Path(command_path).expanduser(),
+                )
+            ):
+                failures.append("mpc_rollout_qpos_mismatch")
     return _unique(failures)
 
 
@@ -1533,6 +1555,27 @@ def _valid_command_npz(path: Path, *, num_steps: int) -> bool:
     try:
         with np.load(path) as data:
             return _npz_has_shapes(data, required_shapes)
+    except Exception:
+        return False
+
+
+def _rollout_matches_command_npz(rollout_path: Path, command_path: Path) -> bool:
+    try:
+        with np.load(rollout_path) as rollout, np.load(command_path) as command:
+            rollout_qpos = np.asarray(rollout["qpos"])[:, 0]
+            refined_qpos = np.asarray(command["refined_qpos"])
+            if refined_qpos.ndim == 3 and refined_qpos.shape[1] == 1:
+                refined_qpos = refined_qpos[:, 0]
+            if rollout_qpos.shape != refined_qpos.shape:
+                return False
+            return bool(
+                np.allclose(
+                    rollout_qpos,
+                    refined_qpos,
+                    atol=1.0e-5,
+                    rtol=1.0e-5,
+                )
+            )
     except Exception:
         return False
 

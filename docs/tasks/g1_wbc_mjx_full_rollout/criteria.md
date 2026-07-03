@@ -157,6 +157,9 @@ arrays, `actions`, `controls`, foot contact arrays, floor contact arrays,
 `candidate_scores`, command joint/body trajectories, and command
 `qpos`/`qvel` trajectories with shapes consistent with the same frame count.
 Invalid command content is reported as `mpc_command_npz_schema`.
+For MJX and Stage0 MPC rows, `rollout.npz["qpos"][:, 0]` must match
+`mpc_command.npz["refined_qpos"]` within the runtime acceptance tolerance.
+Mismatch is reported as `mpc_rollout_qpos_mismatch`.
 
 Formal acceptance recomputes input hashes from the manifest row argv paths.
 Hashes must be lowercase SHA256 hex strings. Acceptance also recomputes baseline

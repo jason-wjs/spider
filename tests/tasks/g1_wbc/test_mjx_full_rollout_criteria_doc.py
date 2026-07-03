@@ -30,6 +30,7 @@ class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
             "worst_speedup",
             "rollout_npz_schema",
             "mpc_command_npz_schema",
+            "mpc_rollout_qpos_mismatch",
             "pass_h100_milestone",
             "invalid_benchmark",
         )
