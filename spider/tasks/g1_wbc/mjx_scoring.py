@@ -41,7 +41,10 @@ ACCUMULATOR_KEYS = (
     "ee_global_pos_error_sum",
     "ee_global_rot_error_sum",
     "contact_mismatch_sum",
+    "contact_false_positive_sum",
+    "contact_false_negative_sum",
     "control_delta_sum",
+    "action_delta_sum",
     "joint_acc_sum",
     "count",
     "active_contact_count",
@@ -109,9 +112,31 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     )
+    contact_false_positive = _mean_contact_indicator(
+        step_state["contact"],
+        reference_state["contact"],
+        positive=True,
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
+    contact_false_negative = _mean_contact_indicator(
+        step_state["contact"],
+        reference_state["contact"],
+        positive=False,
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
     control_delta = _mean_squared(
         step_state["control"],
         step_state["prev_control"],
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
+    action_delta = _mean_optional_l2_delta(
+        step_state,
+        "action",
+        "prev_action",
+        required=_weight(weights, "action_delta") != 0.0,
         batch_shape=batch_shape,
         jnp=jnp,
     )
@@ -131,7 +156,14 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
     terms["ee_global_pos_error_sum"] = terms["ee_global_pos_error_sum"] + ee_error
     terms["ee_global_rot_error_sum"] = terms["ee_global_rot_error_sum"] + ee_rot_error
     terms["contact_mismatch_sum"] = terms["contact_mismatch_sum"] + contact_error
+    terms["contact_false_positive_sum"] = (
+        terms["contact_false_positive_sum"] + contact_false_positive
+    )
+    terms["contact_false_negative_sum"] = (
+        terms["contact_false_negative_sum"] + contact_false_negative
+    )
     terms["control_delta_sum"] = terms["control_delta_sum"] + control_delta
+    terms["action_delta_sum"] = terms["action_delta_sum"] + action_delta
     terms["joint_acc_sum"] = terms["joint_acc_sum"] + joint_acc
     terms["count"] = terms["count"] + 1.0
     terms["active_contact_count"] = jnp.maximum(
@@ -152,7 +184,10 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         + _weight(weights, "ee_global_pos", "ee_global_pos_error") * ee_error
         + _weight(weights, "ee_global_rot", "ee_global_rot_error") * ee_rot_error
         + _weight(weights, "contact", "contact_mismatch") * contact_error
+        + _weight(weights, "contact_false_positive") * contact_false_positive
+        + _weight(weights, "contact_false_negative") * contact_false_negative
         + _weight(weights, "control_delta") * control_delta
+        + _weight(weights, "action_delta") * action_delta
         + _weight(weights, "joint_acc") * joint_acc
     )
     terms["score_sum"] = terms["score_sum"] - penalty
@@ -172,7 +207,10 @@ def finalize_score(accumulator, *, jnp):
     ee_global_pos_error = terms["ee_global_pos_error_sum"] / count
     ee_global_rot_error = terms["ee_global_rot_error_sum"] / count
     contact_mismatch = terms["contact_mismatch_sum"] / count
+    contact_false_positive = terms["contact_false_positive_sum"] / count
+    contact_false_negative = terms["contact_false_negative_sum"] / count
     control_delta = terms["control_delta_sum"] / count
+    action_delta = terms["action_delta_sum"] / count
     joint_acc = terms["joint_acc_sum"] / count
     return {
         "score": score,
@@ -183,7 +221,10 @@ def finalize_score(accumulator, *, jnp):
         "ee_global_pos_error_mean": ee_global_pos_error,
         "ee_global_rot_error_mean": ee_global_rot_error,
         "contact_mismatch_rate": contact_mismatch,
+        "contact_false_positive_rate": contact_false_positive,
+        "contact_false_negative_rate": contact_false_negative,
         "control_delta_mean": control_delta,
+        "action_delta_mean": action_delta,
         "joint_acc_mean": joint_acc,
         "root_pos_error": root_pos_error,
         "root_rot_error": root_rot_error,
@@ -192,7 +233,10 @@ def finalize_score(accumulator, *, jnp):
         "ee_global_pos_error": ee_global_pos_error,
         "ee_global_rot_error": ee_global_rot_error,
         "contact_mismatch": contact_mismatch,
+        "contact_false_positive": contact_false_positive,
+        "contact_false_negative": contact_false_negative,
         "control_delta": control_delta,
+        "action_delta": action_delta,
         "joint_acc": joint_acc,
         "active_contact_count": terms["active_contact_count"],
         "contact_pair_count": terms["contact_pair_count"],
@@ -207,6 +251,43 @@ def _mean_squared(actual, expected, *, batch_shape: tuple[int, ...], jnp):
 def _mean_abs(actual, expected, *, batch_shape: tuple[int, ...], jnp):
     delta = jnp.asarray(actual) - jnp.asarray(expected)
     return _mean_feature_axes(jnp.abs(delta), batch_shape=batch_shape, jnp=jnp)
+
+
+def _mean_contact_indicator(
+    actual,
+    expected,
+    *,
+    positive: bool,
+    batch_shape: tuple[int, ...],
+    jnp,
+):
+    actual = jnp.asarray(actual)
+    expected = jnp.asarray(expected)
+    if positive:
+        indicator = (actual > 0.5) & (expected <= 0.5)
+    else:
+        indicator = (actual <= 0.5) & (expected > 0.5)
+    return _mean_feature_axes(jnp.asarray(indicator), batch_shape=batch_shape, jnp=jnp)
+
+
+def _mean_optional_l2_delta(
+    step_state,
+    actual_name: str,
+    expected_name: str,
+    *,
+    required: bool,
+    batch_shape: tuple[int, ...],
+    jnp,
+):
+    if actual_name not in step_state or expected_name not in step_state:
+        if required:
+            raise KeyError(
+                f"Missing score fields {actual_name!r} and/or {expected_name!r}"
+            )
+        return jnp.zeros(batch_shape)
+    delta = jnp.asarray(step_state[actual_name]) - jnp.asarray(step_state[expected_name])
+    norm = jnp.sqrt(jnp.sum(delta * delta, axis=-1))
+    return _mean_feature_axes(norm, batch_shape=batch_shape, jnp=jnp)
 
 
 def _mean_quat_error(

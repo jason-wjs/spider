@@ -396,6 +396,22 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(weights["body_global_rot"], 0.8)
         self.assertEqual(weights["ee_global_rot"], 0.3)
 
+    def test_mjx_score_weights_maps_contact_and_action_terms_exactly(self) -> None:
+        weights = mjx_backend_module._mjx_score_weights(
+            "g1_wbc_joint_global",
+            {
+                "contact_mismatch": 2.0,
+                "contact_false_positive": 1.5,
+                "contact_false_negative": 0.4,
+                "action_delta": 0.6,
+            },
+        )
+
+        self.assertEqual(weights["contact"], 2.0)
+        self.assertEqual(weights["contact_false_positive"], 1.5)
+        self.assertEqual(weights["contact_false_negative"], 0.4)
+        self.assertEqual(weights["action_delta"], 0.6)
+
     def test_mjx_backend_emits_contact_capacity_metadata(self) -> None:
         def optimizer(**kwargs):
             del kwargs

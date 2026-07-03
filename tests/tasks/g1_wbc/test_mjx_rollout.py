@@ -702,6 +702,31 @@ class MjxRolloutTest(unittest.TestCase):
         np.testing.assert_allclose(metrics["contact_pair_count"], [4.0, 5.0])
         np.testing.assert_allclose(metrics["physics_step_count"], [3.0, 3.0])
 
+    def test_score_candidate_controls_scores_action_delta_from_previous_action(
+        self,
+    ) -> None:
+        samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=3)
+        reference["obs_state"] = JaxObsState(
+            history=None,
+            last_action=np.ones((1, ACTION_DIM), dtype=np.float32),
+        )
+        reference["score_weights"] = JaxScoreWeights({"action_delta": 1.0})
+
+        metrics = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            return_metrics=True,
+        )
+
+        expected = np.sqrt(float(ACTION_DIM)) / 3.0
+        np.testing.assert_allclose(metrics["action_delta_mean"], [expected])
+        np.testing.assert_allclose(metrics["score"], [-expected])
+
     def test_score_candidate_controls_feeds_previous_action_into_next_observation(
         self,
     ) -> None:

@@ -503,6 +503,8 @@ def _score_rollout_step(
     robot_state = _batched_robot_state(robot_state, sample_count, jnp=jnp)
     step_control = samples[:, step_index]
     step_state = dict(physics_score_state)
+    step_state.setdefault("action", action)
+    step_state.setdefault("prev_action", obs_state.last_action)
     step_state.setdefault("control", step_control)
     step_state.setdefault("prev_control", prev_control)
     step_state.setdefault("joint_vel", _joint_vel(robot_state))

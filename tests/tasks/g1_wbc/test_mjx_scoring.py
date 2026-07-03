@@ -187,6 +187,52 @@ class MjxScoringTest(unittest.TestCase):
         expected_penalty = 0.5 * np.pi + 0.8 * (np.pi / 2.0) + 0.3 * np.pi
         self.assertAlmostEqual(float(metrics["score"]), -expected_penalty, places=6)
 
+    def test_score_step_accumulates_contact_classification_and_action_delta(
+        self,
+    ) -> None:
+        step_state = {
+            **_step_state(),
+            "contact": np.array([1.0, 0.0, 1.0, 0.0], dtype=np.float32),
+            "action": np.array([0.2, -0.4], dtype=np.float32),
+            "prev_action": np.array([-0.1, 0.1], dtype=np.float32),
+        }
+        reference_state = {
+            **_reference_state(),
+            "contact": np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float32),
+        }
+        weights = JaxScoreWeights(
+            {
+                "contact": 2.0,
+                "contact_false_positive": 3.0,
+                "contact_false_negative": 5.0,
+                "action_delta": 7.0,
+            }
+        )
+
+        accumulator = score_step(
+            init_score_accumulator((), jnp=_NumpyJnp),
+            step_state,
+            reference_state,
+            weights,
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        self.assertAlmostEqual(float(metrics["contact_mismatch_rate"]), 0.5)
+        self.assertAlmostEqual(float(metrics["contact_false_positive"]), 0.25)
+        self.assertAlmostEqual(float(metrics["contact_false_negative"]), 0.25)
+        expected_action_delta = float(
+            np.linalg.norm(step_state["action"] - step_state["prev_action"])
+        )
+        self.assertAlmostEqual(float(metrics["action_delta_mean"]), expected_action_delta)
+        expected_penalty = (
+            2.0 * 0.5
+            + 3.0 * 0.25
+            + 5.0 * 0.25
+            + 7.0 * expected_action_delta
+        )
+        self.assertAlmostEqual(float(metrics["score"]), -expected_penalty, places=6)
+
     def test_finalize_score_returns_compute_rollout_scores_term_aliases(self) -> None:
         step_state = _step_state()
         reference_state = _reference_state()
