@@ -154,7 +154,7 @@ def main() -> None:
                 reward_weights=effective_reward_weights,
                 total_steps=total_steps,
                 seed=int(args.seed),
-                enable_physics_scan=bool(args.mjx_enable_scan),
+                enable_physics_scan=_mjx_physics_scan_enabled(args),
             )
         elif args.mpc_optimizer == "legacy":
             legacy_config = _build_mpc_config(args)
@@ -231,12 +231,17 @@ def main() -> None:
                 "final_scores_mean": _safe_tensor_stat(mpc_result.scores, "mean"),
                 "final_scores_max": _safe_tensor_stat(mpc_result.scores, "max"),
                 "num_windows": mpc_result.num_windows,
-                "accepted": bool(mpc_run.metadata.get("accepted", True)),
+                "accepted": bool(
+                    _required_mpc_metadata(mpc_run.metadata, "accepted")
+                ),
                 "accepted_windows": int(
-                    mpc_run.metadata.get("accepted_windows", mpc_result.num_windows)
+                    _required_mpc_metadata(mpc_run.metadata, "accepted_windows")
                 ),
                 "used_baseline_fallback": bool(
-                    mpc_run.metadata.get("used_baseline_fallback", False)
+                    _required_mpc_metadata(
+                        mpc_run.metadata,
+                        "used_baseline_fallback",
+                    )
                 ),
                 "serial_execute_warp_launches": bool(args.serial_execute_warp_launches),
             }
@@ -422,8 +427,8 @@ def _parse_args() -> argparse.Namespace:
         "--mjx-enable-scan",
         action="store_true",
         help=(
-            "Explicitly enable the experimental MJX/JAX physics scan for "
-            "--mpc-backend mjx. Without this flag MJX stays fail-closed."
+            "Compatibility flag for MJX/JAX physics scan. The scan is enabled "
+            "whenever --mpc-backend mjx is selected."
         ),
     )
     parser.add_argument(
@@ -532,6 +537,16 @@ def _validate_backend_args(args: argparse.Namespace) -> None:
         raise ValueError("--mpc-backend mjx requires --mpc-optimizer generic.")
     if args.mpc_optimizer == "legacy" and args.method not in MPC_METHODS:
         raise ValueError("--mpc-optimizer legacy requires an MPC method.")
+
+
+def _mjx_physics_scan_enabled(args: argparse.Namespace) -> bool:
+    return bool(args.mpc_backend == "mjx" or args.mjx_enable_scan)
+
+
+def _required_mpc_metadata(metadata: dict[str, Any], name: str) -> Any:
+    if name not in metadata:
+        raise ValueError(f"MPC metadata is missing required field {name}")
+    return metadata[name]
 
 
 def _build_sampling_config(args: argparse.Namespace) -> Config:

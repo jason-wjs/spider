@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from spider.tasks.g1_wbc import evaluate
@@ -56,6 +57,29 @@ class MjxBackendCliTest(unittest.TestCase):
             args = evaluate._parse_args()
 
         self.assertTrue(args.mjx_enable_scan)
+
+    def test_mjx_backend_enables_physics_scan_without_extra_flag(self) -> None:
+        self.assertTrue(
+            evaluate._mjx_physics_scan_enabled(
+                SimpleNamespace(mpc_backend="mjx", mjx_enable_scan=False)
+            )
+        )
+        self.assertFalse(
+            evaluate._mjx_physics_scan_enabled(
+                SimpleNamespace(mpc_backend="mujoco_warp", mjx_enable_scan=False)
+            )
+        )
+
+    def test_mpc_payload_requires_explicit_safety_metadata(self) -> None:
+        metadata = {
+            "accepted": True,
+            "accepted_windows": 40,
+            "used_baseline_fallback": False,
+        }
+
+        self.assertIs(evaluate._required_mpc_metadata(metadata, "accepted"), True)
+        with self.assertRaisesRegex(ValueError, "accepted"):
+            evaluate._required_mpc_metadata({}, "accepted")
 
     def test_mjx_backend_rejects_non_mpc_method(self) -> None:
         argv = [

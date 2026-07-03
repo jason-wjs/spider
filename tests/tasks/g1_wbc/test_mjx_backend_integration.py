@@ -661,12 +661,47 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 },
             )
 
-    def test_mjx_backend_default_path_stays_fail_closed(self) -> None:
-        with self.assertRaisesRegex(
-            (RuntimeError, NotImplementedError),
-            "--mpc-backend mjx|production MJX physics scan",
+    def test_mjx_backend_default_path_wires_production_scan_components(self) -> None:
+        calls: list[str] = []
+
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            sample_count = int(samples.shape[0])
+            return {
+                "score": np.arange(sample_count, dtype=np.float32),
+                "physics_step_count": np.full(sample_count, 40, dtype=np.float32),
+            }
+
+        def rollout_reference_factory(**kwargs):
+            return {"start": kwargs["start"]}
+
+        def default_components(**kwargs):
+            calls.append("components")
+            self.assertIs(kwargs["runtime"], runtime)
+            return SimpleNamespace(
+                rollout_scorer=rollout_scorer,
+                rollout_reference_factory=rollout_reference_factory,
+            )
+
+        def default_rollout_factory(config):
+            calls.append("rollout_factory")
+            self.assertEqual(config.device, "cpu")
+            return _fake_rollout_result
+
+        runtime = _FakeOptimizerRuntime()
+        with (
+            mock.patch.object(
+                mjx_backend_module,
+                "_default_rollout_components",
+                side_effect=default_components,
+            ),
+            mock.patch.object(
+                mjx_backend_module,
+                "_default_static_rollout_factory",
+                side_effect=default_rollout_factory,
+            ),
         ):
-            run_g1_wbc_mjx_mpc(
+            result = run_g1_wbc_mjx_mpc(
                 spider_config=_spider_config(),
                 motion=_motion(),
                 actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
@@ -676,7 +711,19 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 reward_weights=None,
                 total_steps=800,
                 seed=5,
+                runtime=runtime,
+                model_factory=lambda **kwargs: _fake_model_bundle(
+                    profile_name=kwargs["profile_name"]
+                ),
+                policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
+                command_builder=_fake_command_builder,
             )
+
+        self.assertEqual(calls, ["components", "rollout_factory"])
+        self.assertTrue(result.metadata["accepted"])
+        self.assertTrue(result.metadata["physics_scan_enabled"])
+        self.assertEqual(result.metadata["physics_step_count_min"], 40)
+        self.assertEqual(result.metadata["physics_step_count_windows"], 40)
 
     def test_mjx_backend_rejects_malformed_fake_rollout(self) -> None:
         with self.assertRaisesRegex(ValueError, "rollout.qvel"):

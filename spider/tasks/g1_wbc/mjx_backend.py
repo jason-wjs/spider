@@ -57,7 +57,11 @@ def run_g1_wbc_mjx_mpc(
     device = torch.device(rollout_config.device)
     _validate_single_gpu_runtime(runtime, device=device)
 
-    if enable_physics_scan:
+    auto_enable_physics_scan = rollout_factory is None or (
+        optimizer is optimize_window and rollout_scorer is None
+    )
+    physics_scan_enabled = bool(enable_physics_scan or auto_enable_physics_scan)
+    if physics_scan_enabled:
         if rollout_scorer is None or rollout_reference_factory is None:
             components = _default_rollout_components(
                 runtime=runtime,
@@ -174,7 +178,7 @@ def run_g1_wbc_mjx_mpc(
         if window_accepted:
             _require_physics_scan_evidence(
                 info,
-                enabled=bool(enable_physics_scan),
+                enabled=physics_scan_enabled,
                 horizon=horizon,
             )
             controls = updated_controls
@@ -266,7 +270,7 @@ def run_g1_wbc_mjx_mpc(
             "method": method,
             "reward_weights": reward_weights,
             "accepted": accepted_windows == len(infos),
-            "physics_scan_enabled": bool(enable_physics_scan),
+            "physics_scan_enabled": physics_scan_enabled,
             "used_baseline_fallback": False,
             "accepted_windows": accepted_windows,
             "num_windows": len(infos),
