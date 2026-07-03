@@ -202,6 +202,49 @@ def validate_runtime_environment(args: argparse.Namespace) -> tuple[str, ...]:
     return tuple(errors)
 
 
+def validate_checkpoint_format(args: argparse.Namespace) -> tuple[str, ...]:
+    """Return errors for explicit checkpoints incompatible with the WBC actor."""
+
+    checkpoint = Path(str(args.checkpoint)).expanduser()
+    if checkpoint.is_dir():
+        candidates = sorted(checkpoint.glob("model_*.pt"))
+        if not candidates:
+            return (f"checkpoint format: no model_*.pt checkpoint found under {checkpoint}",)
+        checkpoint = candidates[-1]
+    elif not checkpoint.exists():
+        return ()
+    if checkpoint.suffix != ".pt":
+        return ()
+
+    try:
+        import torch
+
+        try:
+            payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        except TypeError:
+            payload = torch.load(checkpoint, map_location="cpu")
+    except Exception as exc:  # pragma: no cover - defensive around third-party I/O
+        return (f"checkpoint format: unable to inspect {checkpoint}: {exc}",)
+
+    if not isinstance(payload, dict):
+        return (f"checkpoint format: {checkpoint} is not a dict checkpoint",)
+    state_dict = payload.get("actor_state_dict", payload)
+    if not isinstance(state_dict, dict):
+        return (f"checkpoint format: {checkpoint} has no actor state dict",)
+    keys = {str(key) for key in state_dict}
+    has_obs_normalizer = {
+        "obs_normalizer._mean",
+        "obs_normalizer._std",
+    }.issubset(keys)
+    has_mlp = any(key.startswith("mlp.") for key in keys)
+    if not has_obs_normalizer or not has_mlp:
+        return (
+            "checkpoint format: expected a WBC MLP actor checkpoint with "
+            f"obs_normalizer.* and mlp.* weights; got {checkpoint}",
+        )
+    return ()
+
+
 def attach_artifact_paths(row: dict[str, Any]) -> dict[str, Any]:
     """Attach known evaluate.py artifact paths, using None for missing files."""
 
@@ -296,6 +339,11 @@ def main(argv: list[str] | None = None) -> int:
     if runtime_errors:
         for error in runtime_errors:
             print(f"invalid runtime: {error}", file=sys.stderr)
+        return 2
+    checkpoint_errors = validate_checkpoint_format(args)
+    if checkpoint_errors:
+        for error in checkpoint_errors:
+            print(f"invalid input: {error}", file=sys.stderr)
         return 2
     commands = build_stage0_commands(args)
     rows: list[dict[str, Any]] = []

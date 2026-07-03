@@ -101,6 +101,13 @@ testbed path is not present in this worktree. The same reward-weight file also
 exists under the `2026-06-17-testbed-motion-baselines-xwj` artifact directory
 with the same contents, but the `2026-06-23` path is the preferred explicit
 formal input because it is the one referenced by current sweetpoint commands.
+The AGENTS-provided SparseTrack checkpoint
+`/data_team/junsong/general_controller/ScaleTrack-mj/ScaleTrack/logs/rsl_rl/mjlab_g1_bfm_transformer_tracking_exp/mjlab_myrsl_g1_global_transformer_sparse_tracking/model_11800.pt`
+is useful as a `SparseTrack-Tracking-Flat-G1-Global-Transformer-v0` reference,
+but it is a Transformer `model_state_dict` checkpoint and is not directly
+loadable by the current WBC MLP policy loader. Formal Stage 0 for this runner
+therefore fails fast on that format until a SparseTrack Transformer policy
+adapter is added.
 Real CUDA Stage 0 runs must narrow `CUDA_VISIBLE_DEVICES` to exactly one GPU and
 use `--device cuda:0`; the runner fails fast otherwise because such a manifest
 cannot satisfy formal single-GPU hardware evidence.
