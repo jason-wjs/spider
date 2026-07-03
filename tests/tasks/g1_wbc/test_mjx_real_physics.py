@@ -1,3 +1,4 @@
+import os
 from types import SimpleNamespace
 import unittest
 
@@ -119,6 +120,27 @@ class _FakeCommandReferenceRuntime:
     jnp = _FakeCommandReferenceJnp()
     jax = _FakeCommandReferenceJax()
     mjx = _FakeCommandReferenceMjx()
+
+
+def _require_real_mjx_test_runtime():
+    if os.environ.get("SPIDER_RUN_REAL_MJX_TESTS") != "1":
+        raise unittest.SkipTest(
+            "set SPIDER_RUN_REAL_MJX_TESTS=1 and CUDA_VISIBLE_DEVICES to exactly "
+            "one GPU to run real MJX tests"
+        )
+    visible_devices = tuple(
+        value.strip()
+        for value in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+        if value.strip()
+    )
+    if len(visible_devices) != 1:
+        raise AssertionError(
+            "SPIDER_RUN_REAL_MJX_TESTS=1 requires exactly one non-empty "
+            "CUDA_VISIBLE_DEVICES entry"
+        )
+    if not probe_mjx_runtime().available:
+        raise unittest.SkipTest("jax/mujoco.mjx runtime is not available")
+    return require_mjx_runtime()
 
 
 class MjxRealPhysicsTest(unittest.TestCase):
@@ -318,9 +340,7 @@ class MjxRealPhysicsTest(unittest.TestCase):
         )
 
     def test_reset_forward_step_smoke_runs_real_mjx_when_runtime_available(self) -> None:
-        if not probe_mjx_runtime().available:
-            self.skipTest("jax/mujoco.mjx runtime is not available")
-        runtime = require_mjx_runtime()
+        runtime = _require_real_mjx_test_runtime()
         bundle = build_mjx_model_bundle(profile_name="wxy_parity", require_runtime=True)
         qpos = np.zeros(QPOS_DIM, dtype=np.float32)
         qpos[3] = 1.0
@@ -353,9 +373,7 @@ class MjxRealPhysicsTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(result["qvel"])))
 
     def test_real_mjx_physics_step_returns_rollout_state_fields(self) -> None:
-        if not probe_mjx_runtime().available:
-            self.skipTest("jax/mujoco.mjx runtime is not available")
-        runtime = require_mjx_runtime()
+        runtime = _require_real_mjx_test_runtime()
         bundle = build_mjx_model_bundle(profile_name="wxy_parity", require_runtime=True)
         default_joint_pos = default_joint_pos_tensor("cpu").numpy()
         action_scale = joint_actuator_specs("cpu")["action_scale"].numpy()
@@ -463,9 +481,7 @@ class MjxRealPhysicsTest(unittest.TestCase):
     def test_real_mjx_physics_step_uses_carried_robot_qpos_not_command_qpos(
         self,
     ) -> None:
-        if not probe_mjx_runtime().available:
-            self.skipTest("jax/mujoco.mjx runtime is not available")
-        runtime = require_mjx_runtime()
+        runtime = _require_real_mjx_test_runtime()
         bundle = build_mjx_model_bundle(profile_name="wxy_parity", require_runtime=True)
         default_joint_pos = default_joint_pos_tensor("cpu").numpy()
         action_scale = joint_actuator_specs("cpu")["action_scale"].numpy()
