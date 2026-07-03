@@ -122,9 +122,18 @@ class MjxReferenceTest(unittest.TestCase):
             reference["score_reference"]["body_pos"].shape,
             (4, len(MUJOCO_BODY_NAMES), 3),
         )
+        self.assertEqual(reference["score_reference"]["root_quat"].shape, (4, 4))
+        self.assertEqual(
+            reference["score_reference"]["body_quat"].shape,
+            (4, len(MUJOCO_BODY_NAMES), 4),
+        )
         self.assertEqual(
             reference["score_reference"]["ee_pos"].shape,
             (4, len(TASK_EE_BODY_NAMES), 3),
+        )
+        self.assertEqual(
+            reference["score_reference"]["ee_quat"].shape,
+            (4, len(TASK_EE_BODY_NAMES), 4),
         )
         self.assertEqual(reference["score_reference"]["contact"].shape, (4, 2))
         self.assertEqual(reference["prev_control"].shape, (QPOS_DIM - 1,))

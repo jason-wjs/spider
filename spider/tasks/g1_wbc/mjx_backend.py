@@ -453,8 +453,11 @@ def _mjx_score_weights(
     )
     mapping = {
         "root_pos": float(reward_weights.get("root_pos_error", 0.0)),
+        "root_rot": float(reward_weights.get("root_rot_error", 0.0)),
         "body_global_pos": float(reward_weights.get("body_global_pos_error", 0.0)),
+        "body_global_rot": float(reward_weights.get("body_global_rot_error", 0.0)),
         "ee_global_pos": float(reward_weights.get("ee_global_pos_error", 0.0)),
+        "ee_global_rot": float(reward_weights.get("ee_global_rot_error", 0.0)),
         "contact": contact_weight,
         "control_delta": float(reward_weights.get("control_delta", 0.0)),
         "joint_acc": float(reward_weights.get("joint_acc", 0.0)),

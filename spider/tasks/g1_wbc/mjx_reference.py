@@ -84,9 +84,15 @@ def build_mjx_rollout_reference(
     }
     score_reference = {
         "root_pos": _to_jnp(_slice_window(qpos, indices)[:, :3], jnp=jnp),
+        "root_quat": _to_jnp(_slice_window(qpos, indices)[:, 3:7], jnp=jnp),
         "body_pos": _to_jnp(_slice_window(motion.body_pos_w, indices), jnp=jnp),
+        "body_quat": _to_jnp(_slice_window(motion.body_quat_w, indices), jnp=jnp),
         "ee_pos": _to_jnp(
             _slice_window(motion.body_pos_w, indices)[:, ee_body_indices],
+            jnp=jnp,
+        ),
+        "ee_quat": _to_jnp(
+            _slice_window(motion.body_quat_w, indices)[:, ee_body_indices],
             jnp=jnp,
         ),
         "contact": _to_jnp(_slice_window(motion.contact, indices), jnp=jnp),

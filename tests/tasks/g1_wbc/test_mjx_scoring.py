@@ -36,6 +36,22 @@ class _NumpyJnp:
     def max(value, axis=None):
         return np.max(value, axis=axis)
 
+    @staticmethod
+    def sum(value, axis=None, keepdims=False):
+        return np.sum(value, axis=axis, keepdims=keepdims)
+
+    @staticmethod
+    def sqrt(value):
+        return np.sqrt(value)
+
+    @staticmethod
+    def clip(value, low, high):
+        return np.clip(value, low, high)
+
+    @staticmethod
+    def arccos(value):
+        return np.arccos(value)
+
 
 def _step_state(offset: float = 0.0) -> dict[str, np.ndarray]:
     return {
@@ -119,6 +135,56 @@ class MjxScoringTest(unittest.TestCase):
             + 0.5 * expected["control_delta_mean"]
             + 0.25 * expected["joint_acc_mean"]
         )
+        self.assertAlmostEqual(float(metrics["score"]), -expected_penalty, places=6)
+
+    def test_score_step_accumulates_rotation_error_terms(self) -> None:
+        identity = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        half_turn_x = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+        step_state = {
+            **_step_state(),
+            "root_quat": half_turn_x,
+            "body_quat": np.stack([half_turn_x, identity], axis=0),
+            "ee_quat": np.stack([half_turn_x], axis=0),
+        }
+        reference_state = {
+            **_reference_state(),
+            "root_quat": identity,
+            "body_quat": np.stack([identity, identity], axis=0),
+            "ee_quat": np.stack([identity], axis=0),
+        }
+        weights = JaxScoreWeights(
+            {
+                "root_rot": 0.5,
+                "body_global_rot": 0.8,
+                "ee_global_rot": 0.3,
+            }
+        )
+
+        accumulator = score_step(
+            init_score_accumulator((), jnp=_NumpyJnp),
+            step_state,
+            reference_state,
+            weights,
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        self.assertAlmostEqual(
+            float(metrics["root_rot_error_mean"]),
+            np.pi,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(metrics["body_global_rot_error_mean"]),
+            np.pi / 2.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(metrics["ee_global_rot_error_mean"]),
+            np.pi,
+            places=6,
+        )
+        expected_penalty = 0.5 * np.pi + 0.8 * (np.pi / 2.0) + 0.3 * np.pi
         self.assertAlmostEqual(float(metrics["score"]), -expected_penalty, places=6)
 
     def test_finalize_score_returns_compute_rollout_scores_term_aliases(self) -> None:

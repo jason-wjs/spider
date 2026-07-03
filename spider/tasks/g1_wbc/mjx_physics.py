@@ -262,8 +262,11 @@ def make_mjx_physics_step_fn(
             }
             score_state = {
                 "root_pos": data.qpos[:3],
+                "root_quat": data.qpos[3:7],
                 "body_pos": jnp.take(data.xpos, score_body_id_array, axis=0),
+                "body_quat": jnp.take(data.xquat, score_body_id_array, axis=0),
                 "ee_pos": jnp.take(data.xpos, ee_body_id_array, axis=0),
+                "ee_quat": jnp.take(data.xquat, ee_body_id_array, axis=0),
                 "contact": foot_contact_indicator_from_contact(
                     data._impl.contact,
                     floor_geom_ids=contact_groups.floor_geom_ids,

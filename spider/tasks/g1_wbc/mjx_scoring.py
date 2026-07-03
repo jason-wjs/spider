@@ -35,8 +35,11 @@ class JaxScoreWeights:
 ACCUMULATOR_KEYS = (
     "score_sum",
     "root_pos_error_sum",
+    "root_rot_error_sum",
     "body_global_pos_error_sum",
+    "body_global_rot_error_sum",
     "ee_global_pos_error_sum",
+    "ee_global_rot_error_sum",
     "contact_mismatch_sum",
     "control_delta_sum",
     "joint_acc_sum",
@@ -64,15 +67,39 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     )
+    root_rot_error = _mean_quat_error(
+        step_state,
+        reference_state,
+        "root_quat",
+        required=_weight(weights, "root_rot", "root_rot_error") != 0.0,
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
     body_error = _mean_squared(
         step_state["body_pos"],
         reference_state["body_pos"],
         batch_shape=batch_shape,
         jnp=jnp,
     )
+    body_rot_error = _mean_quat_error(
+        step_state,
+        reference_state,
+        "body_quat",
+        required=_weight(weights, "body_global_rot", "body_global_rot_error") != 0.0,
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
     ee_error = _mean_squared(
         step_state["ee_pos"],
         reference_state["ee_pos"],
+        batch_shape=batch_shape,
+        jnp=jnp,
+    )
+    ee_rot_error = _mean_quat_error(
+        step_state,
+        reference_state,
+        "ee_quat",
+        required=_weight(weights, "ee_global_rot", "ee_global_rot_error") != 0.0,
         batch_shape=batch_shape,
         jnp=jnp,
     )
@@ -96,8 +123,13 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
     )
 
     terms["root_pos_error_sum"] = terms["root_pos_error_sum"] + root_error
+    terms["root_rot_error_sum"] = terms["root_rot_error_sum"] + root_rot_error
     terms["body_global_pos_error_sum"] = terms["body_global_pos_error_sum"] + body_error
+    terms["body_global_rot_error_sum"] = (
+        terms["body_global_rot_error_sum"] + body_rot_error
+    )
     terms["ee_global_pos_error_sum"] = terms["ee_global_pos_error_sum"] + ee_error
+    terms["ee_global_rot_error_sum"] = terms["ee_global_rot_error_sum"] + ee_rot_error
     terms["contact_mismatch_sum"] = terms["contact_mismatch_sum"] + contact_error
     terms["control_delta_sum"] = terms["control_delta_sum"] + control_delta
     terms["joint_acc_sum"] = terms["joint_acc_sum"] + joint_acc
@@ -113,8 +145,12 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
 
     penalty = (
         _weight(weights, "root_pos", "root_pos_error") * root_error
+        + _weight(weights, "root_rot", "root_rot_error") * root_rot_error
         + _weight(weights, "body_global_pos", "body_global_pos_error") * body_error
+        + _weight(weights, "body_global_rot", "body_global_rot_error")
+        * body_rot_error
         + _weight(weights, "ee_global_pos", "ee_global_pos_error") * ee_error
+        + _weight(weights, "ee_global_rot", "ee_global_rot_error") * ee_rot_error
         + _weight(weights, "contact", "contact_mismatch") * contact_error
         + _weight(weights, "control_delta") * control_delta
         + _weight(weights, "joint_acc") * joint_acc
@@ -130,22 +166,31 @@ def finalize_score(accumulator, *, jnp):
     count = jnp.maximum(terms["count"], 1.0)
     score = terms["score_sum"] / count
     root_pos_error = terms["root_pos_error_sum"] / count
+    root_rot_error = terms["root_rot_error_sum"] / count
     body_global_pos_error = terms["body_global_pos_error_sum"] / count
+    body_global_rot_error = terms["body_global_rot_error_sum"] / count
     ee_global_pos_error = terms["ee_global_pos_error_sum"] / count
+    ee_global_rot_error = terms["ee_global_rot_error_sum"] / count
     contact_mismatch = terms["contact_mismatch_sum"] / count
     control_delta = terms["control_delta_sum"] / count
     joint_acc = terms["joint_acc_sum"] / count
     return {
         "score": score,
         "root_pos_error_mean": root_pos_error,
+        "root_rot_error_mean": root_rot_error,
         "body_global_pos_error_mean": body_global_pos_error,
+        "body_global_rot_error_mean": body_global_rot_error,
         "ee_global_pos_error_mean": ee_global_pos_error,
+        "ee_global_rot_error_mean": ee_global_rot_error,
         "contact_mismatch_rate": contact_mismatch,
         "control_delta_mean": control_delta,
         "joint_acc_mean": joint_acc,
         "root_pos_error": root_pos_error,
+        "root_rot_error": root_rot_error,
         "body_global_pos_error": body_global_pos_error,
+        "body_global_rot_error": body_global_rot_error,
         "ee_global_pos_error": ee_global_pos_error,
+        "ee_global_rot_error": ee_global_rot_error,
         "contact_mismatch": contact_mismatch,
         "control_delta": control_delta,
         "joint_acc": joint_acc,
@@ -162,6 +207,32 @@ def _mean_squared(actual, expected, *, batch_shape: tuple[int, ...], jnp):
 def _mean_abs(actual, expected, *, batch_shape: tuple[int, ...], jnp):
     delta = jnp.asarray(actual) - jnp.asarray(expected)
     return _mean_feature_axes(jnp.abs(delta), batch_shape=batch_shape, jnp=jnp)
+
+
+def _mean_quat_error(
+    step_state,
+    reference_state,
+    name: str,
+    *,
+    required: bool,
+    batch_shape: tuple[int, ...],
+    jnp,
+):
+    if name not in step_state or name not in reference_state:
+        if required:
+            raise KeyError(f"Missing quaternion score field {name!r}")
+        return jnp.zeros(batch_shape)
+    actual = _normalize_quat(step_state[name], jnp=jnp)
+    expected = _normalize_quat(reference_state[name], jnp=jnp)
+    dot = jnp.sum(actual * expected, axis=-1)
+    angle = 2.0 * jnp.arccos(jnp.clip(jnp.abs(dot), -1.0, 1.0))
+    return _mean_feature_axes(angle, batch_shape=batch_shape, jnp=jnp)
+
+
+def _normalize_quat(value, *, jnp):
+    value = jnp.asarray(value)
+    norm = jnp.sqrt(jnp.maximum(jnp.sum(value * value, axis=-1, keepdims=True), 1.0e-12))
+    return value / norm
 
 
 def _weight(weights: JaxScoreWeights, *names: str) -> float:

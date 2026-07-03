@@ -382,6 +382,20 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(command.body_pos_w, builder_body_pos)
         torch.testing.assert_close(command.body_lin_vel_w, builder_body_lin_vel)
 
+    def test_mjx_score_weights_maps_rotation_terms(self) -> None:
+        weights = mjx_backend_module._mjx_score_weights(
+            "g1_wbc_joint_global",
+            {
+                "root_rot_error": 0.5,
+                "body_global_rot_error": 0.8,
+                "ee_global_rot_error": 0.3,
+            },
+        )
+
+        self.assertEqual(weights["root_rot"], 0.5)
+        self.assertEqual(weights["body_global_rot"], 0.8)
+        self.assertEqual(weights["ee_global_rot"], 0.3)
+
     def test_mjx_backend_emits_contact_capacity_metadata(self) -> None:
         def optimizer(**kwargs):
             del kwargs
