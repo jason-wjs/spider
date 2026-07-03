@@ -270,6 +270,32 @@ class MjxScoringTest(unittest.TestCase):
         )
         self.assertAlmostEqual(float(metrics["score"]), -expected_penalty, places=6)
 
+    def test_score_step_accumulates_contact_switch_from_previous_contact(self) -> None:
+        step_state = {
+            **_step_state(),
+            "contact": np.array([1.0, 0.0, 1.0], dtype=np.float32),
+            "prev_contact": np.array([0.0, 0.0, 1.0], dtype=np.float32),
+        }
+        reference_state = {
+            **_reference_state(),
+            "contact": np.array([1.0, 0.0, 1.0], dtype=np.float32),
+        }
+        weights = JaxScoreWeights({"contact_switch": 2.0})
+
+        accumulator = score_step(
+            init_score_accumulator((), jnp=_NumpyJnp),
+            step_state,
+            reference_state,
+            weights,
+            jnp=_NumpyJnp,
+        )
+        metrics = finalize_score(accumulator, jnp=_NumpyJnp)
+
+        expected = np.linalg.norm(step_state["contact"] - step_state["prev_contact"])
+        self.assertAlmostEqual(float(metrics["contact_switch_rate"]), expected)
+        self.assertEqual(metrics["contact_switch"], metrics["contact_switch_rate"])
+        self.assertAlmostEqual(float(metrics["score"]), -2.0 * expected)
+
     def test_finalize_score_returns_compute_rollout_scores_term_aliases(self) -> None:
         step_state = _step_state()
         reference_state = _reference_state()
@@ -297,6 +323,7 @@ class MjxScoringTest(unittest.TestCase):
         self.assertEqual(metrics["control_delta"], metrics["control_delta_mean"])
         self.assertEqual(metrics["joint_acc"], metrics["joint_acc_mean"])
         self.assertEqual(metrics["joint_jerk"], metrics["joint_jerk_mean"])
+        self.assertEqual(metrics["contact_switch"], metrics["contact_switch_rate"])
 
     def test_accumulator_averages_multiple_steps(self) -> None:
         reference_state = _reference_state()

@@ -115,6 +115,8 @@ def run_g1_wbc_mjx_mpc(
     current_obs_initialized = False
     current_prev_control = None
     current_prev_joint_acc = None
+    current_prev_contact = None
+    current_prev_contact_valid = None
     jit_warmup_enabled = False
     jit_warmup_wall_time_sec = 0.0
     if use_jax_controls:
@@ -158,6 +160,8 @@ def run_g1_wbc_mjx_mpc(
             obs_initialized=current_obs_initialized if current_obs_state is not None else None,
             prev_control=current_prev_control,
             prev_joint_acc=current_prev_joint_acc,
+            prev_contact=current_prev_contact,
+            prev_contact_valid=current_prev_contact_valid,
         )
         window_result = optimizer(
             config=window_config,
@@ -223,6 +227,8 @@ def run_g1_wbc_mjx_mpc(
                     ),
                     prev_control=current_prev_control,
                     prev_joint_acc=current_prev_joint_acc,
+                    prev_contact=current_prev_contact,
+                    prev_contact_valid=current_prev_contact_valid,
                 )
                 execute_trace = rollout_tracer(
                     execute_controls[None, :, :],
@@ -243,6 +249,14 @@ def run_g1_wbc_mjx_mpc(
                 current_prev_joint_acc = execute_trace.get(
                     "final_prev_joint_acc",
                     current_prev_joint_acc,
+                )
+                current_prev_contact = execute_trace.get(
+                    "final_prev_contact",
+                    current_prev_contact,
+                )
+                current_prev_contact_valid = execute_trace.get(
+                    "final_prev_contact_valid",
+                    current_prev_contact_valid,
                 )
         info.update(
             {
@@ -467,6 +481,7 @@ def _mjx_score_weights(
         "contact_false_negative": float(
             reward_weights.get("contact_false_negative", 0.0)
         ),
+        "contact_switch": float(reward_weights.get("contact_switch", 0.0)),
         "control_delta": float(reward_weights.get("control_delta", 0.0)),
         "action_delta": float(reward_weights.get("action_delta", 0.0)),
         "joint_acc": float(reward_weights.get("joint_acc", 0.0)),
@@ -730,6 +745,8 @@ def _window_reference(
     obs_initialized=None,
     prev_control=None,
     prev_joint_acc=None,
+    prev_contact=None,
+    prev_contact_valid=None,
 ):
     if rollout_reference_factory is None:
         return {"start": int(start)}
@@ -751,6 +768,10 @@ def _window_reference(
         kwargs["prev_control"] = prev_control
     if prev_joint_acc is not None:
         kwargs["prev_joint_acc"] = prev_joint_acc
+    if prev_contact is not None:
+        kwargs["prev_contact"] = prev_contact
+    if prev_contact_valid is not None:
+        kwargs["prev_contact_valid"] = prev_contact_valid
     return rollout_reference_factory(**kwargs)
 
 

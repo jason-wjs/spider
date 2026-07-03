@@ -45,6 +45,7 @@ ACCUMULATOR_KEYS = (
     "contact_mismatch_sum",
     "contact_false_positive_sum",
     "contact_false_negative_sum",
+    "contact_switch_sum",
     "control_delta_sum",
     "action_delta_sum",
     "joint_acc_sum",
@@ -129,6 +130,14 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         batch_shape=batch_shape,
         jnp=jnp,
     )
+    contact_switch = _mean_optional_l2_delta(
+        step_state,
+        "contact",
+        "prev_contact",
+        required=_weight(weights, "contact_switch") != 0.0,
+        batch_shape=batch_shape,
+        jnp=jnp,
+    ) * _validity_value(step_state, "prev_contact_valid", batch_shape, jnp=jnp)
     control_delta = _mean_l2_delta(
         step_state["control"],
         step_state["prev_control"],
@@ -178,6 +187,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
     terms["contact_false_negative_sum"] = (
         terms["contact_false_negative_sum"] + contact_false_negative
     )
+    terms["contact_switch_sum"] = terms["contact_switch_sum"] + contact_switch
     terms["control_delta_sum"] = terms["control_delta_sum"] + control_delta
     terms["action_delta_sum"] = terms["action_delta_sum"] + action_delta
     terms["joint_acc_sum"] = terms["joint_acc_sum"] + joint_acc
@@ -203,6 +213,7 @@ def score_step(accumulator, step_state, reference_state, weights: JaxScoreWeight
         + _weight(weights, "contact", "contact_mismatch") * contact_error
         + _weight(weights, "contact_false_positive") * contact_false_positive
         + _weight(weights, "contact_false_negative") * contact_false_negative
+        + _weight(weights, "contact_switch") * contact_switch
         + _weight(weights, "control_delta") * control_delta
         + _weight(weights, "action_delta") * action_delta
         + _weight(weights, "joint_acc") * joint_acc
@@ -227,6 +238,7 @@ def finalize_score(accumulator, *, jnp):
     contact_mismatch = terms["contact_mismatch_sum"] / count
     contact_false_positive = terms["contact_false_positive_sum"] / count
     contact_false_negative = terms["contact_false_negative_sum"] / count
+    contact_switch = terms["contact_switch_sum"] / count
     control_delta = terms["control_delta_sum"] / count
     action_delta = terms["action_delta_sum"] / count
     joint_acc = terms["joint_acc_sum"] / count
@@ -242,6 +254,7 @@ def finalize_score(accumulator, *, jnp):
         "contact_mismatch_rate": contact_mismatch,
         "contact_false_positive_rate": contact_false_positive,
         "contact_false_negative_rate": contact_false_negative,
+        "contact_switch_rate": contact_switch,
         "control_delta_mean": control_delta,
         "action_delta_mean": action_delta,
         "joint_acc_mean": joint_acc,
@@ -255,6 +268,7 @@ def finalize_score(accumulator, *, jnp):
         "contact_mismatch": contact_mismatch,
         "contact_false_positive": contact_false_positive,
         "contact_false_negative": contact_false_negative,
+        "contact_switch": contact_switch,
         "control_delta": control_delta,
         "action_delta": action_delta,
         "joint_acc": joint_acc,
@@ -378,6 +392,12 @@ def _diagnostic_value(step_state, name: str, batch_shape: tuple[int, ...], *, jn
     if reduce_axes:
         return jnp.max(value, axis=reduce_axes)
     return value
+
+
+def _validity_value(step_state, name: str, batch_shape: tuple[int, ...], *, jnp):
+    if name not in step_state:
+        return jnp.zeros(batch_shape) + 1.0
+    return _diagnostic_value(step_state, name, batch_shape, jnp=jnp)
 
 
 def _require_accumulator(accumulator):

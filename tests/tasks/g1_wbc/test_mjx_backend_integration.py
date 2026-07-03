@@ -403,6 +403,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 "contact_mismatch": 2.0,
                 "contact_false_positive": 1.5,
                 "contact_false_negative": 0.4,
+                "contact_switch": 1.2,
                 "action_delta": 0.6,
                 "joint_jerk": 0.0012,
             },
@@ -411,6 +412,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(weights["contact"], 2.0)
         self.assertEqual(weights["contact_false_positive"], 1.5)
         self.assertEqual(weights["contact_false_negative"], 0.4)
+        self.assertEqual(weights["contact_switch"], 1.2)
         self.assertEqual(weights["action_delta"], 0.6)
         self.assertEqual(weights["joint_jerk"], 0.0012)
 
@@ -897,6 +899,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         live_obs_state = SimpleNamespace(history={"sentinel": object()}, last_action="last")
         live_prev_control = np.full((1, QPOS_DIM - 1), 0.33, dtype=np.float32)
         live_prev_joint_acc = np.full((1, ACTION_DIM), 0.21, dtype=np.float32)
+        live_prev_contact = np.array([[1.0, 0.0]], dtype=np.float32)
 
         def optimizer(**kwargs):
             optimizer_references.append(dict(kwargs["reference"]["kwargs"]))
@@ -937,6 +940,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 "final_obs_state": live_obs_state,
                 "final_prev_control": live_prev_control,
                 "final_prev_joint_acc": live_prev_joint_acc,
+                "final_prev_contact": live_prev_contact,
+                "final_prev_contact_valid": np.array([1.0], dtype=np.float32),
             }
 
         _run_with_fakes(
@@ -966,6 +971,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             second_reference["prev_joint_acc"],
             live_prev_joint_acc,
         )
+        np.testing.assert_allclose(second_reference["prev_contact"], live_prev_contact)
+        np.testing.assert_allclose(second_reference["prev_contact_valid"], [1.0])
 
     def test_mjx_backend_accepts_jax_optimizer_arrays(self) -> None:
         try:

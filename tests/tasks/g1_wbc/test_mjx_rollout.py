@@ -542,6 +542,56 @@ class MjxRolloutTest(unittest.TestCase):
         )
         np.testing.assert_allclose(metrics["score"], -expected, rtol=1e-6)
 
+    def test_score_candidate_controls_carries_contact_switch_after_first_step(
+        self,
+    ) -> None:
+        samples = np.zeros((1, 2, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=2)
+        reference["score_weights"] = JaxScoreWeights({"contact_switch": 1.0})
+        contacts = np.array(
+            [[[1.0, 0.0]], [[0.0, 1.0]]],
+            dtype=np.float32,
+        )
+
+        def switching_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            next_robot, score_state = _physics_step(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                runtime=runtime,
+            )
+            score_state = dict(score_state)
+            score_state["contact"] = contacts[int(step_index)]
+            return next_robot, score_state
+
+        metrics = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=switching_step,
+            return_metrics=True,
+        )
+
+        expected = np.sqrt(2.0) / 2.0
+        np.testing.assert_allclose(
+            metrics["contact_switch_rate"],
+            [expected],
+            rtol=1e-6,
+        )
+        np.testing.assert_allclose(metrics["score"], [-expected], rtol=1e-6)
+
     def test_score_candidate_controls_uses_reference_base_qpos_window(self) -> None:
         samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
         reference = _rollout_reference(samples=1, horizon=3)
@@ -650,6 +700,9 @@ class MjxRolloutTest(unittest.TestCase):
         )
         self.assertIn("final_prev_joint_acc", trace)
         np.testing.assert_allclose(trace["final_prev_joint_acc"], 0.0)
+        self.assertIn("final_prev_contact", trace)
+        np.testing.assert_allclose(trace["final_prev_contact"], 0.0)
+        np.testing.assert_allclose(trace["final_prev_contact_valid"], 1.0)
 
     def test_score_candidate_controls_broadcasts_single_live_state_batch(self) -> None:
         samples = np.zeros((2, 2, QPOS_DIM - 1), dtype=np.float32)
