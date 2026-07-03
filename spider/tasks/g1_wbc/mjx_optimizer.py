@@ -96,17 +96,29 @@ def optimize_window(
         control_score = scores[0]
         best_score = scores[best_index]
         score_improvement = best_score - control_score
-        iteration_accepted = _positive_score_improvement(score_improvement)
-        if iteration_accepted:
-            accepted_iterations += 1
+        score_accepted = _positive_score_improvement(score_improvement)
+        control_delta_max = 0.0
+        iteration_accepted = False
+        candidate_controls = updated_controls
+        if score_accepted:
             temperature = max(float(config.temperature), 1.0e-6)
             weights = runtime.jax.nn.softmax(scores / temperature)
-            updated_controls = jnp.sum(samples * weights[:, None, None], axis=0)
+            candidate_controls = jnp.sum(samples * weights[:, None, None], axis=0)
+            control_delta_max = _max_abs_delta(
+                candidate_controls,
+                updated_controls,
+                jnp=jnp,
+            )
+            iteration_accepted = _positive_control_delta(control_delta_max)
+        if iteration_accepted:
+            accepted_iterations += 1
+            updated_controls = candidate_controls
         info = {
             "best_index": best_index,
             "best_score": best_score,
             "control_score": control_score,
-            "score_improvement": score_improvement if iteration_accepted else 0.0,
+            "score_improvement": score_improvement,
+            "control_delta_max": control_delta_max,
             "accepted": accepted_iterations > 0,
             "iteration_accepted": iteration_accepted,
             "accepted_iterations": accepted_iterations,
@@ -236,6 +248,25 @@ def _positive_score_improvement(value) -> bool:
     except (TypeError, ValueError, OverflowError):
         return False
     return math.isfinite(improvement) and improvement > 1.0e-9
+
+
+def _max_abs_delta(candidate, previous, *, jnp):
+    delta = candidate - previous
+    abs_fn = getattr(jnp, "abs", None)
+    delta = abs_fn(delta) if callable(abs_fn) else abs(delta)
+    max_fn = getattr(jnp, "max", None)
+    if callable(max_fn):
+        return max_fn(delta)
+    value_max = getattr(delta, "max", None)
+    return value_max() if callable(value_max) else max(delta)
+
+
+def _positive_control_delta(value) -> bool:
+    try:
+        delta = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(delta) and delta > 1.0e-9
 
 
 def _prng_key(key, *, runtime):

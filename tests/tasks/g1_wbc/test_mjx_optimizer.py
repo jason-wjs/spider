@@ -288,6 +288,41 @@ class MjxOptimizerTest(unittest.TestCase):
         np.testing.assert_allclose(result.updated_controls, controls)
         np.testing.assert_allclose(result.execute_chunk, controls[:3])
 
+    def test_optimize_window_rejects_positive_score_with_zero_control_delta(self) -> None:
+        config = JaxWindowOptimizerConfig(
+            samples=3,
+            horizon_steps=5,
+            control_steps=2,
+            knot_count=3,
+            temperature=0.5,
+            root_pos_sigma=0.0,
+            root_rot_sigma=0.0,
+            joint_sigma=0.0,
+        )
+        controls = np.full((5, 8), 0.25, dtype=np.float32)
+
+        def rollout_fn(samples, reference, actor_params, model_bundle):
+            del samples, reference, actor_params, model_bundle
+            return np.array([0.0, 5.0, 10.0], dtype=np.float32)
+
+        result = optimize_window(
+            config,
+            {"rollout_fn": rollout_fn},
+            controls,
+            reference=None,
+            actor_params=None,
+            model_bundle=None,
+            key=(0, 11),
+            runtime=_FakeRuntime,
+        )
+
+        self.assertFalse(result.info["accepted"])
+        self.assertEqual(float(result.info["best_index"]), 2.0)
+        self.assertEqual(float(result.info["score_improvement"]), 10.0)
+        self.assertEqual(float(result.info["control_delta_max"]), 0.0)
+        np.testing.assert_allclose(result.updated_controls, controls)
+        np.testing.assert_allclose(result.execute_chunk, controls[:3])
+
     def test_optimize_window_runs_configured_iterations(self) -> None:
         random = _UnitStepRandom()
         runtime = SimpleNamespace(
