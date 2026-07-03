@@ -18,6 +18,7 @@ from spider.tasks.g1_wbc.mjx_model import build_mjx_model_bundle
 from spider.tasks.g1_wbc.mjx_physics import (
     action_to_model_ctrl,
     foot_contact_geom_groups,
+    floor_contact_force_from_contact,
     foot_contact_indicator_from_contact,
     floor_contact_indicator_from_contact,
     joint_order_to_model_ctrl,
@@ -32,7 +33,10 @@ from spider.tasks.g1_wbc.rollout import default_joint_pos_tensor, joint_actuator
 class _NumpyJnp:
     @staticmethod
     def asarray(value):
-        return np.asarray(value, dtype=np.float32)
+        array = np.asarray(value)
+        if array.dtype.kind in {"i", "u"}:
+            return array
+        return array.astype(np.float32)
 
     @staticmethod
     def zeros_like(value):
@@ -45,6 +49,26 @@ class _NumpyJnp:
     @staticmethod
     def any(value, axis=None):
         return np.any(value, axis=axis)
+
+    @staticmethod
+    def arange(stop):
+        return np.arange(stop, dtype=np.int32)
+
+    @staticmethod
+    def clip(value, low, high):
+        return np.clip(value, low, high)
+
+    @staticmethod
+    def maximum(left, right):
+        return np.maximum(left, right)
+
+    @staticmethod
+    def sum(value, axis=None):
+        return np.sum(value, axis=axis)
+
+    @staticmethod
+    def where(condition, left, right):
+        return np.where(condition, left, right)
 
 
 class _FakeCommandReferenceJnp:
@@ -337,6 +361,60 @@ class MjxRealPhysicsTest(unittest.TestCase):
             np.array([1.0, 1.0, 1.0], dtype=np.float32),
         )
 
+    def test_floor_contact_force_from_contact_sums_pyramidal_normal_rows(self) -> None:
+        contact = SimpleNamespace(
+            geom=np.array(
+                [
+                    [3, 11],
+                    [3, 25],
+                    [31, 3],
+                    [31, 25],
+                ],
+                dtype=np.int32,
+            ),
+            dist=np.array([-0.001, -0.002, -0.003, -0.004], dtype=np.float32),
+            includemargin=np.zeros(4, dtype=np.float32),
+            dim=np.array([3, 1, 3, 3], dtype=np.int32),
+            efc_address=np.array([0, 8, 9, 13], dtype=np.int32),
+        )
+        efc_force = np.array(
+            [
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                50.0,
+                50.0,
+                50.0,
+                50.0,
+                5.0,
+                6.0,
+                7.0,
+                8.0,
+                9.0,
+                100.0,
+                100.0,
+                100.0,
+                100.0,
+            ],
+            dtype=np.float32,
+        )
+
+        force = floor_contact_force_from_contact(
+            contact,
+            efc_force,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=tuple(range(11, 18)),
+            right_foot_geom_ids=tuple(range(21, 28)),
+            other_robot_geom_ids=(31, 32),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(
+            force,
+            np.array([10.0, 5.0, 30.0], dtype=np.float32),
+        )
+
     def test_command_reference_fn_returns_command_body_kinematics(self) -> None:
         bundle = SimpleNamespace(
             mjx_model={"body_count": 3},
@@ -486,6 +564,11 @@ class MjxRealPhysicsTest(unittest.TestCase):
         )
         self.assertEqual(score_state["contact"].shape, (sample_count, 2))
         self.assertEqual(score_state["floor_contact"].shape, (sample_count, 3))
+        self.assertEqual(score_state["contact_force"].shape, (sample_count, 2))
+        self.assertEqual(
+            score_state["floor_contact_force"].shape,
+            (sample_count, 3),
+        )
         self.assertEqual(score_state["model_ctrl"].shape, (sample_count, ACTION_DIM))
         self.assertEqual(score_state["time"].shape, (sample_count,))
 

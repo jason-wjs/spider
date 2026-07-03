@@ -19,6 +19,9 @@ from spider.tasks.g1_wbc.constants import (
 )
 
 
+_MAX_PYRAMIDAL_CONTACT_ROWS = 10
+
+
 @dataclass(frozen=True)
 class FootContactGeomGroups:
     floor_geom_ids: tuple[int, ...]
@@ -129,6 +132,54 @@ def floor_contact_indicator_from_contact(
             _as_indicator(jnp.any(active & has_floor & left), jnp=jnp),
             _as_indicator(jnp.any(active & has_floor & right), jnp=jnp),
             _as_indicator(jnp.any(active & has_floor & other), jnp=jnp),
+        ]
+    )
+
+
+def floor_contact_force_from_contact(
+    contact,
+    efc_force,
+    *,
+    floor_geom_ids: tuple[int, ...],
+    left_foot_geom_ids: tuple[int, ...],
+    right_foot_geom_ids: tuple[int, ...],
+    other_robot_geom_ids: tuple[int, ...],
+    jnp,
+):
+    """Return grouped floor normal forces for left, right, and other geoms."""
+
+    geom = jnp.asarray(contact.geom)
+    dist = jnp.asarray(contact.dist)
+    includemargin = jnp.asarray(contact.includemargin)
+    if len(geom.shape) != 2 or int(geom.shape[-1]) != 2:
+        raise ValueError(f"Expected contact.geom shape (contacts, 2), got {geom.shape}")
+    valid = (geom[:, 0] >= 0) & (geom[:, 1] >= 0)
+    active = valid & (dist <= includemargin + 1.0e-5)
+    has_floor = _contact_has_any_geom(geom, floor_geom_ids, jnp=jnp)
+    normal_force = _contact_normal_force(contact, efc_force, jnp=jnp)
+    return jnp.asarray(
+        [
+            _sum_group_force(
+                active,
+                has_floor,
+                _contact_has_any_geom(geom, left_foot_geom_ids, jnp=jnp),
+                normal_force,
+                jnp=jnp,
+            ),
+            _sum_group_force(
+                active,
+                has_floor,
+                _contact_has_any_geom(geom, right_foot_geom_ids, jnp=jnp),
+                normal_force,
+                jnp=jnp,
+            ),
+            _sum_group_force(
+                active,
+                has_floor,
+                _contact_has_any_geom(geom, other_robot_geom_ids, jnp=jnp),
+                normal_force,
+                jnp=jnp,
+            ),
         ]
     )
 
@@ -312,11 +363,21 @@ def make_mjx_physics_step_fn(
                     other_robot_geom_ids=contact_groups.other_robot_geom_ids,
                     jnp=jnp,
                 ),
+                "floor_contact_force": floor_contact_force_from_contact(
+                    data._impl.contact,
+                    data._impl.efc_force,
+                    floor_geom_ids=contact_groups.floor_geom_ids,
+                    left_foot_geom_ids=contact_groups.left_foot_geom_ids,
+                    right_foot_geom_ids=contact_groups.right_foot_geom_ids,
+                    other_robot_geom_ids=contact_groups.other_robot_geom_ids,
+                    jnp=jnp,
+                ),
                 **contact_count_diagnostics(data._impl.contact, jnp=jnp),
                 "model_ctrl": data.ctrl,
                 "time": data.time,
             }
             score_state["contact"] = score_state["floor_contact"][:2]
+            score_state["contact_force"] = score_state["floor_contact_force"][:2]
             return next_robot, score_state
 
         return runtime.jax.vmap(step_one)(qpos, qvel, action_array)
@@ -511,6 +572,24 @@ def _is_robot_collision_geom_name(name: str) -> bool:
     return bare_name.endswith("_collision")
 
 
+def _contact_normal_force(contact, efc_force, *, jnp):
+    dim = jnp.asarray(contact.dim).astype("int32")
+    efc_address = jnp.asarray(contact.efc_address).astype("int32")
+    efc_force = jnp.asarray(efc_force)
+    row_offsets = jnp.arange(_MAX_PYRAMIDAL_CONTACT_ROWS)
+    row_count = jnp.where(dim == 1, 1, 2 * (dim - 1))
+    rows = efc_address[:, None] + row_offsets[None, :]
+    row_valid = (efc_address[:, None] >= 0) & (row_offsets[None, :] < row_count[:, None])
+    clipped_rows = jnp.clip(rows, 0, int(efc_force.shape[0]) - 1)
+    force_rows = efc_force[clipped_rows]
+    normal_force = jnp.sum(jnp.where(row_valid, force_rows, 0.0), axis=1)
+    return jnp.maximum(normal_force, 0.0)
+
+
+def _sum_group_force(active, has_floor, group, normal_force, *, jnp):
+    return jnp.sum(jnp.where(active & has_floor & group, normal_force, 0.0))
+
+
 def _contact_has_any_geom(geom, geom_ids: tuple[int, ...], *, jnp):
     geom_ids = jnp.asarray(tuple(int(value) for value in geom_ids))
     return jnp.any(geom[..., None] == geom_ids, axis=(1, 2))
@@ -566,6 +645,7 @@ __all__ = [
     "foot_contact_geom_groups",
     "foot_contact_indicator_from_contact",
     "floor_contact_indicator_from_contact",
+    "floor_contact_force_from_contact",
     "joint_order_to_model_ctrl",
     "make_mjx_command_reference_fn",
     "make_mjx_physics_step_fn",
