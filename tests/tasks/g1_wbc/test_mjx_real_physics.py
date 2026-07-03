@@ -348,6 +348,47 @@ class MjxRealPhysicsTest(unittest.TestCase):
         for values in (*next_robot.values(), *score_state.values()):
             self.assertTrue(np.all(np.isfinite(values)))
 
+    def test_real_mjx_physics_step_uses_carried_robot_qpos_not_command_qpos(
+        self,
+    ) -> None:
+        if not probe_mjx_runtime().available:
+            self.skipTest("jax/mujoco.mjx runtime is not available")
+        runtime = require_mjx_runtime()
+        bundle = build_mjx_model_bundle(profile_name="wxy_parity", require_runtime=True)
+        default_joint_pos = default_joint_pos_tensor("cpu").numpy()
+        action_scale = joint_actuator_specs("cpu")["action_scale"].numpy()
+        physics_step = make_mjx_physics_step_fn(
+            default_joint_pos=default_joint_pos,
+            action_scale=action_scale,
+            decimation=0,
+        )
+        qpos = np.zeros((1, QPOS_DIM), dtype=np.float32)
+        qpos[:, 3] = 1.0
+        qpos[:, 7:] = default_joint_pos
+        qpos[:, 0] = 0.25
+        command_qpos = qpos.copy()
+        command_qpos[:, 0] = 1.25
+        qvel = np.zeros((1, QVEL_DIM), dtype=np.float32)
+        robot_state = {
+            "qpos": qpos,
+            "qvel": qvel,
+            "body_pos_w": np.zeros((1, len(MUJOCO_BODY_NAMES), 3), dtype=np.float32),
+            "body_quat_w": np.zeros((1, len(MUJOCO_BODY_NAMES), 4), dtype=np.float32),
+            "body_ang_vel_w": np.zeros((1, len(MUJOCO_BODY_NAMES), 3), dtype=np.float32),
+        }
+
+        next_robot, _score_state = physics_step(
+            bundle,
+            robot_state,
+            command_qpos,
+            np.zeros((1, ACTION_DIM), dtype=np.float32),
+            0,
+            runtime=runtime,
+        )
+        next_qpos = runtime.jax.device_get(next_robot["qpos"])
+
+        self.assertAlmostEqual(float(next_qpos[0, 0]), 0.25, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,7 +187,13 @@ def make_mjx_physics_step_fn(
         if getattr(bundle, "mjx_model", None) is None:
             raise ValueError("MJX model bundle must include mjx_model")
         jnp = runtime.jnp
-        qpos = _batched_vector("command_qpos", command_qpos, QPOS_DIM, jnp=jnp)
+        qpos = _batched_vector(
+            "robot_state['qpos']",
+            robot_state["qpos"],
+            QPOS_DIM,
+            jnp=jnp,
+        )
+        command_qpos = _batched_vector("command_qpos", command_qpos, QPOS_DIM, jnp=jnp)
         qvel = _batched_vector(
             "robot_state['qvel']",
             robot_state["qvel"],
@@ -203,6 +209,11 @@ def make_mjx_physics_step_fn(
         if int(action_array.shape[0]) != sample_count:
             raise ValueError(
                 f"Expected action batch {sample_count}, got {int(action_array.shape[0])}"
+            )
+        if int(command_qpos.shape[0]) != sample_count:
+            raise ValueError(
+                f"Expected command_qpos batch {sample_count}, "
+                f"got {int(command_qpos.shape[0])}"
             )
 
         body_ids = _body_ids_for_names(bundle, MUJOCO_BODY_NAMES)
