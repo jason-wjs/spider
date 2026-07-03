@@ -2596,6 +2596,88 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["motion_results"]["jump"]["mjx_failures"],
         )
 
+    def test_fresh_replay_metrics_with_multiple_visible_devices_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            planned_by_mjx_output = {planned.output_dir: planned for planned in plan}
+            planned_by_replay_output = {
+                planned.replay_output_dir: planned for planned in plan
+            }
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                planned = (
+                    planned_by_replay_output[str(output)]
+                    if is_replay
+                    else planned_by_mjx_output[str(output)]
+                )
+                _write_artifacts(output, include_command=not is_replay)
+                payload = (
+                    _replay_metrics_payload(planned)
+                    if is_replay
+                    else _mjx_metrics_payload(planned)
+                )
+                if is_replay and planned.motion == "jump" and planned.seed == 0:
+                    payload["mpc"]["runtime_visible_devices"] = ["0", "1"]
+                (output / "metrics.json").write_text(json.dumps(payload))
+                row = runner._row_from_metrics(output / "metrics.json")
+                return {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "command_wall_time_sec": 1.0,
+                    "command_start_time_ns": min(
+                        (output / name).stat().st_mtime_ns
+                        for name in (
+                            ("metrics.json", "rollout.npz")
+                            if is_replay
+                            else ("metrics.json", "rollout.npz", "mpc_command.npz")
+                        )
+                    )
+                    - 1_000_000,
+                    **row,
+                }
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "replay_single_visible_gpu",
+            report["replay_results"]["jump"]["failures"],
+        )
+
     def test_mismatched_mjx_artifact_hash_fails_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -2851,7 +2933,12 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     **_fresh_metrics_provenance(argv, is_replay=is_replay),
                 }
                 if is_replay:
-                    row.update(_replay_evidence(argv))
+                    row.update(
+                        _replay_evidence(
+                            argv,
+                            runtime_gpu_name="NVIDIA GeForce RTX 4090",
+                        )
+                    )
                 else:
                     row.update(
                         {
@@ -2919,7 +3006,12 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     **_fresh_metrics_provenance(argv, is_replay=is_replay),
                 }
                 if is_replay:
-                    row.update(_replay_evidence(argv))
+                    row.update(
+                        _replay_evidence(
+                            argv,
+                            runtime_gpu_name="NVIDIA GeForce RTX 4090",
+                        )
+                    )
                 else:
                     row.update(
                         {
@@ -3223,6 +3315,8 @@ def _replay_metrics_payload(planned) -> dict[str, object]:
             "control_steps": 20,
             "num_command_frames": 801,
             "num_replay_steps": 800,
+            "runtime_visible_devices": ["0"],
+            "runtime_gpu_name": "NVIDIA H100 80GB HBM3",
         },
     }
 
@@ -3400,6 +3494,7 @@ def _replay_evidence(
     control_steps: int = 20,
     num_command_frames: int = 801,
     num_replay_steps: int = 800,
+    runtime_gpu_name: str = "NVIDIA H100 80GB HBM3",
 ) -> dict[str, object]:
     if saved_command is None:
         saved_command = argv[argv.index("--saved-command") + 1]
@@ -3417,6 +3512,8 @@ def _replay_evidence(
             "control_steps": control_steps,
             "num_command_frames": num_command_frames,
             "num_replay_steps": num_replay_steps,
+            "runtime_visible_devices": ["0"],
+            "runtime_gpu_name": runtime_gpu_name,
         },
     }
 

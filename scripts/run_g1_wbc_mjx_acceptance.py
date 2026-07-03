@@ -1160,6 +1160,11 @@ def _build_report(
             (
                 *replay_failures,
                 *_replay_provenance_failures(replay_group, mjx_group),
+                *_runtime_evidence_failures(
+                    replay_group,
+                    prefix="replay",
+                    required_gpu_name_fragment=required_gpu_name_fragment,
+                ),
                 *_artifact_freshness_failures(
                     replay_group,
                     artifact_fields=("metrics_json", "rollout_npz"),
@@ -1675,10 +1680,14 @@ def _has_invalid_benchmark_failure(
         "replay_metrics_provenance",
         "replay_num_command_frames",
         "replay_num_replay_steps",
+        "replay_required_gpu",
+        "replay_runtime_gpu_name",
+        "replay_runtime_visible_devices",
         "replay_saved_command",
         "replay_saved_command_hash",
         "replay_saved_command_source",
         "replay_rollout_ref_indices",
+        "replay_single_visible_gpu",
         "returncode",
         "rollout_npz",
         "rollout_npz_hash",
@@ -1993,22 +2002,11 @@ def _mjx_runtime_evidence_failures(
     *,
     required_gpu_name_fragment: str,
 ) -> tuple[str, ...]:
-    failures: list[str] = []
-    required = str(required_gpu_name_fragment)
-    for row in rows:
-        devices = row.get("runtime_visible_devices")
-        if not isinstance(devices, (list, tuple)) or not devices:
-            failures.append("mjx_runtime_visible_devices")
-            continue
-        visible = tuple(str(value) for value in devices if str(value))
-        if len(visible) != 1:
-            failures.append("mjx_single_visible_gpu")
-        gpu_name = row.get("runtime_gpu_name")
-        if not isinstance(gpu_name, str) or not gpu_name.strip():
-            failures.append("mjx_runtime_gpu_name")
-        elif required and required not in gpu_name:
-            failures.append("mjx_required_gpu")
-    return _unique(failures)
+    return _runtime_evidence_failures(
+        rows,
+        prefix="mjx",
+        required_gpu_name_fragment=required_gpu_name_fragment,
+    )
 
 
 def _mjx_contact_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
@@ -2060,21 +2058,34 @@ def _baseline_runtime_evidence_failures(
     *,
     required_gpu_name_fragment: str,
 ) -> tuple[str, ...]:
+    return _runtime_evidence_failures(
+        rows,
+        prefix="baseline",
+        required_gpu_name_fragment=required_gpu_name_fragment,
+    )
+
+
+def _runtime_evidence_failures(
+    rows: list[dict[str, Any]],
+    *,
+    prefix: str,
+    required_gpu_name_fragment: str,
+) -> tuple[str, ...]:
     failures: list[str] = []
     required = str(required_gpu_name_fragment)
     for row in rows:
-        devices = row.get("runtime_visible_devices")
+        devices = _row_value(row, "runtime_visible_devices")
         if not isinstance(devices, (list, tuple)) or not devices:
-            failures.append("baseline_runtime_visible_devices")
+            failures.append(f"{prefix}_runtime_visible_devices")
         else:
             visible = tuple(str(value) for value in devices if str(value))
             if len(visible) != 1:
-                failures.append("baseline_single_visible_gpu")
-        gpu_name = row.get("runtime_gpu_name")
+                failures.append(f"{prefix}_single_visible_gpu")
+        gpu_name = _row_value(row, "runtime_gpu_name")
         if not isinstance(gpu_name, str) or not gpu_name.strip():
-            failures.append("baseline_runtime_gpu_name")
+            failures.append(f"{prefix}_runtime_gpu_name")
         elif required and required not in gpu_name:
-            failures.append("baseline_required_gpu")
+            failures.append(f"{prefix}_required_gpu")
     return _unique(failures)
 
 
