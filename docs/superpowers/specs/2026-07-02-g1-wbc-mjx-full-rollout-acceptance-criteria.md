@@ -148,6 +148,10 @@ All manifest artifact paths must resolve to existing files at acceptance time.
 The MJX acceptance runner treats a missing baseline `metrics.json`,
 `rollout.npz`, or `mpc_command.npz` as an invalid benchmark even if the manifest
 contains otherwise valid metric fields.
+Formal Stage 0 manifests produced by the runner record `command_start_time_ns`
+and `artifact_mtime_ns` for those baseline artifacts; acceptance rejects
+artifacts whose mtimes predate the recorded command start, which catches reused
+output directories with stale baseline files.
 
 The acceptance runner must also reject non-formal manifests before launching MJX
 runs. A formal manifest has schema version `1`, baseline name

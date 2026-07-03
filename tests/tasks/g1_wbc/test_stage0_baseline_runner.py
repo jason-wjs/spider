@@ -190,6 +190,24 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertIsNone(updated["artifacts"]["rollout_npz"])
         self.assertIsNone(updated["artifacts"]["mpc_command_npz"])
 
+    def test_attach_artifact_paths_records_mtime_for_existing_files(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            for name in ("metrics.json", "rollout.npz", "mpc_command.npz"):
+                (output_dir / name).write_text("{}")
+            row = {"output_dir": str(output_dir)}
+
+            updated = runner.attach_artifact_paths(row)
+
+        self.assertEqual(
+            set(updated["artifact_mtime_ns"]),
+            {"metrics_json", "rollout_npz", "mpc_command_npz"},
+        )
+        self.assertTrue(
+            all(isinstance(value, int) for value in updated["artifact_mtime_ns"].values())
+        )
+
     def test_run_command_extracts_metrics_and_mpc_payload(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -231,6 +249,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertEqual(row["steady_state_wall_time_sec"], 123.45)
         self.assertEqual(row["runtime_visible_devices"], ["0"])
         self.assertEqual(row["runtime_gpu_name"], "NVIDIA H100 80GB HBM3")
+        self.assertIsInstance(row["command_start_time_ns"], int)
 
     def test_main_writes_ok_status_for_successful_real_run(self) -> None:
         runner = load_runner()

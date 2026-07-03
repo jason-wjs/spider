@@ -9,6 +9,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -215,12 +216,18 @@ def attach_artifact_paths(row: dict[str, Any]) -> dict[str, Any]:
         key: str(path.resolve()) if path.exists() else None
         for key, path in artifacts.items()
     }
+    row["artifact_mtime_ns"] = {
+        key: int(path.stat().st_mtime_ns)
+        for key, path in artifacts.items()
+        if path.exists()
+    }
     return row
 
 
 def run_command(command: Stage0Command) -> dict[str, Any]:
     """Run one Stage 0 command and return captured subprocess metadata."""
 
+    command_start_time_ns = time.time_ns()
     result = subprocess.run(
         command.argv,
         cwd=SPIDER_ROOT,
@@ -233,6 +240,7 @@ def run_command(command: Stage0Command) -> dict[str, Any]:
         "returncode": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "command_start_time_ns": int(command_start_time_ns),
     }
     metrics_path = Path(command.output_dir) / "metrics.json"
     if metrics_path.is_file():

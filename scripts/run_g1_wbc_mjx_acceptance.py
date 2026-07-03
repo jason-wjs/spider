@@ -390,6 +390,10 @@ def _build_report(
             (
                 *baseline_gate.failures,
                 *_baseline_artifact_evidence_failures(baseline_group),
+                *_artifact_freshness_failures(
+                    baseline_group,
+                    artifact_fields=REQUIRED_ARTIFACT_FIELDS,
+                ),
                 *_baseline_runtime_evidence_failures(
                     baseline_group,
                     required_gpu_name_fragment=required_gpu_name_fragment,
