@@ -201,6 +201,51 @@ class MjxOptimizerTest(unittest.TestCase):
         np.testing.assert_allclose(samples[0], 0.0)
         np.testing.assert_allclose(samples[1, :, 0], [0.0, 1.0, 2.0, 3.0, 4.0])
 
+    def test_sample_residual_controls_reserves_guided_candidate_slot(self) -> None:
+        controls = np.zeros((5, 8), dtype=np.float32)
+        guided_controls = np.full((5, 8), 2.0, dtype=np.float32)
+        runtime = SimpleNamespace(
+            jnp=_NumpyJnp(),
+            jax=SimpleNamespace(random=_UnitStepRandom(), nn=_FakeNN()),
+        )
+
+        samples = sample_residual_controls(
+            _config(),
+            controls,
+            (0, 3),
+            runtime=runtime,
+            guided_controls=guided_controls,
+        )
+
+        np.testing.assert_allclose(samples[0], controls)
+        np.testing.assert_allclose(samples[1], guided_controls)
+        self.assertGreater(float(np.mean(samples[2])), 0.0)
+
+    def test_sample_residual_controls_rejects_malformed_guided_candidate(
+        self,
+    ) -> None:
+        controls = np.zeros((5, 8), dtype=np.float32)
+
+        with self.assertRaisesRegex(ValueError, "guided_controls shape"):
+            sample_residual_controls(
+                _config(),
+                controls,
+                (0, 3),
+                runtime=_FakeRuntime,
+                guided_controls=np.zeros((4, 8), dtype=np.float32),
+            )
+
+        nonfinite = np.zeros((5, 8), dtype=np.float32)
+        nonfinite[0, 0] = np.nan
+        with self.assertRaisesRegex(ValueError, "guided_controls must be finite"):
+            sample_residual_controls(
+                _config(),
+                controls,
+                (0, 3),
+                runtime=_FakeRuntime,
+                guided_controls=nonfinite,
+            )
+
     def test_sample_residual_controls_converts_tuple_seed_to_prng_key(self) -> None:
         controls = np.zeros((5, 8), dtype=np.float32)
 
@@ -410,6 +455,34 @@ class MjxOptimizerTest(unittest.TestCase):
         np.testing.assert_allclose(sample_means, [1.0, 0.5, 0.25], rtol=1e-6)
         self.assertEqual(result.info["accepted_iterations"], 0)
         self.assertFalse(result.info["accepted"])
+
+    def test_optimize_window_uses_guided_controls_from_reference(self) -> None:
+        random = _UnitStepRandom()
+        runtime = SimpleNamespace(
+            jnp=_NumpyJnp(),
+            jax=SimpleNamespace(random=random, nn=_FakeNN()),
+        )
+        guided_controls = np.full((5, 8), 3.0, dtype=np.float32)
+        captured_guided: list[np.ndarray] = []
+
+        def rollout_fn(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            captured_guided.append(np.asarray(samples[1], dtype=np.float32).copy())
+            return np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+
+        optimize_window(
+            _config(),
+            {"rollout_fn": rollout_fn},
+            np.zeros((5, 8), dtype=np.float32),
+            reference={"guided_controls": guided_controls},
+            actor_params=None,
+            model_bundle=None,
+            key=(0, 11),
+            runtime=runtime,
+        )
+
+        self.assertEqual(random.calls, 1)
+        np.testing.assert_allclose(captured_guided[0], guided_controls)
 
     def test_optimize_window_propagates_rollout_diagnostics(self) -> None:
         config = _config()

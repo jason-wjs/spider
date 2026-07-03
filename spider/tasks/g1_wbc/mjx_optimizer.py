@@ -19,6 +19,7 @@ class JaxWindowOptimizerConfig:
     joint_sigma: float
     iterations: int = 1
     final_noise_scale: float = 1.0
+    use_guided_candidate: bool = True
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,14 @@ class JaxWindowResult:
     info: dict[str, object]
 
 
-def sample_residual_controls(config: JaxWindowOptimizerConfig, controls, key, *, runtime):
+def sample_residual_controls(
+    config: JaxWindowOptimizerConfig,
+    controls,
+    key,
+    *,
+    runtime,
+    guided_controls=None,
+):
     """Sample residual control candidates around a control mean."""
 
     _validate_config(config)
@@ -59,9 +67,19 @@ def sample_residual_controls(config: JaxWindowOptimizerConfig, controls, key, *,
             jnp=jnp,
         )
     samples = controls[None, :, :] + delta
-    if hasattr(samples, "at"):
-        return samples.at[0].set(controls)
-    return _set_first(samples, controls)
+    samples = _set_sample(samples, 0, controls)
+    if (
+        bool(config.use_guided_candidate)
+        and guided_controls is not None
+        and int(config.samples) > 1
+    ):
+        guided_controls = _validate_guided_controls(
+            guided_controls,
+            controls,
+            jnp=jnp,
+        )
+        samples = _set_sample(samples, 1, guided_controls)
+    return samples
 
 
 def optimize_window(
@@ -90,6 +108,7 @@ def optimize_window(
             updated_controls,
             _iteration_key(key, iteration, config=config),
             runtime=runtime,
+            guided_controls=_guided_controls_from_reference(reference),
         )
         rollout_result = rollout_fn(samples, reference, actor_params, model_bundle)
         scores = _rollout_scores(rollout_result, jnp=jnp)
@@ -240,6 +259,23 @@ def _validate_scores(scores, config: JaxWindowOptimizerConfig, *, jnp) -> None:
         raise ValueError("JAX window optimizer rollout scores must be finite")
 
 
+def _guided_controls_from_reference(reference):
+    if isinstance(reference, Mapping):
+        return reference.get("guided_controls")
+    return None
+
+
+def _validate_guided_controls(guided_controls, controls, *, jnp):
+    guided_controls = jnp.asarray(guided_controls)
+    expected = tuple(int(dim) for dim in controls.shape)
+    actual = tuple(int(dim) for dim in guided_controls.shape)
+    if actual != expected:
+        raise ValueError(f"Expected guided_controls shape {expected}, got {actual}")
+    if not _all_finite(guided_controls, jnp=jnp):
+        raise ValueError("JAX window optimizer guided_controls must be finite")
+    return guided_controls
+
+
 def _iteration_noise_config(
     config: JaxWindowOptimizerConfig,
     iteration: int,
@@ -263,7 +299,8 @@ def _all_finite(value, *, jnp) -> bool:
         except (TypeError, ValueError):
             pass
     try:
-        return all(math.isfinite(float(item)) for item in value)
+        flat = value.ravel() if hasattr(value, "ravel") else value
+        return all(math.isfinite(float(item)) for item in flat)
     except (TypeError, ValueError, OverflowError):
         return False
 
@@ -331,9 +368,11 @@ def _iteration_key(key, iteration: int, *, config: JaxWindowOptimizerConfig):
     return key
 
 
-def _set_first(samples, controls):
+def _set_sample(samples, index: int, controls):
+    if hasattr(samples, "at"):
+        return samples.at[int(index)].set(controls)
     out = samples.copy()
-    out[0] = controls
+    out[int(index)] = controls
     return out
 
 

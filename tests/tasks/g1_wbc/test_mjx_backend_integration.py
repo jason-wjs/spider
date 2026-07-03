@@ -266,6 +266,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(result.metadata["backend"], "mjx")
         self.assertTrue(result.metadata["accepted"])
         self.assertFalse(result.metadata["used_baseline_fallback"])
+        self.assertTrue(result.metadata["use_guided_candidate"])
         self.assertEqual(result.result.num_windows, 40)
         self.assertEqual(result.metadata["accepted_windows"], 40)
         self.assertEqual(result.result.rollout.qpos.shape, (801, 1, QPOS_DIM))
@@ -573,10 +574,13 @@ class MjxBackendIntegrationTest(unittest.TestCase):
 
     def test_default_optimizer_uses_explicit_rollout_reference_factory(self) -> None:
         references: list[dict[str, object]] = []
+        captured_guided: list[np.ndarray] = []
+        guided_controls = np.full((40, QPOS_DIM - 1), 0.75, dtype=np.float32)
 
         def rollout_scorer(samples, reference, actor_params, model_bundle):
             del actor_params, model_bundle
             references.append(dict(reference))
+            captured_guided.append(np.asarray(samples[1], dtype=np.float32).copy())
             scale = float(reference["score_scale"])
             return scale * np.arange(int(samples.shape[0]), dtype=np.float32)
 
@@ -584,6 +588,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             return {
                 "window_start": kwargs["start"],
                 "score_scale": 0.5,
+                "guided_controls": guided_controls,
             }
 
         result = _run_with_fakes(
@@ -598,6 +603,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertGreater(len(references), 0)
         self.assertEqual(references[0]["window_start"], 0)
         self.assertEqual(references[0]["score_scale"], 0.5)
+        np.testing.assert_allclose(captured_guided[0], guided_controls)
 
     def test_mjx_backend_accepts_explicit_rollout_components(self) -> None:
         runtime = _FakeOptimizerRuntime()
@@ -947,11 +953,13 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         config = _spider_config()
         config.max_num_iterations = 3
         config.final_noise_scale = 0.25
+        config.use_guided_candidate = False
 
         window_config = mjx_backend_module._window_config_from_spider(config)
 
         self.assertEqual(window_config.iterations, 3)
         self.assertEqual(window_config.final_noise_scale, 0.25)
+        self.assertFalse(window_config.use_guided_candidate)
 
 
 def _run_with_fakes(
