@@ -12,6 +12,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import mean, median, pstdev
 from typing import Any
 
 from spider.tasks.g1_wbc.acceptance import (
@@ -338,10 +339,111 @@ def _build_report(
         "motion_results": motion_results,
         "replay_results": replay_results,
         "speed_results": speed_results,
+        "timing_summary": _timing_summary(
+            baseline_rows=baseline_rows,
+            mjx_rows=mjx_rows,
+            replay_rows=replay_rows,
+        ),
         "baseline_rows": baseline_rows,
         "mjx_rows": mjx_rows,
         "replay_rows": replay_rows,
         "passed": passed,
+    }
+
+
+def _timing_summary(
+    *,
+    baseline_rows: list[dict[str, Any]],
+    mjx_rows: list[dict[str, Any]],
+    replay_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for motion in MOTIONS:
+        baseline_group = [row for row in baseline_rows if row.get("motion_name") == motion]
+        mjx_group = [row for row in mjx_rows if row.get("motion") == motion]
+        replay_group = [row for row in replay_rows if row.get("motion") == motion]
+        summary[motion] = {
+            "baseline": {
+                "steady_state_wall_time_sec": _timing_stats(
+                    _timing_values(baseline_group, "steady_state_wall_time_sec")
+                ),
+            },
+            "mjx": {
+                "steady_state_wall_time_sec": _timing_stats(
+                    _timing_values(mjx_group, "steady_state_wall_time_sec")
+                ),
+                "compile_init_wall_time_sec": _timing_stats(
+                    _timing_values(mjx_group, "compile_init_wall_time_sec")
+                ),
+                "jit_warmup_wall_time_sec": _timing_stats(
+                    _timing_values(mjx_group, "jit_warmup_wall_time_sec")
+                ),
+                "per_window_steady_state_wall_time_sec": _timing_stats(
+                    _per_window_timing_values(mjx_group)
+                ),
+                "num_windows": _timing_stats(_window_count_values(mjx_group)),
+                "runtime_visible_devices": [
+                    [str(value) for value in row.get("runtime_visible_devices", ())]
+                    for row in mjx_group
+                ],
+            },
+            "replay": {
+                "command_wall_time_sec": _timing_stats(
+                    _timing_values(replay_group, "command_wall_time_sec")
+                ),
+                "steady_state_wall_time_sec": _timing_stats(
+                    _timing_values(replay_group, "steady_state_wall_time_sec")
+                ),
+            },
+        }
+    return summary
+
+
+def _timing_values(rows: list[dict[str, Any]], name: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = _timing_value(row, name)
+        if _valid_timing(value):
+            values.append(float(value))
+    return values
+
+
+def _window_count_values(rows: list[dict[str, Any]]) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = _safe_int(row.get("num_windows", row.get("accepted_windows")))
+        if value is not None and value > 0:
+            values.append(float(value))
+    return values
+
+
+def _per_window_timing_values(rows: list[dict[str, Any]]) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        steady = _timing_value(row, "steady_state_wall_time_sec")
+        windows = _safe_int(row.get("num_windows", row.get("accepted_windows")))
+        if _valid_timing(steady) and windows is not None and windows > 0:
+            values.append(float(steady) / float(windows))
+    return values
+
+
+def _timing_stats(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {
+            "values": [],
+            "mean": None,
+            "median": None,
+            "min": None,
+            "max": None,
+            "std": None,
+        }
+    return {
+        "values": values,
+        "mean": mean(values),
+        "median": median(values),
+        "min": min(values),
+        "max": max(values),
+        "std": pstdev(values) if len(values) > 1 else 0.0,
     }
 
 

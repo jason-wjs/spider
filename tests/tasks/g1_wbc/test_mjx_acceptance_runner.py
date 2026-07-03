@@ -673,6 +673,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 del cwd
                 output = Path(argv[argv.index("--output-dir") + 1])
                 is_replay = "replay_command" in argv
+                seed = int(argv[argv.index("--seed") + 1])
                 _write_artifacts(output, include_command=not is_replay)
                 row = {
                     "returncode": 0,
@@ -694,7 +695,7 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                             "jit_warmup_enabled": True,
                             "jit_warmup_wall_time_sec": 1.5,
                             "runtime_visible_devices": ("0",),
-                            "steady_state_wall_time_sec": 1.0,
+                            "steady_state_wall_time_sec": 1.0 + seed,
                         }
                     )
                 return row
@@ -720,6 +721,22 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(len(report["mjx_rows"]), 6)
         self.assertEqual(len(report["replay_rows"]), 6)
         self.assertEqual(report["classification"], "pass_h100_milestone")
+        jump_timing = report["timing_summary"]["jump"]
+        self.assertEqual(
+            jump_timing["baseline"]["steady_state_wall_time_sec"]["values"],
+            [120.0, 120.0, 120.0],
+        )
+        self.assertEqual(jump_timing["baseline"]["steady_state_wall_time_sec"]["mean"], 120.0)
+        self.assertEqual(jump_timing["mjx"]["steady_state_wall_time_sec"]["values"], [1.0, 2.0, 3.0])
+        self.assertEqual(jump_timing["mjx"]["steady_state_wall_time_sec"]["mean"], 2.0)
+        self.assertEqual(jump_timing["mjx"]["steady_state_wall_time_sec"]["min"], 1.0)
+        self.assertEqual(jump_timing["mjx"]["steady_state_wall_time_sec"]["max"], 3.0)
+        self.assertEqual(jump_timing["mjx"]["compile_init_wall_time_sec"]["mean"], 2.0)
+        self.assertEqual(jump_timing["mjx"]["jit_warmup_wall_time_sec"]["mean"], 1.5)
+        self.assertEqual(jump_timing["mjx"]["per_window_steady_state_wall_time_sec"]["values"], [0.025, 0.05, 0.075])
+        self.assertEqual(jump_timing["mjx"]["num_windows"]["values"], [40, 40, 40])
+        self.assertEqual(jump_timing["mjx"]["runtime_visible_devices"], [["0"], ["0"], ["0"]])
+        self.assertEqual(jump_timing["replay"]["command_wall_time_sec"]["values"], [1.0, 1.0, 1.0])
 
     def test_metrics_parser_extracts_compile_and_warmup_timing(self) -> None:
         runner = load_runner()
