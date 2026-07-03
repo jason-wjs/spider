@@ -195,7 +195,7 @@ def load_motion(
     if missing:
         raise ValueError(f"Motion file {path} is missing keys: {missing}")
 
-    fps = float(raw["fps"].item()) if "fps" in raw.files else 1.0 / target_dt
+    fps = _fps_from_raw(raw, target_dt=target_dt)
     joint_pos = torch.tensor(raw["joint_pos"], dtype=torch.float32, device=device)
     joint_vel = torch.tensor(raw["joint_vel"], dtype=torch.float32, device=device)
     body_pos_w = torch.tensor(raw["body_pos_w"], dtype=torch.float32, device=device)
@@ -241,6 +241,17 @@ def load_motion(
         body_ang_vel_w=motion.body_ang_vel_w,
         contact=contact,
     )
+
+
+def _fps_from_raw(raw: np.lib.npyio.NpzFile, *, target_dt: float) -> float:
+    if "fps" not in raw.files:
+        return 1.0 / target_dt
+    value = np.asarray(raw["fps"])
+    if value.size == 0:
+        return 1.0 / target_dt
+    if value.size != 1:
+        raise ValueError(f"Expected fps to be scalar or length 1, got shape {value.shape}.")
+    return float(value.reshape(-1)[0])
 
 
 def _slerp(q0: torch.Tensor, q1: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
