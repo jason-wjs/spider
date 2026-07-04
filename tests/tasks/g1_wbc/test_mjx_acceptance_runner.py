@@ -3442,6 +3442,42 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             report["motion_results"]["jump"]["mjx_failures"],
         )
 
+    def test_baseline_command_refined_qpos_may_differ_from_rollout_qpos(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            baseline_row = next(
+                row
+                for row in manifest["rows"]
+                if row["motion_name"] == "jump" and row["seed"] == 1
+            )
+            rollout_path = Path(baseline_row["artifacts"]["rollout_npz"])
+            arrays = _valid_rollout_arrays()
+            arrays["qpos"][:, 0, 0] = 0.5
+            np.savez_compressed(rollout_path, **arrays)
+            baseline_row["artifact_sha256"]["rollout_npz"] = _file_sha256(rollout_path)
+            baseline_row["artifact_mtime_ns"]["rollout_npz"] = rollout_path.stat().st_mtime_ns
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertNotIn(
+            "mpc_rollout_qpos_mismatch",
+            report["motion_results"]["jump"]["baseline_failures"],
+        )
+
     def test_mjx_command_qpos_trajectory_must_match_refined_qpos(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3519,6 +3555,18 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             "mpc_command_qvel_mismatch",
             report["motion_results"]["jump"]["mjx_failures"],
         )
+
+    def test_command_qvel_consistency_allows_float32_export_noise(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            command_path = Path(tmp_dir) / "mpc_command.npz"
+            arrays = _valid_command_arrays()
+            arrays["command_qvel_trajectory"][0, 0, 0] = 2.5e-5
+            np.savez_compressed(command_path, **arrays)
+
+            consistent = runner._command_qvel_is_consistent(command_path)
+
+        self.assertTrue(consistent)
 
     def test_4090_target_reports_realtime_pass_classification(self) -> None:
         runner = load_runner()

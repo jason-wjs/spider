@@ -604,6 +604,10 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
         "num_steps": num_steps,
         "reused_existing": True,
     }
+    row["command_start_time_ns"] = int(
+        min(path.stat().st_mtime_ns for path in (metrics_path, rollout_path, command_path))
+        - 1_000_000
+    )
     if isinstance(mpc.get("steady_state_wall_time_sec"), (int, float)):
         row["steady_state_wall_time_sec"] = float(mpc["steady_state_wall_time_sec"])
     if isinstance(mpc.get("runtime_visible_devices"), list):

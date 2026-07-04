@@ -674,6 +674,12 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual({row["status"] for row in manifest["rows"]}, {"ok"})
         self.assertTrue(all(row["reused_existing"] for row in manifest["rows"]))
+        for row in manifest["rows"]:
+            self.assertIsInstance(row["command_start_time_ns"], int)
+            self.assertLessEqual(
+                row["command_start_time_ns"],
+                min(row["artifact_mtime_ns"].values()),
+            )
         self.assertEqual(set(manifest["baseline_envelopes"]), {"jump", "walk"})
         self.assertEqual(manifest["promoted_seeds"], {"jump": 0, "walk": 0})
 

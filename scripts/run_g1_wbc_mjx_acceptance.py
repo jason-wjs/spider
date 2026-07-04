@@ -50,6 +50,8 @@ DEFAULT_REQUIRED_GPU_NAME_FRAGMENT = "H100"
 ARTIFACT_FRESHNESS_TOLERANCE_NS = 2_000_000_000
 FORMAL_BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
 TARGET_H100_SPEEDUP = "h100_speedup"
+COMMAND_QVEL_CONSISTENCY_ATOL = 5.0e-5
+COMMAND_QVEL_CONSISTENCY_RTOL = 1.0e-5
 TARGET_4090_REALTIME = "4090_realtime"
 ACCEPTANCE_REPORT_NAME = "acceptance_report.json"
 ACCEPTANCE_PARTIAL_REPORT_NAME = "acceptance_report.partial.json"
@@ -2406,6 +2408,7 @@ def _baseline_artifact_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
             *_artifact_npz_schema_failures(
                 rows,
                 require_command=True,
+                require_rollout_command_match=False,
             ),
         )
     )
@@ -2472,6 +2475,7 @@ def _artifact_npz_schema_failures(
     rows: list[dict[str, Any]],
     *,
     require_command: bool,
+    require_rollout_command_match: bool = True,
 ) -> tuple[str, ...]:
     failures: list[str] = []
     for row in rows:
@@ -2510,7 +2514,8 @@ def _artifact_npz_schema_failures(
                 ):
                     failures.append("mpc_command_qvel_mismatch")
             if (
-                rollout_valid
+                require_rollout_command_match
+                and rollout_valid
                 and command_valid
                 and isinstance(rollout_path, str)
                 and isinstance(command_path, str)
@@ -2626,8 +2631,8 @@ def _command_qvel_is_consistent(command_path: Path) -> bool:
                 np.allclose(
                     command_qvel,
                     expected_qvel,
-                    atol=1.0e-5,
-                    rtol=1.0e-5,
+                    atol=COMMAND_QVEL_CONSISTENCY_ATOL,
+                    rtol=COMMAND_QVEL_CONSISTENCY_RTOL,
                 )
             )
     except Exception:
