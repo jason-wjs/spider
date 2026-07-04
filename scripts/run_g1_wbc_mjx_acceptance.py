@@ -53,6 +53,7 @@ TARGET_H100_SPEEDUP = "h100_speedup"
 TARGET_4090_REALTIME = "4090_realtime"
 ACCEPTANCE_REPORT_NAME = "acceptance_report.json"
 ACCEPTANCE_PARTIAL_REPORT_NAME = "acceptance_report.partial.json"
+ACCEPTANCE_ROW_SIDECAR_NAME = "acceptance_row.json"
 REQUIRED_INPUT_SHA256_FIELDS = (
     "jump_motion",
     "walk_motion",
@@ -209,6 +210,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "acceptance run. The replay validation run never receives this flag."
         ),
     )
+    parser.add_argument(
+        "--only-motion",
+        action="append",
+        choices=MOTIONS,
+        default=None,
+        help="Run only the selected motion. Repeat to include multiple motions.",
+    )
+    parser.add_argument(
+        "--only-seed",
+        action="append",
+        type=int,
+        choices=SEEDS,
+        default=None,
+        help="Run only the selected seed. Repeat to include multiple seeds.",
+    )
+    parser.add_argument(
+        "--skip-report",
+        action="store_true",
+        help="Run selected row shards without writing shared acceptance reports.",
+    )
     return parser.parse_args(argv)
 
 
@@ -220,9 +241,15 @@ def build_acceptance_plan(
     rows = manifest.get("rows", [])
     matrix = _baseline_run_matrix(rows)
     _validate_formal_baseline_manifest(manifest, matrix)
+    selected_motions = set(args.only_motion) if args.only_motion else set(MOTIONS)
+    selected_seeds = set(args.only_seed) if args.only_seed else set(SEEDS)
     plan: list[PlannedAcceptanceRun] = []
     for motion in MOTIONS:
+        if motion not in selected_motions:
+            continue
         for seed in SEEDS:
+            if seed not in selected_seeds:
+                continue
             row = matrix[(motion, seed)]
             output_dir = output_root / motion / f"seed_{seed}" / "mjx"
             replay_output_dir = output_root / motion / f"seed_{seed}" / "replay"
@@ -327,6 +354,9 @@ def main(argv: list[str] | None = None) -> int:
     plan = build_acceptance_plan(args, manifest)
     environment_failures = validate_runtime_environment(args)
     if environment_failures:
+        if args.skip_report:
+            print(str(output_dir))
+            return 1
         report = _environment_failure_report(
             baseline_manifest=baseline_manifest,
             manifest=manifest,
@@ -341,6 +371,9 @@ def main(argv: list[str] | None = None) -> int:
     baseline_rows = list(manifest.get("rows", []))
     baseline_envelopes = _baseline_envelopes_from_manifest(manifest)
     if _baseline_artifact_preflight_failures(baseline_rows):
+        if args.skip_report:
+            print(str(output_dir))
+            return 1
         report = _build_report(
             baseline_manifest=baseline_manifest,
             baseline_rows=baseline_rows,
@@ -401,15 +434,31 @@ def main(argv: list[str] | None = None) -> int:
                     **asdict(planned),
                     **run_command(planned.replay_argv, cwd=SPIDER_ROOT),
                 }
-        mjx_rows.append(_attach_artifacts(mjx_row, planned.output_dir))
-        replay_rows.append(_attach_artifacts(replay_row, planned.replay_output_dir))
+        attached_mjx_row = _attach_artifacts(mjx_row, planned.output_dir)
+        attached_replay_row = _attach_artifacts(replay_row, planned.replay_output_dir)
+        mjx_rows.append(attached_mjx_row)
+        replay_rows.append(attached_replay_row)
         if not args.dry_run:
+            write_acceptance_row_sidecar(attached_mjx_row, planned.output_dir)
+            write_acceptance_row_sidecar(attached_replay_row, planned.replay_output_dir)
+        if not args.dry_run and not args.skip_report:
             write_partial_report(
                 output_dir,
                 plan=plan,
                 mjx_rows=mjx_rows,
                 replay_rows=replay_rows,
             )
+
+    if args.skip_report:
+        print(str(output_dir))
+        rows_ok = all(
+            row.get("status") == "ok" and row.get("returncode") == 0
+            for row in (
+                *mjx_rows,
+                *replay_rows,
+            )
+        )
+        return 0 if rows_ok else 1
 
     report = _build_report(
         baseline_manifest=baseline_manifest,
@@ -429,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def load_existing_acceptance_rows(output_dir: Path) -> dict[str, list[dict[str, Any]]]:
-    """Load reusable row candidates from the newest prior report files."""
+    """Load reusable row candidates from reports and row sidecars."""
 
     candidates = [
         output_dir / ACCEPTANCE_REPORT_NAME,
@@ -465,7 +514,38 @@ def load_existing_acceptance_rows(output_dir: Path) -> dict[str, list[dict[str, 
                 row = dict(row)
                 row["reuse_source_report"] = str(path)
                 rows_by_kind[kind].append(row)
+    for kind, row in _load_acceptance_row_sidecars(output_dir):
+        rows_by_kind[kind].append(row)
     return rows_by_kind
+
+
+def write_acceptance_row_sidecar(row: dict[str, Any], output_dir: str | Path) -> Path:
+    output_path = Path(output_dir).expanduser()
+    output_path.mkdir(parents=True, exist_ok=True)
+    path = output_path / ACCEPTANCE_ROW_SIDECAR_NAME
+    _write_json_atomic(path, row)
+    return path
+
+
+def _load_acceptance_row_sidecars(output_dir: Path) -> list[tuple[str, dict[str, Any]]]:
+    rows: list[tuple[str, dict[str, Any]]] = []
+    for path in sorted(output_dir.rglob(ACCEPTANCE_ROW_SIDECAR_NAME)):
+        kind = path.parent.name
+        if kind not in {"mjx", "replay"}:
+            continue
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        key = _acceptance_row_key(payload)
+        if key is None:
+            continue
+        row = dict(payload)
+        row["reuse_source_sidecar"] = str(path)
+        rows.append((kind, row))
+    return rows
 
 
 def _paired_acceptance_row_keys(payload: dict[str, Any]) -> set[tuple[str, int]]:

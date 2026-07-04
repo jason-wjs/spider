@@ -1027,6 +1027,112 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(len(report["planned_runs"]), 6)
         self.assertFalse(report["motion_results"]["jump"]["mjx_passed"])
 
+    def test_build_acceptance_plan_can_select_single_parallel_shard_row(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                    "--only-motion",
+                    "walk",
+                    "--only-seed",
+                    "1",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0].motion, "walk")
+        self.assertEqual(plan[0].seed, 1)
+
+    def test_main_skip_report_writes_row_sidecars_for_parallel_shards(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                out_dir = runner._output_dir_from_argv(argv)
+                is_replay = "--saved-command" in argv
+                _write_artifacts(out_dir, include_command=not is_replay)
+                args = runner.parse_args(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--only-motion",
+                        "jump",
+                        "--only-seed",
+                        "0",
+                    ]
+                )
+                plan = runner.build_acceptance_plan(
+                    args,
+                    json.loads(manifest_path.read_text()),
+                )
+                planned = plan[0]
+                payload = (
+                    _replay_metrics_payload(planned)
+                    if is_replay
+                    else _mjx_metrics_payload(planned)
+                )
+                (out_dir / "metrics.json").write_text(json.dumps(payload))
+                artifact_names = ["metrics.json", "rollout.npz"]
+                if not is_replay:
+                    artifact_names.append("mpc_command.npz")
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "command_wall_time_sec": 1.0,
+                    "command_start_time_ns": min(
+                        (out_dir / name).stat().st_mtime_ns for name in artifact_names
+                    ) - 1_000_000,
+                }
+                row.update(runner._row_from_metrics(out_dir / "metrics.json"))
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--skip-report",
+                        "--only-motion",
+                        "jump",
+                        "--only-seed",
+                        "0",
+                    ]
+                )
+
+            rows = runner.load_existing_acceptance_rows(output_dir)
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((output_dir / "acceptance_report.json").exists())
+        self.assertFalse((output_dir / "acceptance_report.partial.json").exists())
+        self.assertEqual(len(rows["mjx"]), 1)
+        self.assertEqual(len(rows["replay"]), 1)
+
     def test_main_reuses_existing_ok_rows_when_requested(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
