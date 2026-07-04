@@ -181,11 +181,31 @@ class _RecordingLax:
         self.calls.append({"steps": len(steps)})
         carry = init
         signature = self._carry_signature(carry)
+        outputs = []
         for step in steps:
             self.assert_valid_carry(carry, signature)
-            carry, _ = fn(carry, step)
+            carry, output = fn(carry, step)
+            outputs.append(output)
             self.assert_valid_carry(carry, signature)
-        return carry, None
+        return carry, self._stack_outputs(outputs)
+
+    def _stack_outputs(self, values):
+        if not values:
+            return None
+        first = values[0]
+        if first is None:
+            return None
+        if isinstance(first, tuple):
+            return tuple(
+                self._stack_outputs([value[index] for value in values])
+                for index in range(len(first))
+            )
+        if isinstance(first, dict):
+            return {
+                key: self._stack_outputs([value[key] for value in values])
+                for key in first
+            }
+        return np.stack(values, axis=0)
 
     def assert_valid_carry(self, value, signature) -> None:
         actual = self._carry_signature(value)
@@ -1150,6 +1170,32 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertEqual(scores.shape, (2,))
         self.assertEqual(lax.calls, [{"steps": 3}])
 
+    def test_rollout_candidate_controls_uses_lax_scan_when_available(self) -> None:
+        samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=3)
+        lax = _RecordingLax()
+        runtime = type(
+            "ScanRuntime",
+            (),
+            {
+                "jnp": _NumpyJnp(),
+                "jax": type("ScanJax", (), {"lax": lax})(),
+            },
+        )()
+
+        trace = rollout_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=_physics_step,
+        )
+
+        self.assertEqual(trace["qpos"].shape, (4, 1, QPOS_DIM))
+        self.assertEqual(trace["qvel"].shape, (4, 1, QVEL_DIM))
+        self.assertEqual(lax.calls, [{"steps": 3}])
+
     def test_jax_lax_scan_casts_bool_contact_valid_carry_to_float(self) -> None:
         try:
             import jax
@@ -1338,6 +1384,39 @@ class MjxRolloutTest(unittest.TestCase):
                 )
             },
             last_action=np.zeros((2, ACTION_DIM), dtype=np.float32),
+        )
+        lax = _RecordingLax()
+        runtime = type(
+            "ScanRuntime",
+            (),
+            {
+                "jnp": _NumpyJnp(),
+                "jax": type("ScanJax", (), {"lax": lax})(),
+            },
+        )()
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=_physics_step,
+        )
+
+        self.assertEqual(scores.shape, (2,))
+        self.assertEqual(lax.calls, [{"steps": 3}])
+
+    def test_lax_scan_broadcasts_live_obs_history_to_sample_batch(self) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+        reference["obs_state"] = JaxObsState(
+            history={
+                name: np.zeros((1, *spec), dtype=np.float32)
+                for name, spec in OBS_FIELD_SPECS.items()
+                if name not in {"command", "motion_ref_ang_vel"}
+            },
+            last_action=np.zeros((1, ACTION_DIM), dtype=np.float32),
         )
         lax = _RecordingLax()
         runtime = type(

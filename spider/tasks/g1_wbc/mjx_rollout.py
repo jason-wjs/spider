@@ -487,6 +487,101 @@ def rollout_candidate_controls(
 
     qpos_trace = [robot_state["qpos"]]
     qvel_trace = [robot_state["qvel"]]
+    scan = _lax_scan(runtime)
+    if scan is not None:
+        initial_qpos = robot_state["qpos"]
+        initial_qvel = robot_state["qvel"]
+        obs_state = _materialized_obs_state(obs_state, sample_count, jnp=jnp)
+        carry = (
+            robot_state,
+            obs_state.history,
+            obs_state.last_action,
+            prev_control,
+            prev_joint_vel,
+            prev_joint_acc,
+            prev_contact,
+            prev_contact_valid,
+            prev_contact_force,
+            prev_contact_force_valid,
+        )
+
+        def scan_step(carry, step_index):
+            (
+                robot_state,
+                obs_history,
+                last_action,
+                prev_control,
+                prev_joint_vel,
+                prev_joint_acc,
+                prev_contact,
+                prev_contact_valid,
+                prev_contact_force,
+                prev_contact_force_valid,
+            ) = carry
+            next_values = _rollout_trace_step(
+                step_index,
+                robot_state=robot_state,
+                obs_state=JaxObsState(history=obs_history, last_action=last_action),
+                prev_control=prev_control,
+                prev_joint_vel=prev_joint_vel,
+                prev_joint_acc=prev_joint_acc,
+                prev_contact=prev_contact,
+                prev_contact_valid=prev_contact_valid,
+                prev_contact_force=prev_contact_force,
+                prev_contact_force_valid=prev_contact_force_valid,
+                samples=samples,
+                reference=step_reference,
+                obs_indices=obs_indices,
+                default_joint_pos=default_joint_pos,
+                actor_params=actor_params,
+                model_bundle=model_bundle,
+                obs_initialized=_step_obs_initialized(
+                    obs_initialized,
+                    step_index,
+                    jnp=jnp,
+                ),
+                physics_step_fn=physics_step_fn,
+                runtime=runtime,
+                sample_count=sample_count,
+            )
+            next_robot_state = next_values["robot_state"]
+            return (
+                next_robot_state,
+                next_values["obs_state"].history,
+                next_values["obs_state"].last_action,
+                next_values["prev_control"],
+                next_values["prev_joint_vel"],
+                next_values["prev_joint_acc"],
+                next_values["prev_contact"],
+                next_values["prev_contact_valid"],
+                next_values["prev_contact_force"],
+                next_values["prev_contact_force_valid"],
+            ), (next_robot_state["qpos"], next_robot_state["qvel"])
+
+        carry, trace = scan(scan_step, carry, jnp.arange(horizon))
+        qpos_steps, qvel_steps = trace
+        robot_state = carry[0]
+        obs_state = JaxObsState(history=carry[1], last_action=carry[2])
+        return {
+            "qpos": jnp.concatenate(
+                [jnp.expand_dims(initial_qpos, 0), qpos_steps],
+                axis=0,
+            ),
+            "qvel": jnp.concatenate(
+                [jnp.expand_dims(initial_qvel, 0), qvel_steps],
+                axis=0,
+            ),
+            "final_robot_state": robot_state,
+            "final_obs_state": obs_state,
+            "final_prev_control": carry[3],
+            "final_prev_joint_vel": carry[4],
+            "final_prev_joint_acc": carry[5],
+            "final_prev_contact": carry[6],
+            "final_prev_contact_valid": carry[7],
+            "final_prev_contact_force": carry[8],
+            "final_prev_contact_force_valid": carry[9],
+        }
+
     for step_index in range(horizon):
         next_values = _rollout_trace_step(
             step_index,
@@ -777,8 +872,19 @@ def _materialized_obs_state(
     if obs_state.history is not None:
         for name, value in obs_state.history.items():
             if name in history and value is not None:
-                history[name] = value
-    return JaxObsState(history=history, last_action=obs_state.last_action)
+                history[name] = _ensure_batch(
+                    jnp.asarray(value),
+                    sample_count,
+                    jnp=jnp,
+                )
+    return JaxObsState(
+        history=history,
+        last_action=_ensure_batch(
+            jnp.asarray(obs_state.last_action),
+            sample_count,
+            jnp=jnp,
+        ),
+    )
 
 
 def _zero_obs_history(sample_count: int, *, jnp):

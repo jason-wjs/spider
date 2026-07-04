@@ -168,6 +168,104 @@ def run_g1_wbc_mjx_mpc(
                 model_bundle,
             )
             _block_trace_until_ready(warmup_execute_trace)
+            if warmup_execute_steps < total_steps:
+                live_warmup_controls = _shift_jax_controls(
+                    warmup_updated_controls,
+                    execute_steps=warmup_execute_steps,
+                    horizon=horizon,
+                    use_warm_start=use_warm_start,
+                    runtime=runtime,
+                )
+                live_warmup_reference = _window_reference(
+                    rollout_reference_factory,
+                    start=warmup_execute_steps,
+                    motion=motion,
+                    controls=live_warmup_controls,
+                    actor_params=actor_params,
+                    model_bundle=model_bundle,
+                    runtime=runtime,
+                    initial_robot_state=_required_trace_value(
+                        warmup_execute_trace,
+                        "final_robot_state",
+                    ),
+                    obs_state=warmup_execute_trace.get("final_obs_state"),
+                    obs_initialized=True,
+                    prev_control=warmup_execute_trace.get(
+                        "final_prev_control",
+                        warmup_execute_controls[-1:],
+                    ),
+                    prev_joint_acc=warmup_execute_trace.get("final_prev_joint_acc"),
+                    prev_contact=warmup_execute_trace.get("final_prev_contact"),
+                    prev_contact_valid=warmup_execute_trace.get(
+                        "final_prev_contact_valid"
+                    ),
+                    prev_contact_force=warmup_execute_trace.get(
+                        "final_prev_contact_force"
+                    ),
+                    prev_contact_force_valid=warmup_execute_trace.get(
+                        "final_prev_contact_force_valid"
+                    ),
+                )
+                live_warmup_result = optimizer(
+                    config=window_config,
+                    state={"rollout_fn": rollout_scorer or _placeholder_rollout_scores},
+                    controls=live_warmup_controls,
+                    reference=live_warmup_reference,
+                    actor_params=actor_params,
+                    model_bundle=model_bundle,
+                    key=(int(seed), _JIT_WARMUP_KEY_FOLD + 1),
+                    runtime=runtime,
+                )
+                _block_window_result_until_ready(live_warmup_result)
+                live_warmup_execute_steps = min(
+                    control_steps,
+                    total_steps - warmup_execute_steps,
+                )
+                live_warmup_updated_controls = _validated_jax_controls(
+                    live_warmup_result.updated_controls,
+                    horizon=horizon,
+                    runtime=runtime,
+                )
+                live_warmup_execute_controls = live_warmup_updated_controls[
+                    :live_warmup_execute_steps
+                ]
+                live_warmup_execute_reference = _window_reference(
+                    rollout_reference_factory,
+                    start=warmup_execute_steps,
+                    motion=motion,
+                    controls=live_warmup_execute_controls,
+                    actor_params=actor_params,
+                    model_bundle=model_bundle,
+                    runtime=runtime,
+                    initial_robot_state=_required_trace_value(
+                        warmup_execute_trace,
+                        "final_robot_state",
+                    ),
+                    obs_state=warmup_execute_trace.get("final_obs_state"),
+                    obs_initialized=True,
+                    prev_control=warmup_execute_trace.get(
+                        "final_prev_control",
+                        warmup_execute_controls[-1:],
+                    ),
+                    prev_joint_acc=warmup_execute_trace.get("final_prev_joint_acc"),
+                    prev_contact=warmup_execute_trace.get("final_prev_contact"),
+                    prev_contact_valid=warmup_execute_trace.get(
+                        "final_prev_contact_valid"
+                    ),
+                    prev_contact_force=warmup_execute_trace.get(
+                        "final_prev_contact_force"
+                    ),
+                    prev_contact_force_valid=warmup_execute_trace.get(
+                        "final_prev_contact_force_valid"
+                    ),
+                )
+                live_warmup_trace = rollout_tracer(
+                    live_warmup_execute_controls[None, :, :],
+                    live_warmup_execute_reference,
+                    actor_params,
+                    model_bundle,
+                )
+                _block_trace_until_ready(live_warmup_trace)
         jit_warmup_wall_time_sec = time.perf_counter() - warmup_start
         jit_warmup_enabled = True
         del warmup_result, warmup_reference
