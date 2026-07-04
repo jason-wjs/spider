@@ -160,6 +160,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "rerunning that row. Incomplete or failed rows are rerun."
         ),
     )
+    parser.add_argument(
+        "--only-motion",
+        action="append",
+        choices=MOTIONS,
+        default=None,
+        help="Run only the selected motion. Repeat to include multiple motions.",
+    )
+    parser.add_argument(
+        "--only-seed",
+        action="append",
+        type=int,
+        choices=SEEDS,
+        default=None,
+        help="Run only the selected seed. Repeat to include multiple seeds.",
+    )
+    parser.add_argument(
+        "--skip-manifest",
+        action="store_true",
+        help="Run selected row shards without writing baseline_manifest.json.",
+    )
     return parser.parse_args(argv)
 
 
@@ -172,9 +192,15 @@ def build_stage0_commands(args: argparse.Namespace) -> list[Stage0Command]:
         "jump": args.jump_motion.expanduser().resolve(),
         "walk": args.walk_motion.expanduser().resolve(),
     }
+    selected_motions = set(args.only_motion) if args.only_motion else set(MOTIONS)
+    selected_seeds = set(args.only_seed) if args.only_seed else set(SEEDS)
     commands: list[Stage0Command] = []
     for motion_name in MOTIONS:
+        if motion_name not in selected_motions:
+            continue
         for seed in SEEDS:
+            if seed not in selected_seeds:
+                continue
             run_output_dir = output_root / motion_name / f"seed_{seed}"
             command = [
                 args.python_executable,
@@ -876,6 +902,10 @@ def main(argv: list[str] | None = None) -> int:
             if execution["returncode"] != 0 and worst_returncode == 0:
                 worst_returncode = int(execution["returncode"])
         rows.append(attach_artifact_paths(row))
+
+    if args.skip_manifest:
+        print(str(output_dir))
+        return worst_returncode
 
     manifest_path = write_manifest(
         output_dir,

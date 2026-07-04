@@ -154,6 +154,35 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                 ):
                     self.assertIn(flag, command.argv)
 
+    def test_build_stage0_commands_can_select_single_parallel_shard_row(self) -> None:
+        runner = load_runner()
+        args = runner.parse_args(
+            [
+                "--jump-motion",
+                "/tmp/missing/jump.npz",
+                "--walk-motion",
+                "/tmp/missing/walk.npz",
+                "--checkpoint",
+                "model.pt",
+                "--reward-weights",
+                "/tmp/missing/reward.json",
+                "--output-dir",
+                "/tmp/stage0",
+                "--dry-run",
+                "--only-motion",
+                "walk",
+                "--only-seed",
+                "1",
+            ]
+        )
+
+        commands = runner.build_stage0_commands(args)
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0].motion_name, "walk")
+        self.assertEqual(commands[0].seed, 1)
+        self.assertTrue(commands[0].output_dir.endswith("/walk/seed_1"))
+
     def test_main_fails_fast_when_stage0_input_paths_are_missing(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1418,6 +1447,55 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertTrue(
             all(len(value) == 64 for value in manifest["input_sha256"].values())
         )
+
+    def test_main_skip_manifest_does_not_write_partial_shard_manifest(self) -> None:
+        import torch
+
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            jump_motion.write_text("jump")
+            walk_motion.write_text("walk")
+            reward_weights.write_text("{}")
+            torch.save(
+                {
+                    "actor_state_dict": {
+                        "obs_normalizer._mean": torch.zeros(1, 886),
+                        "obs_normalizer._std": torch.ones(1, 886),
+                        "mlp.0.weight": torch.zeros(1, 1),
+                    }
+                },
+                checkpoint,
+            )
+
+            exit_code = runner.main(
+                [
+                    "--jump-motion",
+                    str(jump_motion),
+                    "--walk-motion",
+                    str(walk_motion),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--reward-weights",
+                    str(reward_weights),
+                    "--output-dir",
+                    str(output_root),
+                    "--dry-run",
+                    "--skip-manifest",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "2",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertFalse((output_root / "baseline_manifest.json").exists())
 
 
 def _passing_metrics() -> dict[str, float | bool]:
