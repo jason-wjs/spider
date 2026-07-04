@@ -268,10 +268,16 @@ class MjxComponentsTest(unittest.TestCase):
                 "contact": np.zeros((samples, 2), dtype=np.float32),
             }
 
+        def command_reference_fn(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError(
+                "guided candidate trace should not compile command references"
+            )
+
         components = build_mjx_rollout_components(
             runtime=_Runtime(),
             physics_step_fn=physics_step_fn,
-            command_reference_fn=lambda *args, **kwargs: {},
+            command_reference_fn=command_reference_fn,
             use_guided_candidate=True,
             guided_root_pos_gain=0.5,
             guided_joint_gain=0.5,
@@ -286,6 +292,7 @@ class MjxComponentsTest(unittest.TestCase):
             actor_params=_constant_actor(),
             model_bundle=_model_bundle(),
             runtime=_Runtime(),
+            obs_initialized=True,
         )
 
         guided = reference["guided_controls"]

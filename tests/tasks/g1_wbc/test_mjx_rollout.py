@@ -26,6 +26,7 @@ from spider.tasks.g1_wbc.mjx_policy import JaxActorParams
 from spider.tasks.g1_wbc.mjx_rollout import (
     controls_to_qpos,
     make_rollout_scorer,
+    make_rollout_tracer,
     rollout_candidate_controls,
     score_candidate_controls,
 )
@@ -1149,6 +1150,69 @@ class MjxRolloutTest(unittest.TestCase):
         self.assertEqual(scores.shape, (2,))
         self.assertEqual(lax.calls, [{"steps": 3}])
 
+    def test_jax_lax_scan_casts_bool_contact_valid_carry_to_float(self) -> None:
+        try:
+            import jax
+            import jax.numpy as jnp
+        except Exception as exc:
+            self.skipTest(f"JAX unavailable: {exc}")
+
+        samples = jnp.zeros((1, 2, QPOS_DIM - 1), dtype=jnp.float32)
+        reference = _rollout_reference(samples=1, horizon=2)
+        reference["prev_contact"] = np.zeros(2, dtype=np.float32)
+        reference["prev_contact_valid"] = False
+        reference["prev_contact_force"] = np.zeros(2, dtype=np.float32)
+        reference["prev_contact_force_valid"] = False
+        runtime = type("JaxRuntime", (), {"jnp": jnp, "jax": jax})()
+
+        def jax_physics_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            del model_bundle, robot_state, step_index
+            jnp = runtime.jnp
+            sample_count = int(command_qpos.shape[0])
+            body_count = len(MUJOCO_BODY_NAMES)
+            qvel = jnp.zeros((sample_count, QVEL_DIM), dtype=jnp.float32)
+            qvel = qvel.at[:, 6:].set(action)
+            body_pos = jnp.zeros((sample_count, body_count, 3), dtype=jnp.float32)
+            body_pos = body_pos.at[:, 0, :3].set(command_qpos[:, :3])
+            body_quat = jnp.zeros((sample_count, body_count, 4), dtype=jnp.float32)
+            body_quat = body_quat.at[..., 0].set(1.0)
+            next_robot = {
+                "qpos": command_qpos,
+                "qvel": qvel,
+                "body_pos_w": body_pos,
+                "body_quat_w": body_quat,
+                "body_ang_vel_w": jnp.zeros(
+                    (sample_count, body_count, 3),
+                    dtype=jnp.float32,
+                ),
+            }
+            score_state = {
+                "root_pos": command_qpos[:, :3],
+                "body_pos": body_pos[:, :2],
+                "ee_pos": body_pos[:, :1],
+                "contact": jnp.zeros((sample_count, 2), dtype=jnp.float32),
+            }
+            return next_robot, score_state
+
+        scores = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=jax_physics_step,
+        )
+
+        self.assertEqual(tuple(np.asarray(scores).shape), (1,))
+
     def test_lax_scan_carries_contact_force_delta_after_first_step(self) -> None:
         samples = np.zeros((1, 2, QPOS_DIM - 1), dtype=np.float32)
         reference = _rollout_reference(samples=1, horizon=2)
@@ -1326,6 +1390,89 @@ class MjxRolloutTest(unittest.TestCase):
 
         self.assertEqual(result.updated_controls.shape, (3, QPOS_DIM - 1))
         self.assertEqual(result.execute_chunk.shape, (2, QPOS_DIM - 1))
+
+    def test_rollout_tracer_jits_once_per_model_bundle(self) -> None:
+        jax = _RecordingJitJax()
+        runtime = type("JitRuntime", (), {"jnp": _NumpyJnp(), "jax": jax})()
+        tracer = make_rollout_tracer(
+            runtime=runtime,
+            physics_step_fn=_physics_step,
+        )
+        samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=3)
+        actor_params = _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32))
+        model_bundle = object()
+
+        first = tracer(samples, reference, actor_params, model_bundle)
+        second = tracer(samples, reference, actor_params, model_bundle)
+
+        self.assertEqual(jax.jit_calls, 1)
+        np.testing.assert_allclose(first["qpos"], second["qpos"])
+        self.assertIn("final_robot_state", first)
+
+    def test_rollout_tracer_jit_materializes_missing_obs_history(self) -> None:
+        try:
+            import jax
+            import jax.numpy as jnp
+        except Exception as exc:
+            self.skipTest(f"JAX unavailable: {exc}")
+
+        samples = jnp.zeros((1, 2, QPOS_DIM - 1), dtype=jnp.float32)
+        reference = _rollout_reference(samples=1, horizon=2)
+        reference["obs_initialized"] = False
+        reference["obs_state"] = JaxObsState(
+            history=None,
+            last_action=np.zeros((1, ACTION_DIM), dtype=np.float32),
+        )
+        runtime = type("JaxRuntime", (), {"jnp": jnp, "jax": jax})()
+
+        def jax_physics_step(
+            model_bundle,
+            robot_state,
+            command_qpos,
+            action,
+            step_index,
+            *,
+            runtime,
+        ):
+            del model_bundle, robot_state, step_index
+            jnp = runtime.jnp
+            sample_count = int(command_qpos.shape[0])
+            body_count = len(MUJOCO_BODY_NAMES)
+            qvel = jnp.zeros((sample_count, QVEL_DIM), dtype=jnp.float32)
+            qvel = qvel.at[:, 6:].set(action)
+            body_pos = jnp.zeros((sample_count, body_count, 3), dtype=jnp.float32)
+            body_pos = body_pos.at[:, 0, :3].set(command_qpos[:, :3])
+            body_quat = jnp.zeros((sample_count, body_count, 4), dtype=jnp.float32)
+            body_quat = body_quat.at[..., 0].set(1.0)
+            next_robot = {
+                "qpos": command_qpos,
+                "qvel": qvel,
+                "body_pos_w": body_pos,
+                "body_quat_w": body_quat,
+                "body_ang_vel_w": jnp.zeros(
+                    (sample_count, body_count, 3),
+                    dtype=jnp.float32,
+                ),
+            }
+            return next_robot, {
+                "contact": jnp.zeros((sample_count, 2), dtype=jnp.float32),
+            }
+
+        tracer = make_rollout_tracer(
+            runtime=runtime,
+            physics_step_fn=jax_physics_step,
+        )
+
+        trace = tracer(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+        )
+
+        self.assertEqual(tuple(np.asarray(trace["qpos"]).shape), (3, 1, QPOS_DIM))
+        self.assertIsNotNone(trace["final_obs_state"].history)
 
     def test_rollout_scorer_jits_once_per_model_bundle(self) -> None:
         jax = _RecordingJitJax()

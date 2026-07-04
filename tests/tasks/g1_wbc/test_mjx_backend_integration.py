@@ -640,6 +640,69 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(result.metadata["physics_step_count_max"], 40)
         self.assertEqual(result.metadata["physics_step_count_windows"], 40)
 
+    def test_jax_warmup_primes_execute_rollout_tracer_before_steady_loop(self) -> None:
+        events: list[str] = []
+
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            events.append("score")
+            sample_array = np.asarray(samples, dtype=np.float32)
+            return {
+                "score": np.arange(int(sample_array.shape[0]), dtype=np.float32),
+                "physics_step_count": np.full(
+                    int(sample_array.shape[0]),
+                    40,
+                    dtype=np.float32,
+                ),
+            }
+
+        def rollout_reference_factory(**kwargs):
+            events.append("reference")
+            return {"start": kwargs["start"]}
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del samples, actor_params, model_bundle
+            events.append("trace")
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((1, QPOS_DIM), dtype=np.float32)
+            qpos[:, 3] = 1.0
+            qvel = np.zeros((1, QVEL_DIM), dtype=np.float32)
+            body_quat = np.zeros((1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            return {
+                "final_robot_state": {
+                    "qpos": qpos,
+                    "qvel": qvel,
+                    "body_pos_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                    "body_quat_w": body_quat,
+                    "body_lin_vel_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                    "body_ang_vel_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                },
+                "final_obs_state": SimpleNamespace(history={}, last_action=None),
+                "final_prev_control": np.zeros((1, QPOS_DIM - 1), dtype=np.float32),
+                "final_prev_joint_acc": np.zeros((1, ACTION_DIM), dtype=np.float32),
+                "final_prev_contact": np.zeros((1, 2), dtype=np.float32),
+                "final_prev_contact_valid": np.ones((1,), dtype=np.float32),
+                "final_prev_contact_force": np.zeros((1, 2), dtype=np.float32),
+                "final_prev_contact_force_valid": np.ones((1,), dtype=np.float32),
+            }
+
+        result = _run_with_fakes(
+            optimizer=None,
+            rollout_factory=_fake_rollout_result,
+            runtime=_FakeOptimizerRuntime(),
+            rollout_scorer=rollout_scorer,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+        )
+
+        self.assertTrue(result.metadata["accepted"])
+        score_indices = [index for index, event in enumerate(events) if event == "score"]
+        trace_indices = [index for index, event in enumerate(events) if event == "trace"]
+        self.assertGreaterEqual(len(score_indices), 2)
+        self.assertGreaterEqual(len(trace_indices), 2)
+        self.assertLess(trace_indices[0], score_indices[1])
+
     def test_default_optimizer_uses_explicit_rollout_reference_factory(self) -> None:
         references: list[dict[str, object]] = []
         captured_guided: list[np.ndarray] = []

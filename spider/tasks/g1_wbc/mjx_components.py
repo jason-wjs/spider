@@ -17,7 +17,7 @@ from spider.tasks.g1_wbc.mjx_reference import (
     build_mjx_rollout_reference,
     default_joint_pos,
 )
-from spider.tasks.g1_wbc.mjx_rollout import make_rollout_scorer, rollout_candidate_controls
+from spider.tasks.g1_wbc.mjx_rollout import make_rollout_scorer, make_rollout_tracer
 from spider.tasks.g1_wbc.mjx_scoring import JaxScoreWeights
 
 
@@ -76,16 +76,16 @@ def build_mjx_rollout_components(
         command_reference_fn=command_reference_fn,
     )
 
-    def rollout_tracer(samples, reference, actor_params, model_bundle):
-        return rollout_candidate_controls(
-            samples,
-            reference,
-            actor_params,
-            model_bundle,
-            runtime=runtime,
-            physics_step_fn=physics_step_fn,
-            command_reference_fn=command_reference_fn,
-        )
+    rollout_tracer = make_rollout_tracer(
+        runtime=runtime,
+        physics_step_fn=physics_step_fn,
+        command_reference_fn=command_reference_fn,
+    )
+    guided_rollout_tracer = make_rollout_tracer(
+        runtime=runtime,
+        physics_step_fn=physics_step_fn,
+        command_reference_fn=None,
+    )
 
     def rollout_reference_factory(**kwargs):
         reference_kwargs = dict(kwargs)
@@ -98,14 +98,14 @@ def build_mjx_rollout_components(
         if bool(use_guided_candidate):
             horizon = int(reference["base_qpos"].shape[0])
             zero_controls = reference_runtime.jnp.zeros((1, horizon, QPOS_DIM - 1))
-            trace = rollout_candidate_controls(
+            trace_reference = dict(reference)
+            if getattr(trace_reference.get("obs_state"), "history", None) is None:
+                trace_reference["obs_initialized"] = False
+            trace = guided_rollout_tracer(
                 zero_controls,
-                reference,
+                trace_reference,
                 reference_kwargs["actor_params"],
                 reference_kwargs["model_bundle"],
-                runtime=reference_runtime,
-                physics_step_fn=physics_step_fn,
-                command_reference_fn=command_reference_fn,
             )
             reference = dict(reference)
             reference["guided_controls"] = guided_controls_from_trace(

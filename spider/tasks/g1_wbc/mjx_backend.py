@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import fields, is_dataclass
 from typing import Any, Callable
 
 import numpy as np
@@ -143,6 +144,30 @@ def run_g1_wbc_mjx_mpc(
             runtime=runtime,
         )
         _block_window_result_until_ready(warmup_result)
+        if rollout_tracer is not None:
+            warmup_execute_steps = min(control_steps, total_steps)
+            warmup_updated_controls = _validated_jax_controls(
+                warmup_result.updated_controls,
+                horizon=horizon,
+                runtime=runtime,
+            )
+            warmup_execute_controls = warmup_updated_controls[:warmup_execute_steps]
+            warmup_execute_reference = _window_reference(
+                rollout_reference_factory,
+                start=0,
+                motion=motion,
+                controls=warmup_execute_controls,
+                actor_params=actor_params,
+                model_bundle=model_bundle,
+                runtime=runtime,
+            )
+            warmup_execute_trace = rollout_tracer(
+                warmup_execute_controls[None, :, :],
+                warmup_execute_reference,
+                actor_params,
+                model_bundle,
+            )
+            _block_trace_until_ready(warmup_execute_trace)
         jit_warmup_wall_time_sec = time.perf_counter() - warmup_start
         jit_warmup_enabled = True
         del warmup_result, warmup_reference
@@ -402,6 +427,22 @@ def _block_window_result_until_ready(window_result) -> None:
     _block_until_ready(getattr(window_result, "execute_chunk", None))
     for value in getattr(window_result, "info", {}).values():
         _block_until_ready(value)
+
+
+def _block_trace_until_ready(trace) -> None:
+    if isinstance(trace, dict):
+        for value in trace.values():
+            _block_trace_until_ready(value)
+        return
+    if isinstance(trace, (list, tuple)):
+        for value in trace:
+            _block_trace_until_ready(value)
+        return
+    if is_dataclass(trace):
+        for field in fields(trace):
+            _block_trace_until_ready(getattr(trace, field.name))
+        return
+    _block_until_ready(trace)
 
 
 def _block_until_ready(value) -> None:

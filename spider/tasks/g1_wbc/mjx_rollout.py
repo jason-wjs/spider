@@ -70,6 +70,50 @@ def make_rollout_scorer(
     return rollout_fn
 
 
+def make_rollout_tracer(
+    *,
+    runtime,
+    physics_step_fn: PhysicsStepFn,
+    command_reference_fn: CommandReferenceFn | None = None,
+):
+    """Bind runtime dependencies into a jitted rollout trace helper."""
+
+    jitted_by_model_id: dict[int, Callable[..., object]] = {}
+
+    def trace_fn(samples, reference, actor_params, model_bundle):
+        jit = getattr(getattr(runtime, "jax", None), "jit", None)
+        if jit is None:
+            return rollout_candidate_controls(
+                samples,
+                reference,
+                actor_params,
+                model_bundle,
+                runtime=runtime,
+                physics_step_fn=physics_step_fn,
+                command_reference_fn=command_reference_fn,
+            )
+        model_key = id(model_bundle)
+        compiled = jitted_by_model_id.get(model_key)
+        if compiled is None:
+
+            def trace_for_model(samples, reference, actor_params):
+                return rollout_candidate_controls(
+                    samples,
+                    reference,
+                    actor_params,
+                    model_bundle,
+                    runtime=runtime,
+                    physics_step_fn=physics_step_fn,
+                    command_reference_fn=command_reference_fn,
+                )
+
+            compiled = jit(trace_for_model)
+            jitted_by_model_id[model_key] = compiled
+        return compiled(samples, reference, actor_params)
+
+    return trace_fn
+
+
 def controls_to_qpos(controls, base_qpos, joint_low, joint_high, *, jnp):
     """Apply SPIDER residual controls to a base qpos trajectory."""
 
@@ -382,6 +426,7 @@ def rollout_candidate_controls(
         jnp=jnp,
     )
     obs_state = _initial_obs_state(reference, sample_count, jnp=jnp)
+    obs_state = _materialized_obs_state(obs_state, sample_count, jnp=jnp)
     obs_indices = _required(reference, "obs_indices")
     if not isinstance(obs_indices, JaxObsIndices):
         raise TypeError("reference['obs_indices'] must be a JaxObsIndices")
@@ -967,7 +1012,11 @@ def _initial_prev_contact(reference: Mapping[str, object], sample_count: int, *,
     if valid is None:
         valid = jnp.zeros((sample_count,))
     else:
-        valid = _ensure_batch(jnp.asarray(valid), sample_count, jnp=jnp)
+        valid = _ensure_batch(
+            jnp.asarray(valid) + jnp.zeros(()),
+            sample_count,
+            jnp=jnp,
+        )
     return contact, valid
 
 
@@ -991,7 +1040,11 @@ def _initial_prev_contact_force(
     if valid is None:
         valid = jnp.zeros((sample_count,))
     else:
-        valid = _ensure_batch(jnp.asarray(valid), sample_count, jnp=jnp)
+        valid = _ensure_batch(
+            jnp.asarray(valid) + jnp.zeros(()),
+            sample_count,
+            jnp=jnp,
+        )
     return contact_force, valid
 
 
