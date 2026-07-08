@@ -63,6 +63,10 @@ class _NumpyJnp:
         return np.minimum(left, right)
 
     @staticmethod
+    def max(value, axis=None):
+        return np.max(value, axis=axis)
+
+    @staticmethod
     def stack(values, axis=0):
         return np.stack(values, axis=axis)
 
@@ -302,7 +306,7 @@ def _rollout_reference(
         "default_joint_pos": np.zeros(ACTION_DIM, dtype=np.float32),
         "joint_low": np.full(ACTION_DIM, -0.5, dtype=np.float32),
         "joint_high": np.full(ACTION_DIM, 0.5, dtype=np.float32),
-        "prev_control": np.zeros((samples, QPOS_DIM - 1), dtype=np.float32),
+        "prev_control": np.zeros((samples, ACTION_DIM), dtype=np.float32),
         "score_weights": JaxScoreWeights({"root_pos": 1.0, "control_delta": 0.05}),
     }
 
@@ -727,18 +731,27 @@ class MjxRolloutTest(unittest.TestCase):
             qpos[:, 0] += 0.2
             qvel = np.zeros((samples, QVEL_DIM), dtype=np.float32)
             body_pos = np.zeros((samples, bodies, 3), dtype=np.float32)
+            contact = np.zeros((samples, 2), dtype=np.float32)
+            contact[:, 0] = 1.0
+            floor_contact = np.zeros((samples, 3), dtype=np.float32)
+            floor_contact[:, :2] = contact
             next_robot = {
                 "qpos": qpos,
                 "qvel": qvel,
                 "body_pos_w": body_pos,
                 "body_quat_w": _identity_body_quat((samples, bodies)),
+                "body_lin_vel_w": np.full((samples, bodies, 3), 0.4, dtype=np.float32),
                 "body_ang_vel_w": np.zeros((samples, bodies, 3), dtype=np.float32),
             }
             return next_robot, {
                 "root_pos": qpos[:, :3],
                 "body_pos": body_pos[:, :2],
                 "ee_pos": body_pos[:, :1],
-                "contact": np.zeros((samples, 2), dtype=np.float32),
+                "contact": contact,
+                "contact_force": np.full((samples, 2), 3.0, dtype=np.float32),
+                "floor_contact": floor_contact,
+                "floor_contact_force": np.full((samples, 3), 4.0, dtype=np.float32),
+                "joint_control": np.full((samples, ACTION_DIM), 0.7, dtype=np.float32),
             }
 
         trace = rollout_candidate_controls(
@@ -751,8 +764,20 @@ class MjxRolloutTest(unittest.TestCase):
         )
 
         self.assertEqual(trace["qpos"].shape, (4, 1, QPOS_DIM))
+        self.assertEqual(trace["body_pos_w"].shape, (4, 1, len(MUJOCO_BODY_NAMES), 3))
+        self.assertEqual(trace["body_lin_vel_w"].shape, (4, 1, len(MUJOCO_BODY_NAMES), 3))
+        self.assertEqual(trace["actions"].shape, (3, 1, ACTION_DIM))
+        self.assertEqual(trace["controls"].shape, (3, 1, ACTION_DIM))
+        self.assertEqual(trace["contact_indicator"].shape, (4, 1, 2))
+        self.assertEqual(trace["floor_contact_indicator"].shape, (4, 1, 3))
         np.testing.assert_allclose(trace["qpos"][0, 0], reference["initial_robot_state"]["qpos"][0])
         np.testing.assert_allclose(trace["qpos"][1:, 0, 0], [0.2, 1.2, 2.2])
+        np.testing.assert_allclose(trace["body_lin_vel_w"][1:], 0.4)
+        np.testing.assert_allclose(trace["controls"], 0.7)
+        np.testing.assert_allclose(trace["contact_indicator"][0], 0.0)
+        np.testing.assert_allclose(trace["contact_indicator"][1:, :, 0], 1.0)
+        np.testing.assert_allclose(trace["contact_force"][1:], 3.0)
+        np.testing.assert_allclose(trace["floor_contact_force"][1:], 4.0)
         np.testing.assert_allclose(
             trace["final_robot_state"]["qpos"][0],
             trace["qpos"][-1, 0],
@@ -768,16 +793,77 @@ class MjxRolloutTest(unittest.TestCase):
         )
         np.testing.assert_allclose(
             trace["final_prev_control"],
-            samples[:, -1],
+            np.full((1, ACTION_DIM), 0.7, dtype=np.float32),
         )
         self.assertIn("final_prev_joint_acc", trace)
         np.testing.assert_allclose(trace["final_prev_joint_acc"], 0.0)
         self.assertIn("final_prev_contact", trace)
-        np.testing.assert_allclose(trace["final_prev_contact"], 0.0)
+        np.testing.assert_allclose(trace["final_prev_contact"], [[1.0, 0.0]])
         np.testing.assert_allclose(trace["final_prev_contact_valid"], 1.0)
         self.assertIn("final_prev_contact_force", trace)
-        np.testing.assert_allclose(trace["final_prev_contact_force"], 0.0)
-        np.testing.assert_allclose(trace["final_prev_contact_force_valid"], 0.0)
+        np.testing.assert_allclose(trace["final_prev_contact_force"], 3.0)
+        np.testing.assert_allclose(trace["final_prev_contact_force_valid"], 1.0)
+
+        state_only = rollout_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=offset_physics_step,
+            record_trace=False,
+        )
+
+        self.assertNotIn("qpos", state_only)
+        self.assertNotIn("actions", state_only)
+        np.testing.assert_allclose(
+            state_only["final_robot_state"]["qpos"],
+            trace["final_robot_state"]["qpos"],
+        )
+        np.testing.assert_allclose(
+            state_only["final_prev_control"],
+            trace["final_prev_control"],
+        )
+        np.testing.assert_allclose(
+            state_only["final_prev_contact_force"],
+            trace["final_prev_contact_force"],
+        )
+
+    def test_score_candidate_controls_can_return_execute_trace_prefix(self) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=3)
+        base_qpos = np.zeros((3, QPOS_DIM), dtype=np.float32)
+        base_qpos[:, 0] = np.array([0.0, 1.0, 2.0], dtype=np.float32)
+        base_qpos[:, 3] = 1.0
+        reference["base_qpos"] = base_qpos
+
+        metrics = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            return_metrics=True,
+            trace_prefix_steps=2,
+        )
+
+        self.assertEqual(metrics["score"].shape, (2,))
+        np.testing.assert_allclose(metrics["trace_prefix_steps"], [2])
+        trace = metrics["execute_trace"]
+        self.assertEqual(trace["qpos"].shape, (3, 2, QPOS_DIM))
+        self.assertEqual(trace["actions"].shape, (2, 2, ACTION_DIM))
+        np.testing.assert_allclose(trace["qpos"][0, :, 0], 0.0)
+        np.testing.assert_allclose(trace["qpos"][1, :, 0], 0.0)
+        np.testing.assert_allclose(trace["qpos"][2, :, 0], 1.0)
+        np.testing.assert_allclose(
+            trace["final_robot_state"]["qpos"][:, 0],
+            [1.0, 1.0],
+        )
+        np.testing.assert_allclose(
+            trace["final_prev_contact_valid"],
+            [1.0, 1.0],
+        )
 
     def test_score_candidate_controls_broadcasts_single_live_state_batch(self) -> None:
         samples = np.zeros((2, 2, QPOS_DIM - 1), dtype=np.float32)
@@ -887,6 +973,106 @@ class MjxRolloutTest(unittest.TestCase):
         np.testing.assert_allclose(metrics["active_contact_count"], [3.0, 5.0])
         np.testing.assert_allclose(metrics["contact_pair_count"], [4.0, 5.0])
         np.testing.assert_allclose(metrics["physics_step_count"], [3.0, 3.0])
+
+    def test_score_candidate_controls_score_only_matches_full_score(self) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+
+        full = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            return_metrics=True,
+        )
+        score_only = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            return_metrics=True,
+            score_only=True,
+        )
+
+        np.testing.assert_allclose(score_only["score"], full["score"])
+        np.testing.assert_allclose(score_only["physics_step_count"], [3.0, 3.0])
+        self.assertNotIn("active_contact_count", score_only)
+        self.assertNotIn("root_pos_error_mean", score_only)
+
+    def test_score_candidate_controls_score_only_output_matches_full_score(
+        self,
+    ) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+
+        full = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            return_metrics=True,
+        )
+        score_only_output = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            return_metrics=True,
+            score_only_output=True,
+        )
+
+        np.testing.assert_allclose(score_only_output["score"], full["score"])
+        np.testing.assert_allclose(
+            score_only_output["physics_step_count"],
+            [3.0, 3.0],
+        )
+        self.assertNotIn("active_contact_count", score_only_output)
+        self.assertNotIn("root_pos_error_mean", score_only_output)
+
+    def test_score_candidate_controls_score_only_output_can_return_full_metrics(
+        self,
+    ) -> None:
+        samples = np.zeros((2, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=2, horizon=3)
+
+        full = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            return_metrics=True,
+        )
+        score_only_output = score_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=_FakeRuntime,
+            physics_step_fn=_physics_step,
+            return_metrics=True,
+            score_only_output=True,
+            score_only_output_full_metrics=True,
+        )
+
+        np.testing.assert_allclose(score_only_output["score"], full["score"])
+        np.testing.assert_allclose(
+            score_only_output["root_pos_error_mean"],
+            full["root_pos_error_mean"],
+        )
+        np.testing.assert_allclose(
+            score_only_output["contact_force_delta_mean"],
+            full["contact_force_delta_mean"],
+        )
 
     def test_score_candidate_controls_scores_action_delta_from_previous_action(
         self,
@@ -1194,6 +1380,54 @@ class MjxRolloutTest(unittest.TestCase):
 
         self.assertEqual(trace["qpos"].shape, (4, 1, QPOS_DIM))
         self.assertEqual(trace["qvel"].shape, (4, 1, QVEL_DIM))
+        self.assertEqual(lax.calls, [{"steps": 3}])
+
+    def test_rollout_candidate_controls_carries_initialized_mjx_data(self) -> None:
+        samples = np.zeros((1, 3, QPOS_DIM - 1), dtype=np.float32)
+        reference = _rollout_reference(samples=1, horizon=3)
+        lax = _RecordingLax()
+        runtime = type(
+            "ScanRuntime",
+            (),
+            {
+                "jnp": _NumpyJnp(),
+                "jax": type("ScanJax", (), {"lax": lax})(),
+            },
+        )()
+        init_calls = []
+
+        def physics_step(model_bundle, robot_state, command_qpos, action, step_index, *, runtime):
+            del model_bundle, command_qpos, action, step_index, runtime
+            next_robot = dict(robot_state)
+            next_robot["mjx_data"] = robot_state["mjx_data"] + 1.0
+            score_state = {
+                "root_pos": next_robot["qpos"][:, :3],
+                "body_pos": next_robot["body_pos_w"][:, :2],
+                "ee_pos": next_robot["body_pos_w"][:, :1],
+                "contact": np.zeros((1, 2), dtype=np.float32),
+            }
+            return next_robot, score_state
+
+        def initialize_robot_state(model_bundle, robot_state, sample_count, *, runtime):
+            del model_bundle, runtime
+            init_calls.append(sample_count)
+            next_robot = dict(robot_state)
+            next_robot["mjx_data"] = np.zeros((int(sample_count),), dtype=np.float32)
+            return next_robot
+
+        physics_step.initialize_robot_state = initialize_robot_state
+
+        trace = rollout_candidate_controls(
+            samples,
+            reference,
+            _constant_actor(np.zeros(ACTION_DIM, dtype=np.float32)),
+            model_bundle=object(),
+            runtime=runtime,
+            physics_step_fn=physics_step,
+        )
+
+        self.assertEqual(init_calls, [1])
+        np.testing.assert_allclose(trace["final_robot_state"]["mjx_data"], [3.0])
         self.assertEqual(lax.calls, [{"steps": 3}])
 
     def test_jax_lax_scan_casts_bool_contact_valid_carry_to_float(self) -> None:
@@ -1570,6 +1804,7 @@ class MjxRolloutTest(unittest.TestCase):
 
         self.assertEqual(jax.jit_calls, 1)
         np.testing.assert_allclose(first["score"], second["score"])
+        self.assertIn("physics_step_count", first)
         self.assertIn("active_contact_count", first)
 
 

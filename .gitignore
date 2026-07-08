@@ -234,6 +234,16 @@ scripts/*
 !scripts/profile_g1_wbc_mpc_phases.py
 !scripts/analyze_g1_wbc_sweep.py
 !scripts/run_g1_wbc_local_first_stage.py
+!scripts/check_g1_wbc_4090_runtime.py
+!scripts/diagnose_g1_wbc_mjx_replay_parity.py
+!scripts/diagnose_g1_wbc_window_state_replay.py
+!scripts/diagnose_g1_wbc_mjx_contact_force_semantics.py
+!scripts/diagnose_g1_wbc_mjx_contact_force_oracle.py
+!scripts/diagnose_g1_wbc_mjx_force_frame_mismatch.py
+!scripts/summarize_g1_wbc_mjx_quality.py
+!scripts/check_g1_wbc_mjx_repeat_stability.py
+!scripts/diagnose_g1_wbc_mjx_candidate_rank_divergence.py
+!scripts/compare_g1_wbc_mjx_acceptance_repeats.py
 
 # Local agent planning artifacts
 AGENTS.md

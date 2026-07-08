@@ -172,9 +172,16 @@ def _baseline_manifest(tmp_path: Path) -> Path:
                     "steady_state_wall_time_sec": 120.0,
                 }
             )
+            _write_stage0_runner_provenance_sidecar(
+                output_dir,
+                motion_name=motion,
+                motion=str(motion_path),
+                seed=seed,
+            )
     manifest = {
         "schema_version": 1,
         "baseline_name": "g1_wbc_stage0_mujoco_warp_sweetpoint",
+        "contact_force_semantics": "pyramidal_contact_normal_v1",
         "motions": ["jump", "walk"],
         "seeds": [0, 1, 2],
         "provenance": {
@@ -195,6 +202,28 @@ def _baseline_manifest(tmp_path: Path) -> Path:
     path = tmp_path / "baseline_manifest.json"
     path.write_text(json.dumps(manifest))
     return path
+
+
+def _write_stage0_runner_provenance_sidecar(
+    output_dir: Path,
+    *,
+    motion_name: str,
+    motion: str,
+    seed: int,
+) -> None:
+    (output_dir / "stage0_runner_provenance.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "g1_wbc_stage0_runner_provenance",
+                "motion_name": motion_name,
+                "motion": motion,
+                "seed": seed,
+                "output_dir": str(output_dir),
+                "contact_force_semantics": "pyramidal_contact_normal_v1",
+            }
+        )
+    )
 
 
 def _baseline_envelopes() -> dict[str, dict[str, dict[str, float]]]:
@@ -292,7 +321,12 @@ def _baseline_envelopes() -> dict[str, dict[str, dict[str, float]]]:
     return {"jump": dict(envelope), "walk": dict(envelope)}
 
 
-def _metrics(*, success: bool) -> dict[str, float | bool]:
+def _metrics(
+    *,
+    success: bool,
+    contact_force_active_mean: float = 60.0,
+    contact_force_peak: float = 400.0,
+) -> dict[str, float | bool]:
     return {
         "num_steps": 800,
         "success": success,
@@ -308,6 +342,8 @@ def _metrics(*, success: bool) -> dict[str, float | bool]:
         "control_delta_mean": 0.01,
         "joint_acc_mean": 1.0,
         "joint_jerk_mean": 1.0,
+        "contact_force_active_mean": contact_force_active_mean,
+        "contact_force_peak": contact_force_peak,
     }
 
 
@@ -432,15 +468,85 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 optimizer_idx = item.mjx_argv.index("--mpc-optimizer")
                 self.assertEqual(item.mjx_argv[optimizer_idx + 1], "generic")
                 self.assertIn("--mjx-enable-scan", item.mjx_argv)
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index("--mjx-impl") + 1],
+                    "jax",
+                )
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index("--mjx-warp-naconmax") + 1],
+                    "30000",
+                )
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index("--mjx-warp-njmax") + 1],
+                    "256",
+                )
                 self.assertIn("--no-mjx-guided-candidate", item.mjx_argv)
                 self.assertNotIn("--mjx-guided-candidate", item.mjx_argv)
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index("--mpc-elite-frac") + 1],
+                    "0.125",
+                )
+                self.assertEqual(
+                    item.mjx_argv[
+                        item.mjx_argv.index("--mpc-first-ctrl-noise-scale") + 1
+                    ],
+                    "1.0",
+                )
+                self.assertEqual(
+                    item.mjx_argv[
+                        item.mjx_argv.index("--mpc-last-ctrl-noise-scale") + 1
+                    ],
+                    "1.0",
+                )
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index("--mpc-final-noise-scale") + 1],
+                    "1.0",
+                )
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index("--mpc-sigma-decay") + 1],
+                    "0.75",
+                )
                 self.assertNotIn("--mjx-guided-candidate", item.replay_argv)
                 self.assertNotIn("--no-mjx-guided-candidate", item.replay_argv)
+                self.assertNotIn("--mjx-impl", item.replay_argv)
+                self.assertNotIn("--mjx-warp-naconmax", item.replay_argv)
+                self.assertNotIn("--mjx-warp-njmax", item.replay_argv)
+                self.assertNotIn(
+                    "--mjx-contact-force-first-row-diagnostics",
+                    item.mjx_argv,
+                )
+                self.assertNotIn(
+                    "--mjx-contact-force-first-row-diagnostics",
+                    item.replay_argv,
+                )
+                self.assertNotIn("--mjx-strip-live-mjx-data", item.mjx_argv)
+                self.assertNotIn("--mjx-strip-live-mjx-data", item.replay_argv)
+                self.assertNotIn("--mjx-model-iterations", item.mjx_argv)
+                self.assertNotIn("--mjx-model-ls-iterations", item.mjx_argv)
+                self.assertNotIn("--mjx-model-iterations", item.replay_argv)
+                self.assertNotIn("--mjx-model-ls-iterations", item.replay_argv)
+                self.assertNotIn("--mpc-sigma-decay", item.replay_argv)
+                self.assertEqual(
+                    item.replay_argv[
+                        item.replay_argv.index("--mpc-first-ctrl-noise-scale") + 1
+                    ],
+                    "1.0",
+                )
+                self.assertEqual(
+                    item.replay_argv[
+                        item.replay_argv.index("--mpc-last-ctrl-noise-scale") + 1
+                    ],
+                    "1.0",
+                )
+                self.assertEqual(
+                    item.replay_argv[
+                        item.replay_argv.index("--mpc-final-noise-scale") + 1
+                    ],
+                    "1.0",
+                )
                 for flag in (
                     "--mpc-preset",
                     "--mpc-sampling-mode",
-                    "--mpc-elite-frac",
-                    "--mpc-sigma-decay",
                     "--mpc-smooth-passes",
                     "--mpc-command-reg-weight",
                     "--mpc-command-smooth-weight",
@@ -458,6 +564,369 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 self.assertNotIn("--mjx-enable-scan", item.replay_argv)
                 method_idx = item.replay_argv.index("--method")
                 self.assertEqual(item.replay_argv[method_idx + 1], "replay_command")
+
+    def test_build_acceptance_plan_can_enable_first_row_force_diagnostic(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-contact-force-first-row-diagnostics",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn(
+                "--mjx-contact-force-first-row-diagnostics",
+                item.mjx_argv,
+            )
+            self.assertNotIn(
+                "--mjx-contact-force-first-row-diagnostics",
+                item.replay_argv,
+            )
+
+    def test_build_acceptance_plan_can_set_contact_force_mode(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-contact-force-mode",
+                    "first_row",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn("--mjx-contact-force-mode", item.mjx_argv)
+            mode_idx = item.mjx_argv.index("--mjx-contact-force-mode")
+            self.assertEqual(item.mjx_argv[mode_idx + 1], "first_row")
+            self.assertNotIn("--mjx-contact-force-mode", item.replay_argv)
+
+    def test_build_acceptance_plan_omits_default_contact_force_mode(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertNotIn("--mjx-contact-force-mode", item.mjx_argv)
+            self.assertNotIn("--mjx-contact-force-mode", item.replay_argv)
+
+    def test_build_acceptance_plan_can_set_contact_force_active_weight(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-contact-force-active-weight",
+                    "0.75",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn("--mjx-contact-force-active-weight", item.mjx_argv)
+            weight_idx = item.mjx_argv.index("--mjx-contact-force-active-weight")
+            self.assertEqual(item.mjx_argv[weight_idx + 1], "0.75")
+            self.assertNotIn("--mjx-contact-force-active-weight", item.replay_argv)
+
+    def test_build_acceptance_plan_can_set_contact_force_peak_excess_weight(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-contact-force-peak-excess-weight",
+                    "1.25",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn("--mjx-contact-force-peak-excess-weight", item.mjx_argv)
+            weight_idx = item.mjx_argv.index(
+                "--mjx-contact-force-peak-excess-weight"
+            )
+            self.assertEqual(item.mjx_argv[weight_idx + 1], "1.25")
+            self.assertNotIn(
+                "--mjx-contact-force-peak-excess-weight",
+                item.replay_argv,
+            )
+
+    def test_build_acceptance_plan_can_override_contact_force_delta_weight(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-contact-force-delta-weight",
+                    "0.0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn("--mjx-contact-force-delta-weight", item.mjx_argv)
+            weight_idx = item.mjx_argv.index("--mjx-contact-force-delta-weight")
+            self.assertEqual(item.mjx_argv[weight_idx + 1], "0.0")
+            self.assertNotIn("--mjx-contact-force-delta-weight", item.replay_argv)
+
+    def test_build_acceptance_plan_can_override_contact_false_positive_weight(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-contact-false-positive-weight",
+                    "1.2",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn("--mjx-contact-false-positive-weight", item.mjx_argv)
+            weight_idx = item.mjx_argv.index(
+                "--mjx-contact-false-positive-weight"
+            )
+            self.assertEqual(item.mjx_argv[weight_idx + 1], "1.2")
+            self.assertNotIn(
+                "--mjx-contact-false-positive-weight",
+                item.replay_argv,
+            )
+
+    def test_build_acceptance_plan_can_enable_strip_live_mjx_data(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-strip-live-mjx-data",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn("--mjx-strip-live-mjx-data", item.mjx_argv)
+            self.assertNotIn("--mjx-strip-live-mjx-data", item.replay_argv)
+
+    def test_build_acceptance_plan_can_enable_score_only_optimizer(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-score-only-optimizer",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn("--mjx-score-only-optimizer", item.mjx_argv)
+            self.assertNotIn("--mjx-score-only-optimizer", item.replay_argv)
+
+    def test_build_acceptance_plan_can_enable_score_only_rescore_diagnostics(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-score-only-rescore-diagnostics",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn("--mjx-score-only-rescore-diagnostics", item.mjx_argv)
+            self.assertNotIn(
+                "--mjx-score-only-rescore-diagnostics",
+                item.replay_argv,
+            )
+
+    def test_build_acceptance_plan_can_enable_score_only_output_rescore_diagnostics(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-score-only-output-rescore-diagnostics",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn(
+                "--mjx-score-only-output-rescore-diagnostics",
+                item.mjx_argv,
+            )
+            self.assertNotIn(
+                "--mjx-score-only-output-rescore-diagnostics",
+                item.replay_argv,
+            )
+
+    def test_build_acceptance_plan_preserves_collision_profile(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            for row in manifest["rows"]:
+                row["argv"].extend(
+                    ["--collision-profile", "wxy_explicit_pairs_7caps"]
+                )
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 1)
+        item = plan[0]
+        self.assertEqual(
+            item.mjx_argv[item.mjx_argv.index("--collision-profile") + 1],
+            "wxy_explicit_pairs_7caps",
+        )
+        self.assertEqual(
+            item.replay_argv[item.replay_argv.index("--collision-profile") + 1],
+            "wxy_explicit_pairs_7caps",
+        )
+
+    def test_build_acceptance_plan_can_override_collision_profile(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--collision-profile",
+                    "wxy_explicit_floor_leg_pairs_7caps",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 1)
+        item = plan[0]
+        self.assertEqual(
+            item.mjx_argv[item.mjx_argv.index("--collision-profile") + 1],
+            "wxy_explicit_floor_leg_pairs_7caps",
+        )
+        self.assertEqual(
+            item.replay_argv[item.replay_argv.index("--collision-profile") + 1],
+            "wxy_explicit_floor_leg_pairs_7caps",
+        )
 
     def test_build_acceptance_plan_can_enable_mjx_guided_candidate(self) -> None:
         runner = load_runner()
@@ -486,6 +955,2042 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 self.assertNotIn("--no-mjx-guided-candidate", item.mjx_argv)
                 self.assertNotIn("--mjx-guided-candidate", item.replay_argv)
                 self.assertNotIn("--no-mjx-guided-candidate", item.replay_argv)
+
+    def test_build_acceptance_plan_can_enable_periodic_mjx_guided_candidate(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-guided-candidate",
+                    "--mjx-guided-candidate-period",
+                    "5",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 6)
+        for item in plan:
+            with self.subTest(motion=item.motion, seed=item.seed):
+                self.assertIn("--mjx-guided-candidate", item.mjx_argv)
+                self.assertEqual(
+                    item.mjx_argv[
+                        item.mjx_argv.index("--mjx-guided-candidate-period") + 1
+                    ],
+                    "5",
+                )
+                self.assertNotIn("--mjx-guided-candidate", item.replay_argv)
+                self.assertNotIn("--no-mjx-guided-candidate", item.replay_argv)
+                self.assertNotIn("--mjx-guided-candidate-period", item.replay_argv)
+
+    def test_build_acceptance_plan_can_override_guided_candidate_period_by_row(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-guided-candidate-period-override",
+                    "jump:0:4",
+                    "--mjx-guided-candidate-period-override",
+                    "walk:1:8",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        by_row = {(item.motion, item.seed): item for item in plan}
+        self.assertIn("--mjx-guided-candidate", by_row[("jump", 0)].mjx_argv)
+        self.assertEqual(
+            by_row[("jump", 0)].mjx_argv[
+                by_row[("jump", 0)].mjx_argv.index(
+                    "--mjx-guided-candidate-period"
+                )
+                + 1
+            ],
+            "4",
+        )
+        self.assertIn("--mjx-guided-candidate", by_row[("walk", 1)].mjx_argv)
+        self.assertEqual(
+            by_row[("walk", 1)].mjx_argv[
+                by_row[("walk", 1)].mjx_argv.index(
+                    "--mjx-guided-candidate-period"
+                )
+                + 1
+            ],
+            "8",
+        )
+        self.assertIn("--no-mjx-guided-candidate", by_row[("jump", 1)].mjx_argv)
+        self.assertNotIn("--mjx-guided-candidate-period", by_row[("jump", 1)].mjx_argv)
+        for item in plan:
+            self.assertNotIn("--mjx-guided-candidate", item.replay_argv)
+            self.assertNotIn("--no-mjx-guided-candidate", item.replay_argv)
+            self.assertNotIn("--mjx-guided-candidate-period", item.replay_argv)
+
+    def test_build_acceptance_plan_can_set_mjx_min_score_improvement(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-min-score-improvement",
+                    "0.01",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 6)
+        for item in plan:
+            with self.subTest(motion=item.motion, seed=item.seed):
+                self.assertEqual(
+                    item.mjx_argv[
+                        item.mjx_argv.index("--mjx-min-score-improvement") + 1
+                    ],
+                    "0.01",
+                )
+                self.assertNotIn("--mjx-min-score-improvement", item.replay_argv)
+
+    def test_build_acceptance_plan_can_override_mjx_min_score_improvement_by_row(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-min-score-improvement-override",
+                    "jump:2:0.01",
+                    "--mjx-min-score-improvement-override",
+                    "walk:0:0.02",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        by_row = {(item.motion, item.seed): item for item in plan}
+        self.assertEqual(
+            by_row[("jump", 2)].mjx_argv[
+                by_row[("jump", 2)].mjx_argv.index("--mjx-min-score-improvement")
+                + 1
+            ],
+            "0.01",
+        )
+        self.assertEqual(
+            by_row[("walk", 0)].mjx_argv[
+                by_row[("walk", 0)].mjx_argv.index("--mjx-min-score-improvement")
+                + 1
+            ],
+            "0.02",
+        )
+        self.assertNotIn("--mjx-min-score-improvement", by_row[("jump", 0)].mjx_argv)
+        for item in plan:
+            self.assertNotIn("--mjx-min-score-improvement", item.replay_argv)
+
+    def test_build_acceptance_plan_can_set_mjx_top_score_gap_guards(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-min-top-score-gap",
+                    "0.02",
+                    "--mjx-cem-update-min-top-score-gap",
+                    "0.015",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 6)
+        for item in plan:
+            with self.subTest(motion=item.motion, seed=item.seed):
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index("--mjx-min-top-score-gap") + 1],
+                    "0.02",
+                )
+                self.assertEqual(
+                    item.mjx_argv[
+                        item.mjx_argv.index("--mjx-cem-update-min-top-score-gap")
+                        + 1
+                    ],
+                    "0.015",
+                )
+                self.assertNotIn("--mjx-min-top-score-gap", item.replay_argv)
+                self.assertNotIn(
+                    "--mjx-cem-update-min-top-score-gap",
+                    item.replay_argv,
+                )
+
+    def test_build_acceptance_plan_can_override_mjx_min_top_score_gap_by_row(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-min-top-score-gap-override",
+                    "jump:0:0.03",
+                    "--mjx-min-top-score-gap-override",
+                    "walk:2:0.01",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        by_row = {(item.motion, item.seed): item for item in plan}
+        self.assertEqual(
+            by_row[("jump", 0)].mjx_argv[
+                by_row[("jump", 0)].mjx_argv.index("--mjx-min-top-score-gap")
+                + 1
+            ],
+            "0.03",
+        )
+        self.assertEqual(
+            by_row[("walk", 2)].mjx_argv[
+                by_row[("walk", 2)].mjx_argv.index("--mjx-min-top-score-gap")
+                + 1
+            ],
+            "0.01",
+        )
+        self.assertNotIn("--mjx-min-top-score-gap", by_row[("jump", 1)].mjx_argv)
+        for item in plan:
+            self.assertNotIn("--mjx-min-top-score-gap", item.replay_argv)
+
+    def test_build_acceptance_plan_can_set_mjx_max_control_delta(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-max-control-delta",
+                    "0.25",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 6)
+        for item in plan:
+            with self.subTest(motion=item.motion, seed=item.seed):
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index("--mjx-max-control-delta") + 1],
+                    "0.25",
+                )
+                self.assertNotIn("--mjx-max-control-delta", item.replay_argv)
+
+    def test_build_acceptance_plan_can_set_candidate_rank_diagnostics(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-candidate-rank-diagnostics-top-k",
+                    "8",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 6)
+        for item in plan:
+            with self.subTest(motion=item.motion, seed=item.seed):
+                self.assertEqual(
+                    item.mjx_argv[
+                        item.mjx_argv.index(
+                            "--mjx-candidate-rank-diagnostics-top-k"
+                        )
+                        + 1
+                    ],
+                    "8",
+                )
+                self.assertNotIn(
+                    "--mjx-candidate-rank-diagnostics-top-k",
+                    item.replay_argv,
+                )
+
+    def test_build_acceptance_plan_can_set_candidate_rescore_diagnostics(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-candidate-rescore-diagnostics",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 6)
+        for item in plan:
+            with self.subTest(motion=item.motion, seed=item.seed):
+                self.assertIn(
+                    "--mjx-candidate-rescore-diagnostics",
+                    item.mjx_argv,
+                )
+                self.assertNotIn(
+                    "--mjx-candidate-rescore-diagnostics",
+                    item.replay_argv,
+                )
+
+    def test_build_acceptance_plan_can_set_candidate_rescore_selection(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-candidate-rescore-selection-top-k",
+                    "4",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 6)
+        for item in plan:
+            with self.subTest(motion=item.motion, seed=item.seed):
+                self.assertEqual(
+                    item.mjx_argv[
+                        item.mjx_argv.index(
+                            "--mjx-candidate-rescore-selection-top-k"
+                        )
+                        + 1
+                    ],
+                    "4",
+                )
+                self.assertNotIn(
+                    "--mjx-candidate-rescore-selection-top-k",
+                    item.replay_argv,
+                )
+
+    def test_build_acceptance_plan_can_override_mjx_max_control_delta_by_row(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-max-control-delta-override",
+                    "walk:1:0.25",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        by_row = {(item.motion, item.seed): item for item in plan}
+        self.assertEqual(
+            by_row[("walk", 1)].mjx_argv[
+                by_row[("walk", 1)].mjx_argv.index("--mjx-max-control-delta") + 1
+            ],
+            "0.25",
+        )
+        self.assertNotIn("--mjx-max-control-delta", by_row[("walk", 0)].mjx_argv)
+        for item in plan:
+            self.assertNotIn("--mjx-max-control-delta", item.replay_argv)
+
+    def test_build_acceptance_plan_can_select_mjx_warp_impl(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-warp-naconmax",
+                    "4096",
+                    "--mjx-warp-njmax",
+                    "512",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 1)
+        item = plan[0]
+        self.assertEqual(item.mjx_argv[item.mjx_argv.index("--mjx-impl") + 1], "warp")
+        self.assertEqual(
+            item.mjx_argv[item.mjx_argv.index("--mjx-warp-naconmax") + 1],
+            "4096",
+        )
+        self.assertEqual(
+            item.mjx_argv[item.mjx_argv.index("--mjx-warp-njmax") + 1],
+            "512",
+        )
+        self.assertNotIn("--mjx-impl", item.replay_argv)
+        self.assertNotIn("--mjx-warp-naconmax", item.replay_argv)
+        self.assertNotIn("--mjx-warp-njmax", item.replay_argv)
+
+    def test_build_acceptance_plan_can_override_naconmax_by_row(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-warp-naconmax",
+                    "30000",
+                    "--mjx-warp-naconmax-override",
+                    "jump:1:24250",
+                    "--mjx-warp-naconmax-override",
+                    "walk:0:40000",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        by_row = {(item.motion, item.seed): item for item in plan}
+        self.assertEqual(
+            by_row[("jump", 1)].mjx_argv[
+                by_row[("jump", 1)].mjx_argv.index("--mjx-warp-naconmax") + 1
+            ],
+            "24250",
+        )
+        self.assertEqual(
+            by_row[("walk", 0)].mjx_argv[
+                by_row[("walk", 0)].mjx_argv.index("--mjx-warp-naconmax") + 1
+            ],
+            "40000",
+        )
+        self.assertEqual(
+            by_row[("jump", 0)].mjx_argv[
+                by_row[("jump", 0)].mjx_argv.index("--mjx-warp-naconmax") + 1
+            ],
+            "30000",
+        )
+        for item in plan:
+            self.assertNotIn("--mjx-warp-naconmax", item.replay_argv)
+
+    def test_build_acceptance_plan_can_override_mjx_mpc_numeric_surface(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-mpc-root-pos-sigma",
+                    "0.03",
+                    "--mjx-mpc-root-rot-sigma",
+                    "0.08",
+                    "--mjx-mpc-joint-sigma",
+                    "0.12",
+                    "--mjx-mpc-first-ctrl-noise-scale",
+                    "0.8",
+                    "--mjx-mpc-last-ctrl-noise-scale",
+                    "0.9",
+                    "--mjx-mpc-final-noise-scale",
+                    "0.5",
+                    "--mjx-mpc-sigma-decay",
+                    "0.65",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 1)
+        item = plan[0]
+        expected_mjx = {
+            "--mpc-root-pos-sigma": "0.03",
+            "--mpc-root-rot-sigma": "0.08",
+            "--mpc-joint-sigma": "0.12",
+            "--mpc-first-ctrl-noise-scale": "0.8",
+            "--mpc-last-ctrl-noise-scale": "0.9",
+            "--mpc-final-noise-scale": "0.5",
+            "--mpc-sigma-decay": "0.65",
+        }
+        for flag, value in expected_mjx.items():
+            with self.subTest(flag=flag):
+                self.assertEqual(
+                    item.mjx_argv[item.mjx_argv.index(flag) + 1],
+                    value,
+                )
+        expected_replay = {
+            "--mpc-root-pos-sigma": "0.04",
+            "--mpc-root-rot-sigma": "0.10",
+            "--mpc-joint-sigma": "0.18",
+            "--mpc-first-ctrl-noise-scale": "1.0",
+            "--mpc-last-ctrl-noise-scale": "1.0",
+            "--mpc-final-noise-scale": "1.0",
+        }
+        for flag, value in expected_replay.items():
+            with self.subTest(flag=flag):
+                self.assertEqual(
+                    item.replay_argv[item.replay_argv.index(flag) + 1],
+                    value,
+                )
+        self.assertNotIn("--mpc-sigma-decay", item.replay_argv)
+
+    def test_build_acceptance_plan_can_override_mjx_sample_count(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-mpc-samples",
+                    "256",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        self.assertEqual(len(plan), 1)
+        item = plan[0]
+        self.assertEqual(
+            item.mjx_argv[item.mjx_argv.index("--mpc-samples") + 1],
+            "256",
+        )
+        self.assertEqual(
+            item.replay_argv[item.replay_argv.index("--mpc-samples") + 1],
+            "512",
+        )
+
+    def test_build_acceptance_plan_can_override_mjx_joint_sigma_by_row(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-mpc-joint-sigma",
+                    "0.14",
+                    "--mjx-mpc-joint-sigma-override",
+                    "walk:1:0.12",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        by_row = {(item.motion, item.seed): item for item in plan}
+        self.assertEqual(
+            by_row[("jump", 0)].mjx_argv[
+                by_row[("jump", 0)].mjx_argv.index("--mpc-joint-sigma") + 1
+            ],
+            "0.14",
+        )
+        self.assertEqual(
+            by_row[("walk", 1)].mjx_argv[
+                by_row[("walk", 1)].mjx_argv.index("--mpc-joint-sigma") + 1
+            ],
+            "0.12",
+        )
+        for item in plan:
+            self.assertEqual(
+                item.replay_argv[item.replay_argv.index("--mpc-joint-sigma") + 1],
+                "0.18",
+            )
+
+    def test_naconmax_row_override_rejects_invalid_values(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+                "--device",
+                "cuda:0",
+                "--mjx-warp-naconmax-override",
+            ]
+            for value in (
+                "jump:1",
+                "skip:1:20000",
+                "jump:9:20000",
+                "jump:1:0",
+                "jump:1:abc",
+            ):
+                with self.subTest(value=value):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args([*base_args, value])
+            with self.assertRaises(SystemExit):
+                runner.parse_args(
+                    [
+                        *base_args,
+                        "jump:1:20000",
+                        "--mjx-warp-naconmax-override",
+                        "jump:1:24000",
+                    ]
+                )
+
+    def test_mjx_mpc_numeric_overrides_reject_invalid_values(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+                "--device",
+                "cuda:0",
+            ]
+            for flag in (
+                "--mjx-mpc-root-pos-sigma",
+                "--mjx-mpc-root-rot-sigma",
+                "--mjx-mpc-joint-sigma",
+                "--mjx-mpc-first-ctrl-noise-scale",
+                "--mjx-mpc-last-ctrl-noise-scale",
+                "--mjx-mpc-sigma-decay",
+            ):
+                for value in ("0", "-0.1", "nan"):
+                    with self.subTest(flag=flag, value=value):
+                        with self.assertRaises(SystemExit):
+                            runner.parse_args([*base_args, flag, value])
+            for value in ("-0.1", "nan"):
+                with self.subTest(flag="--mjx-mpc-final-noise-scale", value=value):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args(
+                            [
+                                *base_args,
+                                "--mjx-mpc-final-noise-scale",
+                                value,
+                            ]
+                        )
+            runner.parse_args(
+                [
+                    *base_args,
+                    "--mjx-mpc-final-noise-scale",
+                    "0",
+                ]
+            )
+            for value in ("0", "-1", "nan"):
+                with self.subTest(flag="--mjx-mpc-samples", value=value):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args(
+                            [
+                                *base_args,
+                                "--mjx-mpc-samples",
+                                value,
+                            ]
+                        )
+
+    def test_guided_candidate_period_rejects_invalid_values(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+                "--device",
+                "cuda:0",
+            ]
+            with self.assertRaises(SystemExit):
+                runner.parse_args(
+                    [
+                        *base_args,
+                        "--mjx-guided-candidate-period",
+                        "5",
+                    ]
+                )
+            with self.assertRaises(SystemExit):
+                runner.parse_args(
+                    [
+                        *base_args,
+                        "--mjx-guided-candidate",
+                        "--mjx-guided-candidate-period",
+                        "0",
+                    ]
+                )
+            for flag in (
+                "--mjx-guided-candidate-period-override",
+                "--mjx-model-iterations-override",
+                "--mjx-model-ls-iterations-override",
+                "--mjx-mpc-joint-sigma-override",
+            ):
+                with self.subTest(flag=flag):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args([*base_args, flag, "walk:2:0"])
+
+    def test_mjx_min_score_improvement_rejects_invalid_values(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+                "--device",
+                "cuda:0",
+            ]
+            for value in ("-0.01", "nan"):
+                with self.subTest(value=value):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args(
+                            [
+                                *base_args,
+                                "--mjx-min-score-improvement",
+                                value,
+                            ]
+                        )
+            for value in (
+                "jump:2",
+                "skip:2:0.01",
+                "jump:9:0.01",
+                "jump:2:-0.01",
+                "jump:2:nan",
+                "jump:2:abc",
+            ):
+                with self.subTest(value=value):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args(
+                            [
+                                *base_args,
+                                "--mjx-min-score-improvement-override",
+                                value,
+                            ]
+                        )
+
+    def test_mjx_top_score_gap_guards_reject_invalid_values(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+                "--device",
+                "cuda:0",
+            ]
+            for flag in (
+                "--mjx-min-top-score-gap",
+                "--mjx-cem-update-min-top-score-gap",
+            ):
+                for value in ("-0.01", "nan"):
+                    with self.subTest(flag=flag, value=value):
+                        with self.assertRaises(SystemExit):
+                            runner.parse_args([*base_args, flag, value])
+            for value in (
+                "jump:2",
+                "skip:2:0.03",
+                "jump:9:0.03",
+                "jump:2:-0.01",
+                "jump:2:nan",
+                "jump:2:abc",
+            ):
+                with self.subTest(value=value):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args(
+                            [
+                                *base_args,
+                                "--mjx-min-top-score-gap-override",
+                                value,
+                            ]
+                        )
+
+    def test_mjx_max_control_delta_rejects_invalid_values(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+                "--device",
+                "cuda:0",
+            ]
+            for value in ("0", "-0.01", "nan"):
+                with self.subTest(value=value):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args(
+                            [
+                                *base_args,
+                                "--mjx-max-control-delta",
+                                value,
+                            ]
+                        )
+            for value in (
+                "jump:2",
+                "skip:2:0.25",
+                "jump:9:0.25",
+                "jump:2:0",
+                "jump:2:-0.01",
+                "jump:2:nan",
+                "jump:2:abc",
+            ):
+                with self.subTest(value=value):
+                    with self.assertRaises(SystemExit):
+                        runner.parse_args(
+                            [
+                                *base_args,
+                                "--mjx-max-control-delta-override",
+                                value,
+                            ]
+                        )
+
+    def test_candidate_rank_diagnostics_rejects_invalid_values(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+                "--device",
+                "cuda:0",
+            ]
+            with self.assertRaises(SystemExit):
+                runner.parse_args(
+                    [
+                        *base_args,
+                        "--mjx-candidate-rank-diagnostics-top-k",
+                        "-1",
+                    ]
+                )
+
+    def test_candidate_rescore_selection_rejects_invalid_values(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+                "--device",
+                "cuda:0",
+            ]
+            with self.assertRaises(SystemExit):
+                runner.parse_args(
+                    [
+                        *base_args,
+                        "--mjx-candidate-rescore-selection-top-k",
+                        "-1",
+                    ]
+                )
+
+    def test_build_acceptance_plan_can_set_mjx_model_solver_options(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-model-iterations",
+                    "4",
+                    "--mjx-model-ls-iterations",
+                    "10",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+
+        self.assertEqual(len(plan), 1)
+        item = plan[0]
+        self.assertEqual(
+            item.mjx_argv[item.mjx_argv.index("--mjx-model-iterations") + 1],
+            "4",
+        )
+        self.assertEqual(
+            item.mjx_argv[item.mjx_argv.index("--mjx-model-ls-iterations") + 1],
+            "10",
+        )
+        self.assertNotIn("--mjx-model-iterations", item.replay_argv)
+        self.assertNotIn("--mjx-model-ls-iterations", item.replay_argv)
+
+    def test_build_acceptance_plan_can_override_mjx_model_solver_options_by_row(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-model-iterations",
+                    "4",
+                    "--mjx-model-ls-iterations",
+                    "5",
+                    "--mjx-model-iterations-override",
+                    "walk:2:5",
+                    "--mjx-model-ls-iterations-override",
+                    "jump:0:10",
+                ]
+            )
+
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+
+        by_row = {(item.motion, item.seed): item for item in plan}
+        self.assertEqual(
+            by_row[("walk", 2)].mjx_argv[
+                by_row[("walk", 2)].mjx_argv.index("--mjx-model-iterations") + 1
+            ],
+            "5",
+        )
+        self.assertEqual(
+            by_row[("walk", 2)].mjx_argv[
+                by_row[("walk", 2)].mjx_argv.index("--mjx-model-ls-iterations")
+                + 1
+            ],
+            "5",
+        )
+        self.assertEqual(
+            by_row[("jump", 0)].mjx_argv[
+                by_row[("jump", 0)].mjx_argv.index("--mjx-model-iterations") + 1
+            ],
+            "4",
+        )
+        self.assertEqual(
+            by_row[("jump", 0)].mjx_argv[
+                by_row[("jump", 0)].mjx_argv.index("--mjx-model-ls-iterations")
+                + 1
+            ],
+            "10",
+        )
+        for item in plan:
+            self.assertNotIn("--mjx-model-iterations", item.replay_argv)
+            self.assertNotIn("--mjx-model-ls-iterations", item.replay_argv)
+
+    def test_acceptance_runner_rejects_non_positive_mjx_model_solver_options(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            base_args = [
+                "--baseline-manifest",
+                str(manifest_path),
+                "--output-dir",
+                str(root / "acceptance"),
+            ]
+
+            with self.assertRaises(SystemExit):
+                runner.parse_args(base_args + ["--mjx-model-iterations", "0"])
+            with self.assertRaises(SystemExit):
+                runner.parse_args(base_args + ["--mjx-model-ls-iterations", "-1"])
+
+    def test_mjx_metrics_with_wrong_impl_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_impl"] = "jax"
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_collision_profile_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--collision-profile",
+                    "wxy_explicit_floor_leg_pairs_7caps",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["collision_profile"] = "wxy_parity"
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_contact_false_positive_weight_fail_closed(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-contact-false-positive-weight",
+                    "1.2",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["reward_weights"] = {"contact_false_positive": 0.6}
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_sigma_decay_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["sigma_decay"] = None
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_numeric_surface_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-mpc-joint-sigma",
+                    "0.12",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["joint_sigma"] = 0.18
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_min_score_improvement_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-min-score-improvement",
+                    "0.01",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_min_score_improvement"] = 1.0e-9
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_top_score_gap_guard_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-min-top-score-gap",
+                    "0.02",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_min_top_score_gap"] = 0.01
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_row_top_score_gap_guard_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-min-top-score-gap-override",
+                    "jump:0:0.03",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_min_top_score_gap"] = 0.0
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_cem_update_top_score_gap_guard_fail_closed(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-cem-update-min-top-score-gap",
+                    "0.015",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_cem_update_min_top_score_gap"] = 0.01
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_max_control_delta_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-max-control-delta",
+                    "0.25",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_max_control_delta"] = 0.3
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_candidate_rank_diagnostics_fail_closed(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-candidate-rank-diagnostics-top-k",
+                    "8",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["candidate_rank_diagnostics_top_k"] = 4
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_missing_candidate_rescore_diagnostics_fail_closed(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-candidate-rescore-diagnostics",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_candidate_rescore_diagnostics"] = False
+            payload["mpc"]["candidate_rescore_diagnostics_windows"] = 0
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_candidate_rescore_selection_fail_closed(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-candidate-rescore-selection-top-k",
+                    "4",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["candidate_rescore_selection_top_k"] = 2
+            payload["mpc"]["candidate_rescore_selection_windows"] = 40
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_score_only_optimizer_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-score-only-optimizer",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["score_only_optimizer"] = False
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_score_only_rescore_diagnostics_fail_closed(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-score-only-rescore-diagnostics",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["score_only_rescore_diagnostics"] = False
+            payload["mpc"]["score_only_rescore_diagnostics_windows"] = 0
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_score_only_output_rescore_diagnostics_fail_closed(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-score-only-output-rescore-diagnostics",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["score_only_output_rescore_diagnostics"] = False
+            payload["mpc"]["score_only_output_rescore_diagnostics_windows"] = 0
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_contact_force_mode_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--mjx-contact-force-mode",
+                    "first_row",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["contact_force_mode"] = "sum_rows"
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_default_contact_force_mode_rejects_legacy_missing(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"].pop("contact_force_mode", None)
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_sample_count_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-impl",
+                    "warp",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["sample_count"] = 256
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_wrong_model_options_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-model-iterations",
+                    "4",
+                    "--mjx-model-ls-iterations",
+                    "10",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_model_options"] = {
+                "iterations": 3,
+                "ls_iterations": 10,
+            }
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_with_unplanned_model_options_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"]["mjx_model_options"] = {"iterations": 4}
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
+
+    def test_mjx_metrics_missing_planned_model_options_fail_closed(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-model-iterations",
+                    "4",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+            plan = runner.build_acceptance_plan(
+                args,
+                json.loads(manifest_path.read_text()),
+            )
+            payload = _mjx_metrics_payload(plan[0])
+            payload["mpc"].pop("mjx_model_options")
+            metrics_path = Path(plan[0].output_dir) / "metrics.json"
+            metrics_path.parent.mkdir(parents=True)
+            metrics_path.write_text(json.dumps(payload))
+            parsed = runner._row_from_metrics(metrics_path)
+
+            self.assertFalse(
+                runner._acceptance_metrics_provenance_matches(
+                    plan[0],
+                    kind="mjx",
+                    payload=payload,
+                    parsed=parsed,
+                )
+            )
 
     def test_build_acceptance_plan_rejects_missing_or_duplicate_matrix_rows(self) -> None:
         runner = load_runner()
@@ -531,6 +3036,69 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "provenance"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_missing_force_semantics(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest.pop("contact_force_semantics")
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "contact_force_semantics"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_legacy_force_semantics(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            manifest["contact_force_semantics"] = "first_solver_row_v0"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "contact_force_semantics"):
+                runner.build_acceptance_plan(args, manifest)
+
+    def test_build_acceptance_plan_rejects_legacy_stage0_runner_provenance(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            row = manifest["rows"][0]
+            provenance_path = Path(row["output_dir"]) / "stage0_runner_provenance.json"
+            provenance = json.loads(provenance_path.read_text())
+            provenance.pop("contact_force_semantics")
+            provenance_path.write_text(json.dumps(provenance))
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                ]
+            )
+
+            with self.assertRaisesRegex(ValueError, "stage0_runner_provenance"):
                 runner.build_acceptance_plan(args, manifest)
 
     def test_formal_baseline_manifest_requires_legacy_optimizer(self) -> None:
@@ -1132,6 +3700,177 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse((output_dir / "acceptance_report.partial.json").exists())
         self.assertEqual(len(rows["mjx"]), 1)
         self.assertEqual(len(rows["replay"]), 1)
+        self.assertEqual(
+            rows["mjx"][0]["same_seed_baseline_steady_state_wall_time_sec"],
+            120.0,
+        )
+        self.assertEqual(
+            rows["mjx"][0]["same_seed_target_steady_state_wall_time_sec"],
+            10.0,
+        )
+        self.assertEqual(rows["mjx"][0]["same_seed_speedup"], 120.0)
+        self.assertTrue(rows["mjx"][0]["same_seed_speedup_passed"])
+        self.assertEqual(rows["mjx"][0]["realtime_factor"], 16.0)
+        self.assertTrue(rows["mjx"][0]["realtime_passed"])
+
+    def test_main_skip_report_fails_same_seed_speed_shortfall(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                out_dir = runner._output_dir_from_argv(argv)
+                is_replay = "--saved-command" in argv
+                _write_artifacts(out_dir, include_command=not is_replay)
+                args = runner.parse_args(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--only-motion",
+                        "jump",
+                        "--only-seed",
+                        "0",
+                    ]
+                )
+                planned = runner.build_acceptance_plan(
+                    args,
+                    json.loads(manifest_path.read_text()),
+                )[0]
+                payload = (
+                    _replay_metrics_payload(planned)
+                    if is_replay
+                    else _mjx_metrics_payload(planned)
+                )
+                if not is_replay:
+                    payload["mpc"]["steady_state_wall_time_sec"] = 20.0
+                (out_dir / "metrics.json").write_text(json.dumps(payload))
+                artifact_names = ["metrics.json", "rollout.npz"]
+                if not is_replay:
+                    artifact_names.append("mpc_command.npz")
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "command_wall_time_sec": 1.0,
+                    "command_start_time_ns": min(
+                        (out_dir / name).stat().st_mtime_ns for name in artifact_names
+                    ) - 1_000_000,
+                }
+                row.update(runner._row_from_metrics(out_dir / "metrics.json"))
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--skip-report",
+                        "--only-motion",
+                        "jump",
+                        "--only-seed",
+                        "0",
+                    ]
+                )
+
+            rows = runner.load_existing_acceptance_rows(output_dir)
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(len(rows["mjx"]), 1)
+        self.assertEqual(rows["mjx"][0]["same_seed_speedup"], 6.0)
+        self.assertFalse(rows["mjx"][0]["same_seed_speedup_passed"])
+        self.assertEqual(rows["mjx"][0]["same_seed_speedup_shortfall_sec"], 10.0)
+        self.assertEqual(rows["mjx"][0]["realtime_factor"], 0.8)
+        self.assertFalse(rows["mjx"][0]["realtime_passed"])
+
+    def test_main_skip_report_fails_failed_mjx_shard_even_when_process_ok(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                out_dir = runner._output_dir_from_argv(argv)
+                is_replay = "--saved-command" in argv
+                _write_artifacts(out_dir, include_command=not is_replay)
+                args = runner.parse_args(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--only-motion",
+                        "jump",
+                        "--only-seed",
+                        "0",
+                    ]
+                )
+                planned = runner.build_acceptance_plan(
+                    args,
+                    json.loads(manifest_path.read_text()),
+                )[0]
+                payload = (
+                    _replay_metrics_payload(planned)
+                    if is_replay
+                    else _mjx_metrics_payload(planned)
+                )
+                if not is_replay:
+                    payload["mpc"]["accepted_windows"] = 39
+                    payload["mpc"]["num_windows"] = 39
+                (out_dir / "metrics.json").write_text(json.dumps(payload))
+                artifact_names = ["metrics.json", "rollout.npz"]
+                if not is_replay:
+                    artifact_names.append("mpc_command.npz")
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "command_wall_time_sec": 1.0,
+                    "command_start_time_ns": min(
+                        (out_dir / name).stat().st_mtime_ns for name in artifact_names
+                    ) - 1_000_000,
+                }
+                row.update(runner._row_from_metrics(out_dir / "metrics.json"))
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--skip-report",
+                        "--only-motion",
+                        "jump",
+                        "--only-seed",
+                        "0",
+                    ]
+                )
+
+            rows = runner.load_existing_acceptance_rows(output_dir)
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse((output_dir / "acceptance_report.json").exists())
+        self.assertEqual(rows["mjx"][0]["accepted_windows"], 39)
 
     def test_main_reuses_existing_ok_rows_when_requested(self) -> None:
         runner = load_runner()
@@ -1244,6 +3983,88 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
             planned = plan[0]
             payload = _mjx_metrics_payload(planned)
             payload["mpc"]["use_guided_candidate"] = False
+            (Path(planned.output_dir) / "metrics.json").write_text(json.dumps(payload))
+
+            row = runner.load_existing_acceptance_row(
+                planned,
+                kind="mjx",
+                existing_rows=mjx_rows,
+            )
+
+        self.assertIsNone(row)
+
+    def test_existing_acceptance_row_reuse_rejects_mismatched_guided_period(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-guided-candidate",
+                    "--mjx-guided-candidate-period",
+                    "5",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            mjx_rows, _replay_rows = _write_reusable_acceptance_outputs(
+                runner,
+                plan,
+                output_dir=output_dir,
+            )
+            planned = plan[0]
+            payload = _mjx_metrics_payload(planned)
+            payload["mpc"]["guided_candidate_period"] = 4
+            (Path(planned.output_dir) / "metrics.json").write_text(json.dumps(payload))
+
+            row = runner.load_existing_acceptance_row(
+                planned,
+                kind="mjx",
+                existing_rows=mjx_rows,
+            )
+
+        self.assertIsNone(row)
+
+    def test_existing_acceptance_row_reuse_rejects_mismatched_guided_windows(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            output_dir = root / "acceptance"
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--device",
+                    "cuda:0",
+                    "--mjx-guided-candidate",
+                    "--mjx-guided-candidate-period",
+                    "5",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+            plan = runner.build_acceptance_plan(args, manifest)
+            mjx_rows, _replay_rows = _write_reusable_acceptance_outputs(
+                runner,
+                plan,
+                output_dir=output_dir,
+            )
+            planned = plan[0]
+            payload = _mjx_metrics_payload(planned)
+            payload["mpc"]["guided_candidate_windows"] = 40
             (Path(planned.output_dir) / "metrics.json").write_text(json.dumps(payload))
 
             row = runner.load_existing_acceptance_row(
@@ -1597,6 +4418,10 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 required_gpu_name_fragment="H100",
             )
 
+        self.assertEqual(
+            report["contact_force_semantics"],
+            runner.CONTACT_FORCE_SEMANTICS,
+        )
         self.assertIn("root_pos_error_mean", report["motion_results"]["jump"]["mjx_failures"])
 
     def test_missing_mjx_timing_or_artifacts_fail_closed(self) -> None:
@@ -1663,7 +4488,11 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "stdout": "",
                     "stderr": "",
                     "status": "ok",
-                    "metrics": _metrics(success=True),
+                    "metrics": _metrics(
+                        success=True,
+                        contact_force_active_mean=65.0 if is_replay else 250.0,
+                        contact_force_peak=450.0 if is_replay else 2400.0,
+                    ),
                     "num_steps": 800,
                     **_fresh_metrics_provenance(argv, is_replay=is_replay),
                 }
@@ -1732,7 +4561,11 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "stdout": "",
                     "stderr": "",
                     "status": "ok",
-                    "metrics": _metrics(success=True),
+                    "metrics": _metrics(
+                        success=True,
+                        contact_force_active_mean=65.0 if is_replay else 250.0,
+                        contact_force_peak=450.0 if is_replay else 2400.0,
+                    ),
                     "num_steps": 800,
                     **_fresh_metrics_provenance(argv, is_replay=is_replay),
                 }
@@ -2010,7 +4843,11 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "stdout": "",
                     "stderr": "",
                     "status": "ok",
-                    "metrics": _metrics(success=True),
+                    "metrics": _metrics(
+                        success=True,
+                        contact_force_active_mean=65.0 if is_replay else 250.0,
+                        contact_force_peak=450.0 if is_replay else 2400.0,
+                    ),
                     "num_steps": 800,
                     **_fresh_metrics_provenance(argv, is_replay=is_replay),
                 }
@@ -2096,6 +4933,39 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(report["classification"], "invalid_benchmark")
         self.assertIn(
             "replay_saved_command_source",
+            report["replay_results"]["jump"]["failures"],
+        )
+
+    def test_replay_must_use_window_command_chunks(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in replay_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_row["mpc"]["saved_command_replay_source"] = "stitched_command_trajectory"
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "replay_window_command_source",
             report["replay_results"]["jump"]["failures"],
         )
 
@@ -2834,7 +5704,11 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                     "stdout": "",
                     "stderr": "",
                     "status": "ok",
-                    "metrics": _metrics(success=True),
+                    "metrics": _metrics(
+                        success=True,
+                        contact_force_active_mean=65.0 if is_replay else 250.0,
+                        contact_force_peak=450.0 if is_replay else 2400.0,
+                    ),
                     "num_steps": 800,
                     **_fresh_metrics_provenance(argv, is_replay=is_replay),
                 }
@@ -2910,6 +5784,75 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(jump_contact["max_geom_pairs"]["values"], [1024, 1024, 1024])
         self.assertEqual(jump_contact["contact_pair_count"]["values"], [0, 0, 0])
         self.assertEqual(jump_contact["active_contact_count"]["values"], [0, 1, 2])
+        self.assertEqual(
+            report["contact_summary"]["jump"]["baseline"]["force"][
+                "contact_force_active_mean"
+            ]["values"],
+            [60.0, 60.0, 60.0],
+        )
+        self.assertEqual(
+            jump_contact["force"]["contact_force_active_mean"]["values"],
+            [250.0, 250.0, 250.0],
+        )
+        self.assertEqual(
+            report["contact_summary"]["jump"]["replay"]["force"][
+                "contact_force_active_mean"
+            ]["values"],
+            [65.0, 65.0, 65.0],
+        )
+        jump_force_semantics = report["contact_summary"]["jump"][
+            "force_semantics"
+        ]
+        self.assertEqual(
+            jump_force_semantics["active"]["force_ratio_high_count"],
+            3,
+        )
+        self.assertEqual(
+            jump_force_semantics["active"]["isolated_raw_mjx_force_high_count"],
+            3,
+        )
+        self.assertEqual(
+            jump_force_semantics["active"]["shared_force_high_count"],
+            0,
+        )
+        self.assertEqual(
+            jump_force_semantics["active"]["replay_force_high_count"],
+            0,
+        )
+        self.assertEqual(
+            jump_force_semantics["active"]["semantic_classification_counts"],
+            {"isolated_raw_mjx_force_high": 3},
+        )
+        self.assertEqual(
+            jump_force_semantics["peak"]["force_ratio_high_count"],
+            3,
+        )
+        self.assertEqual(
+            jump_force_semantics["peak"]["isolated_raw_mjx_force_high_count"],
+            3,
+        )
+        self.assertEqual(
+            jump_force_semantics["active"]["mjx_to_baseline"]["values"],
+            [250.0 / 60.0, 250.0 / 60.0, 250.0 / 60.0],
+        )
+        self.assertEqual(
+            [
+                row["classification"]
+                for row in jump_force_semantics["active"]["rows"]
+            ],
+            ["force_ratio_high", "force_ratio_high", "force_ratio_high"],
+        )
+        self.assertEqual(
+            [
+                row["semantic_classification"]
+                for row in jump_force_semantics["active"]["rows"]
+            ],
+            [
+                "isolated_raw_mjx_force_high",
+                "isolated_raw_mjx_force_high",
+                "isolated_raw_mjx_force_high",
+            ],
+        )
         self.assertEqual(
             jump_contact["saturation_flags"],
             {
@@ -3371,6 +6314,41 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(report["classification"], "invalid_benchmark")
         self.assertIn("rollout_npz_schema", report["motion_results"]["jump"]["mjx_failures"])
 
+    def test_mjx_rollout_ref_indices_must_use_legacy_frame_convention(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in mjx_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_rollout = Path(bad_row["artifacts"]["rollout_npz"])
+            arrays = _valid_rollout_arrays()
+            frames = int(arrays["ref_indices"].shape[0])
+            arrays["ref_indices"] = np.arange(frames, dtype=np.int64).reshape(frames, 1)
+            np.savez_compressed(bad_rollout, **arrays)
+            bad_row["artifact_sha256"]["rollout_npz"] = _file_sha256(bad_rollout)
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn("rollout_npz_schema", report["motion_results"]["jump"]["mjx_failures"])
+
     def test_malformed_mjx_command_npz_fails_closed(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3405,7 +6383,44 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(report["classification"], "invalid_benchmark")
         self.assertIn("mpc_command_npz_schema", report["motion_results"]["jump"]["mjx_failures"])
 
-    def test_mjx_command_refined_qpos_must_match_rollout_qpos(self) -> None:
+    def test_mjx_command_npz_requires_window_command_chunks(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            bad_row = next(
+                row
+                for row in mjx_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            bad_command = Path(bad_row["artifacts"]["mpc_command_npz"])
+            arrays = _valid_command_arrays()
+            arrays.pop("window_starts")
+            np.savez_compressed(bad_command, **arrays)
+            bad_row["artifact_sha256"]["mpc_command_npz"] = _file_sha256(bad_command)
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "mpc_command_npz_schema",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+
+    def test_mjx_command_refined_qpos_must_match_command_qpos(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
@@ -3438,7 +6453,114 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertEqual(report["classification"], "invalid_benchmark")
         self.assertIn(
+            "mpc_command_qpos_mismatch",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+
+    def test_mjx_dynamic_rollout_qpos_may_differ_from_command_qpos(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            mjx_row = next(
+                row
+                for row in mjx_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            rollout_path = Path(mjx_row["artifacts"]["rollout_npz"])
+            arrays = _valid_rollout_arrays()
+            arrays["qpos"][:, 0, 0] = 0.5
+            np.savez_compressed(rollout_path, **arrays)
+            mjx_row["artifact_sha256"]["rollout_npz"] = _file_sha256(rollout_path)
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertNotIn(
             "mpc_rollout_qpos_mismatch",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+
+    def test_mjx_rollout_must_report_dynamic_execute_trace_source(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            mjx_row = next(
+                row
+                for row in mjx_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            mjx_row["rollout_source"] = "static_qpos_fallback"
+            mjx_row["rollout_dynamic_execute_trace"] = False
+            mjx_row["execute_trace_chunks"] = 0
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "mjx_dynamic_execute_trace",
+            report["motion_results"]["jump"]["mjx_failures"],
+        )
+
+    def test_mjx_warp_rejects_optimizer_selected_prefix_trace_source(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            manifest = json.loads(manifest_path.read_text())
+            mjx_rows, replay_rows = _acceptance_rows_with_artifacts(root)
+            mjx_row = next(
+                row
+                for row in mjx_rows
+                if row["motion"] == "jump" and row["seed"] == 1
+            )
+            mjx_row["mjx_impl"] = "warp"
+            mjx_row["execute_trace_source_counts"] = {
+                "rollout_tracer": 39,
+                "optimizer_selected_prefix": 1,
+            }
+
+            report = runner._build_report(
+                baseline_manifest=manifest_path,
+                baseline_rows=list(manifest["rows"]),
+                baseline_envelopes=manifest["baseline_envelopes"],
+                mjx_rows=mjx_rows,
+                replay_rows=replay_rows,
+                min_speedup=12.0,
+                target="h100_speedup",
+                min_realtime_factor=1.0,
+                required_gpu_name_fragment="H100",
+            )
+
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "invalid_benchmark")
+        self.assertIn(
+            "mjx_dynamic_execute_trace",
             report["motion_results"]["jump"]["mjx_failures"],
         )
 
@@ -3712,6 +6834,77 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(report["classification"], "speed_regression")
         self.assertIn("real_time_factor", report["realtime_results"]["jump"]["failures"])
 
+    def test_4090_target_fails_when_speedup_is_below_target(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            _rewrite_baseline_gpu(manifest_path, "NVIDIA GeForce RTX 4090")
+            output_dir = root / "acceptance"
+
+            def fake_run_command(argv, *, cwd):
+                del cwd
+                output = Path(argv[argv.index("--output-dir") + 1])
+                is_replay = "replay_command" in argv
+                _write_artifacts(output, include_command=not is_replay)
+                row = {
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "status": "ok",
+                    "metrics": _metrics(success=True),
+                    "num_steps": 800,
+                    **_fresh_metrics_provenance(argv, is_replay=is_replay),
+                }
+                if is_replay:
+                    row.update(
+                        _replay_evidence(
+                            argv,
+                            runtime_gpu_name="NVIDIA GeForce RTX 4090",
+                        )
+                    )
+                else:
+                    row.update(
+                        {
+                            "mpc_accepted": True,
+                            "accepted_windows": 40,
+                            "mpc_used_baseline_fallback": False,
+                            "compile_init_wall_time_sec": 2.0,
+                            "jit_warmup_enabled": True,
+                            "jit_warmup_wall_time_sec": 1.5,
+                            "runtime_visible_devices": ("0",),
+                            "steady_state_wall_time_sec": 20.0,
+                            "control_dt_sec": 0.1,
+                            "evaluated_motion_duration_sec": 80.0,
+                            **_mjx_contact_evidence(),
+                            "runtime_gpu_name": "NVIDIA GeForce RTX 4090",
+                        }
+                    )
+                return row
+
+            with mock.patch.object(runner, "run_command", side_effect=fake_run_command):
+                exit_code = runner.main(
+                    [
+                        "--baseline-manifest",
+                        str(manifest_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--device",
+                        "cuda:0",
+                        "--target",
+                        "4090_realtime",
+                        "--required-gpu-name-fragment",
+                        "4090",
+                    ]
+                )
+
+            report = json.loads((output_dir / "acceptance_report.json").read_text())
+
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(report["passed"])
+        self.assertEqual(report["classification"], "speed_regression")
+        self.assertIn("speedup", report["speed_results"]["jump"]["failures"])
+
     def test_realtime_gate_requires_explicit_duration_evidence_when_strict(self) -> None:
         runner = load_runner()
         rows = [
@@ -3752,6 +6945,45 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                             "compile_init_wall_time_sec": 2.0,
                             "jit_warmup_enabled": True,
                             "jit_warmup_wall_time_sec": 1.5,
+                            "optimizer_result_sync_wall_time_sec": 0.75,
+                            "strip_live_mjx_data_between_windows": True,
+                            "score_only_optimizer": True,
+                            "contact_force_mode": "first_row",
+                            "contact_force_first_row_diagnostics": True,
+                            "candidate_rank_diagnostics_top_k": 8,
+                            "candidate_rank_diagnostics_windows": 40,
+                            "mjx_candidate_rescore_diagnostics": True,
+                            "candidate_rescore_diagnostics_windows": 40,
+                            "candidate_rescore_score_delta_max": 0.004,
+                            "candidate_rescore_score_delta_mean": 0.00125,
+                            "candidate_rescore_top1_changed_iteration_sum": 7,
+                            "candidate_rescore_selection_top_k": 4,
+                            "candidate_rescore_selection_windows": 40,
+                            "candidate_rescore_selection_score_delta_max": 0.006,
+                            "candidate_rescore_selection_score_delta_mean": 0.0025,
+                            "candidate_rescore_selection_changed_iteration_sum": 5,
+                            "zero_delta_noop_iteration_sum": 2,
+                            "zero_delta_noop_windows": 1,
+                            "zero_delta_noop_accepted_windows": 1,
+                            "score_threshold_noop_iteration_sum": 3,
+                            "score_threshold_noop_windows": 2,
+                            "score_threshold_noop_accepted_windows": 2,
+                            "control_delta_guard_noop_iteration_sum": 4,
+                            "control_delta_guard_noop_windows": 2,
+                            "control_delta_guard_noop_accepted_windows": 1,
+                            "noop_candidate_iteration_sum": 5,
+                            "noop_candidate_windows": 3,
+                            "noop_candidate_accepted_windows": 3,
+                            "iteration_zero_delta_noop_window_counts": [1, 1],
+                            "iteration_score_threshold_noop_window_counts": [2, 1],
+                            "iteration_control_delta_guard_noop_window_counts": [1, 3],
+                            "iteration_noop_candidate_window_counts": [3, 2],
+                            "top_score_gap_min": 0.01,
+                            "top_score_gap_mean": 0.02,
+                            "top_score_gap_max": 0.03,
+                            "top_score_gap_windows": 40,
+                            "iteration_top_score_gap_mins": [0.01, 0.02],
+                            "iteration_top_score_gap_means": [0.015, 0.025],
                             "runtime_visible_devices": ["0"],
                             "steady_state_wall_time_sec": 1.0,
                             **_mjx_contact_evidence(active_contact_count=3),
@@ -3765,10 +6997,55 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
         self.assertEqual(row["compile_init_wall_time_sec"], 2.0)
         self.assertTrue(row["jit_warmup_enabled"])
         self.assertEqual(row["jit_warmup_wall_time_sec"], 1.5)
+        self.assertEqual(row["optimizer_result_sync_wall_time_sec"], 0.75)
+        self.assertTrue(row["strip_live_mjx_data_between_windows"])
+        self.assertTrue(row["score_only_optimizer"])
+        self.assertEqual(row["contact_force_mode"], "first_row")
+        self.assertTrue(row["contact_force_first_row_diagnostics"])
+        self.assertEqual(row["candidate_rank_diagnostics_top_k"], 8)
+        self.assertEqual(row["candidate_rank_diagnostics_windows"], 40)
+        self.assertTrue(row["mjx_candidate_rescore_diagnostics"])
+        self.assertEqual(row["candidate_rescore_diagnostics_windows"], 40)
+        self.assertEqual(row["candidate_rescore_score_delta_max"], 0.004)
+        self.assertEqual(row["candidate_rescore_score_delta_mean"], 0.00125)
+        self.assertEqual(row["candidate_rescore_top1_changed_iteration_sum"], 7)
+        self.assertEqual(row["candidate_rescore_selection_top_k"], 4)
+        self.assertEqual(row["candidate_rescore_selection_windows"], 40)
+        self.assertEqual(row["candidate_rescore_selection_score_delta_max"], 0.006)
+        self.assertEqual(row["candidate_rescore_selection_score_delta_mean"], 0.0025)
+        self.assertEqual(row["candidate_rescore_selection_changed_iteration_sum"], 5)
+        self.assertEqual(row["top_score_gap_min"], 0.01)
+        self.assertEqual(row["top_score_gap_mean"], 0.02)
+        self.assertEqual(row["top_score_gap_max"], 0.03)
+        self.assertEqual(row["top_score_gap_windows"], 40)
+        self.assertEqual(row["iteration_top_score_gap_mins"], [0.01, 0.02])
+        self.assertEqual(row["iteration_top_score_gap_means"], [0.015, 0.025])
         self.assertEqual(row["runtime_visible_devices"], ["0"])
         self.assertEqual(row["runtime_gpu_name"], "NVIDIA H100 80GB HBM3")
         self.assertEqual(row["control_dt_sec"], 0.02)
         self.assertEqual(row["evaluated_motion_duration_sec"], 16.0)
+        self.assertEqual(row["zero_delta_noop_iteration_sum"], 2)
+        self.assertEqual(row["zero_delta_noop_windows"], 1)
+        self.assertEqual(row["zero_delta_noop_accepted_windows"], 1)
+        self.assertEqual(row["score_threshold_noop_iteration_sum"], 3)
+        self.assertEqual(row["score_threshold_noop_windows"], 2)
+        self.assertEqual(row["score_threshold_noop_accepted_windows"], 2)
+        self.assertEqual(row["control_delta_guard_noop_iteration_sum"], 4)
+        self.assertEqual(row["control_delta_guard_noop_windows"], 2)
+        self.assertEqual(row["control_delta_guard_noop_accepted_windows"], 1)
+        self.assertEqual(row["noop_candidate_iteration_sum"], 5)
+        self.assertEqual(row["noop_candidate_windows"], 3)
+        self.assertEqual(row["noop_candidate_accepted_windows"], 3)
+        self.assertEqual(row["iteration_zero_delta_noop_window_counts"], [1, 1])
+        self.assertEqual(
+            row["iteration_score_threshold_noop_window_counts"],
+            [2, 1],
+        )
+        self.assertEqual(
+            row["iteration_control_delta_guard_noop_window_counts"],
+            [1, 3],
+        )
+        self.assertEqual(row["iteration_noop_candidate_window_counts"], [3, 2])
         self.assertFalse(row["contact_saturated"])
         self.assertEqual(row["max_contact_points"], 512)
         self.assertEqual(row["active_contact_count"], 3)
@@ -3944,11 +7221,17 @@ def _mjx_metrics_payload(planned, *, motion: str | None = None) -> dict[str, obj
         motion = str(
             Path(planned.mjx_argv[planned.mjx_argv.index("--motion") + 1]).resolve()
         )
+    collision_profile = _test_optional_argv_value(
+        planned.mjx_argv,
+        "--collision-profile",
+        default="wxy_parity",
+    )
     return {
         "method": "g1_wbc_joint_global",
         "motion": motion,
         "device": "cuda:0",
         "checkpoint": planned.mjx_argv[planned.mjx_argv.index("--checkpoint") + 1],
+        "collision_profile": collision_profile,
         "max_steps": 800,
         "metrics": {
             **_metrics(success=True),
@@ -3967,6 +7250,23 @@ def _mjx_metrics_payload(planned, *, motion: str | None = None) -> dict[str, obj
             "jit_warmup_enabled": True,
             "jit_warmup_wall_time_sec": 1.5,
             "physics_scan_enabled": True,
+            "collision_profile": collision_profile,
+            "mjx_impl": planned.mjx_argv[planned.mjx_argv.index("--mjx-impl") + 1],
+            "mjx_model_impl": planned.mjx_argv[
+                planned.mjx_argv.index("--mjx-impl") + 1
+            ],
+            "mjx_model_options": _test_mjx_model_options(planned.mjx_argv),
+            "mjx_warp_naconmax": int(
+                planned.mjx_argv[planned.mjx_argv.index("--mjx-warp-naconmax") + 1]
+            ),
+            "mjx_warp_njmax": int(
+                planned.mjx_argv[planned.mjx_argv.index("--mjx-warp-njmax") + 1]
+            ),
+            **_mjx_search_surface_evidence(planned.mjx_argv),
+            "rollout_source": "dynamic_execute_trace",
+            "rollout_dynamic_execute_trace": True,
+            "execute_trace_chunks": 40,
+            "execute_trace_source_counts": {"rollout_tracer": 40},
             "physics_step_count_min": 40,
             "physics_step_count_max": 40,
             "physics_step_count_windows": 40,
@@ -3974,6 +7274,22 @@ def _mjx_metrics_payload(planned, *, motion: str | None = None) -> dict[str, obj
             "use_guided_candidate": _test_argv_bool_optional(
                 planned.mjx_argv,
                 "--mjx-guided-candidate",
+            ),
+            "guided_candidate_period": _test_optional_argv_int(
+                planned.mjx_argv,
+                "--mjx-guided-candidate-period",
+            ),
+            "guided_candidate_windows": _test_expected_guided_candidate_windows(
+                planned.mjx_argv
+            ),
+            "contact_force_first_row_diagnostics": (
+                "--mjx-contact-force-first-row-diagnostics" in planned.mjx_argv
+            ),
+            "strip_live_mjx_data_between_windows": (
+                "--mjx-strip-live-mjx-data" in planned.mjx_argv
+            ),
+            "score_only_optimizer": (
+                "--mjx-score-only-optimizer" in planned.mjx_argv
             ),
             "runtime_visible_devices": ["0"],
             **_mjx_contact_evidence(),
@@ -3997,11 +7313,12 @@ def _replay_metrics_payload(planned) -> dict[str, object]:
         "mpc": {
             "backend": (
                 "spider.tasks.g1_wbc.spider_task."
-                "G1WbcSamplingTask.replay_qpos_command_sequence"
+                "G1WbcSamplingTask.replay_command_chunks"
             ),
             "saved_command": str(saved_command.resolve()),
             "saved_command_sha256": _file_sha256(saved_command),
             "replay_mode": "shared_execute_backend",
+            "saved_command_replay_source": "window_command_chunks",
             "control_steps": 20,
             "num_command_frames": 801,
             "num_replay_steps": 800,
@@ -4014,6 +7331,9 @@ def _replay_metrics_payload(planned) -> dict[str, object]:
 def _valid_rollout_arrays() -> dict[str, np.ndarray]:
     frames = 801
     steps = 800
+    ref_indices = np.concatenate(
+        (np.array([0], dtype=np.int64), np.arange(steps, dtype=np.int64))
+    ).reshape(frames, 1)
     return {
         "qpos": np.zeros((frames, 1, 36), dtype=np.float32),
         "qvel": np.zeros((frames, 1, 35), dtype=np.float32),
@@ -4027,16 +7347,33 @@ def _valid_rollout_arrays() -> dict[str, np.ndarray]:
         "contact_force": np.zeros((frames, 1, 2), dtype=np.float32),
         "floor_contact_indicator": np.zeros((frames, 1, 3), dtype=np.float32),
         "floor_contact_force": np.zeros((frames, 1, 3), dtype=np.float32),
-        "ref_indices": np.zeros((frames, 1), dtype=np.int64),
+        "ref_indices": ref_indices,
         "dt": np.array(0.02, dtype=np.float32),
     }
 
 
 def _valid_command_arrays() -> dict[str, np.ndarray]:
     frames = 801
+    windows = 40
+    horizon = 40
+    starts = np.arange(windows, dtype=np.int32) * 20
+    execute_steps = np.full(windows, 20, dtype=np.int32)
+    horizons = np.full(windows, horizon, dtype=np.int32)
     return {
         "refined_qpos": np.zeros((frames, 36), dtype=np.float32),
         "candidate_scores": np.zeros((1,), dtype=np.float32),
+        "window_command_schema_version": np.array(1, dtype=np.int32),
+        "window_starts": starts,
+        "window_execute_steps": execute_steps,
+        "window_horizons": horizons,
+        "window_command_joint_pos": np.zeros((windows, horizon, 1, 29), dtype=np.float32),
+        "window_command_joint_vel": np.zeros((windows, horizon, 1, 29), dtype=np.float32),
+        "window_command_body_pos_w": np.zeros((windows, horizon, 1, 30, 3), dtype=np.float32),
+        "window_command_body_quat_w": np.zeros((windows, horizon, 1, 30, 4), dtype=np.float32),
+        "window_command_body_lin_vel_w": np.zeros((windows, horizon, 1, 30, 3), dtype=np.float32),
+        "window_command_body_ang_vel_w": np.zeros((windows, horizon, 1, 30, 3), dtype=np.float32),
+        "window_command_qpos_chunks": np.zeros((windows, horizon, 1, 36), dtype=np.float32),
+        "window_command_qvel_chunks": np.zeros((windows, horizon, 1, 35), dtype=np.float32),
         "command_joint_pos": np.zeros((frames, 1, 29), dtype=np.float32),
         "command_joint_vel": np.zeros((frames, 1, 29), dtype=np.float32),
         "command_body_pos_w": np.zeros((frames, 1, 30, 3), dtype=np.float32),
@@ -4089,7 +7426,13 @@ def _acceptance_rows_with_artifacts(
                     "compile_init_wall_time_sec": 2.0,
                     "jit_warmup_enabled": True,
                     "jit_warmup_wall_time_sec": 1.5,
+                    "rollout_source": "dynamic_execute_trace",
+                    "rollout_dynamic_execute_trace": True,
+                    "execute_trace_chunks": 40,
+                    "execute_trace_source_counts": {"rollout_tracer": 40},
                     "runtime_visible_devices": ("0",),
+                    "sigma_decay": 0.75,
+                    "mjx_min_score_improvement": 1.0e-9,
                     "steady_state_wall_time_sec": 1.0,
                     "artifacts": mjx_artifacts,
                     "artifact_sha256": {
@@ -4138,6 +7481,10 @@ def _mjx_contact_evidence(
         "max_geom_pairs": max_geom_pairs,
         "contact_pair_count": contact_pair_count,
         "active_contact_count": active_contact_count,
+        "rollout_source": "dynamic_execute_trace",
+        "rollout_dynamic_execute_trace": True,
+        "execute_trace_chunks": 40,
+        "execute_trace_source_counts": {"rollout_tracer": 40},
     }
 
 
@@ -4152,6 +7499,11 @@ def _fresh_metrics_provenance(
         "metrics_device": _test_argv_value(argv, "--device"),
         "metrics_checkpoint": _test_argv_value(argv, "--checkpoint"),
         "metrics_max_steps": int(_test_argv_value(argv, "--max-steps")),
+        "collision_profile": _test_optional_argv_value(
+            argv,
+            "--collision-profile",
+            default="wxy_parity",
+        ),
     }
     if is_replay:
         return {**payload, "mpc": _replay_evidence(argv)["mpc"]}
@@ -4168,6 +7520,17 @@ def _fresh_metrics_provenance(
             "jit_warmup_enabled": True,
             "jit_warmup_wall_time_sec": 1.5,
             "physics_scan_enabled": True,
+            "collision_profile": _test_optional_argv_value(
+                argv,
+                "--collision-profile",
+                default="wxy_parity",
+            ),
+            "mjx_impl": _test_argv_value(argv, "--mjx-impl"),
+            "mjx_model_impl": _test_argv_value(argv, "--mjx-impl"),
+            "mjx_model_options": _test_mjx_model_options(argv),
+            "mjx_warp_naconmax": int(_test_argv_value(argv, "--mjx-warp-naconmax")),
+            "mjx_warp_njmax": int(_test_argv_value(argv, "--mjx-warp-njmax")),
+            **_mjx_search_surface_evidence(argv),
             "physics_step_count_min": 40,
             "physics_step_count_max": 40,
             "physics_step_count_windows": 40,
@@ -4176,12 +7539,130 @@ def _fresh_metrics_provenance(
                 argv,
                 "--mjx-guided-candidate",
             ),
+            "guided_candidate_period": _test_optional_argv_int(
+                argv,
+                "--mjx-guided-candidate-period",
+            ),
+            "guided_candidate_windows": _test_expected_guided_candidate_windows(argv),
         },
+    }
+
+
+def _mjx_search_surface_evidence(argv: list[str]) -> dict[str, object]:
+    return {
+        "sample_count": int(_test_argv_value(argv, "--mpc-samples")),
+        "optimizer_iterations": int(_test_argv_value(argv, "--mpc-iterations")),
+        "planning_horizon_steps": int(
+            _test_argv_value(argv, "--mpc-planning-horizon-steps")
+        ),
+        "control_steps": int(_test_argv_value(argv, "--mpc-control-steps")),
+        "knot_count": int(_test_argv_value(argv, "--mpc-knot-count")),
+        "elite_frac": float(_test_argv_value(argv, "--mpc-elite-frac")),
+        "temperature": float(_test_argv_value(argv, "--mpc-temperature")),
+        "root_pos_sigma": float(_test_argv_value(argv, "--mpc-root-pos-sigma")),
+        "root_rot_sigma": float(_test_argv_value(argv, "--mpc-root-rot-sigma")),
+        "joint_sigma": float(_test_argv_value(argv, "--mpc-joint-sigma")),
+        "first_ctrl_noise_scale": float(
+            _test_argv_value(argv, "--mpc-first-ctrl-noise-scale")
+        ),
+        "last_ctrl_noise_scale": float(
+            _test_argv_value(argv, "--mpc-last-ctrl-noise-scale")
+        ),
+        "final_noise_scale": float(_test_argv_value(argv, "--mpc-final-noise-scale")),
+        "sigma_decay": float(_test_argv_value(argv, "--mpc-sigma-decay")),
+        "mjx_min_score_improvement": _test_optional_argv_float(
+            argv,
+            "--mjx-min-score-improvement",
+            default=1.0e-9,
+        ),
+        "mjx_min_top_score_gap": _test_optional_argv_float(
+            argv,
+            "--mjx-min-top-score-gap",
+            default=0.0,
+        ),
+        "mjx_cem_update_min_top_score_gap": _test_optional_argv_float(
+            argv,
+            "--mjx-cem-update-min-top-score-gap",
+            default=0.0,
+        ),
+        "mjx_max_control_delta": _test_optional_argv_float(
+            argv,
+            "--mjx-max-control-delta",
+            default=None,
+        ),
+        "candidate_rank_diagnostics_top_k": int(
+            _test_optional_argv_value(
+                argv,
+                "--mjx-candidate-rank-diagnostics-top-k",
+                default="0",
+            )
+        ),
+        "mjx_candidate_rescore_diagnostics": (
+            "--mjx-candidate-rescore-diagnostics" in argv
+        ),
+        "candidate_rescore_diagnostics_windows": (
+            40 if "--mjx-candidate-rescore-diagnostics" in argv else 0
+        ),
+        "candidate_rescore_selection_top_k": int(
+            _test_optional_argv_value(
+                argv,
+                "--mjx-candidate-rescore-selection-top-k",
+                default="0",
+            )
+        ),
+        "candidate_rescore_selection_windows": (
+            40
+            if "--mjx-candidate-rescore-selection-top-k" in argv
+            else 0
+        ),
+        "contact_force_mode": _test_optional_argv_value(
+            argv,
+            "--mjx-contact-force-mode",
+            default="sum_rows",
+        ),
+        "use_warm_start": _test_argv_bool_optional(argv, "--mpc-warm-start"),
     }
 
 
 def _test_argv_value(argv: list[str], flag: str) -> str:
     return str(argv[argv.index(flag) + 1])
+
+
+def _test_optional_argv_value(
+    argv: list[str],
+    flag: str,
+    *,
+    default: str | None = None,
+) -> str | None:
+    if flag not in argv:
+        return default
+    return _test_argv_value(argv, flag)
+
+
+def _test_optional_argv_int(argv: list[str], flag: str) -> int | None:
+    if flag not in argv:
+        return None
+    return int(_test_argv_value(argv, flag))
+
+
+def _test_optional_argv_float(
+    argv: list[str],
+    flag: str,
+    *,
+    default: float | None = None,
+) -> float | None:
+    if flag not in argv:
+        return default
+    return float(_test_argv_value(argv, flag))
+
+
+def _test_expected_guided_candidate_windows(argv: list[str]) -> int:
+    if not _test_argv_bool_optional(argv, "--mjx-guided-candidate"):
+        return 0
+    period = _test_optional_argv_int(argv, "--mjx-guided-candidate-period")
+    if period is None:
+        return 40
+    return (40 + period - 1) // period
 
 
 def _test_argv_bool_optional(argv: list[str], flag: str) -> bool:
@@ -4191,6 +7672,17 @@ def _test_argv_bool_optional(argv: list[str], flag: str) -> bool:
     if positive == negative:
         raise AssertionError(f"expected exactly one of {flag} or {negative_flag}")
     return positive
+
+
+def _test_mjx_model_options(argv: list[str]) -> dict[str, int]:
+    options: dict[str, int] = {}
+    if "--mjx-model-iterations" in argv:
+        options["iterations"] = int(_test_argv_value(argv, "--mjx-model-iterations"))
+    if "--mjx-model-ls-iterations" in argv:
+        options["ls_iterations"] = int(
+            _test_argv_value(argv, "--mjx-model-ls-iterations")
+        )
+    return options
 
 
 def _replay_evidence(
@@ -4210,11 +7702,12 @@ def _replay_evidence(
         "mpc": {
             "backend": (
                 "spider.tasks.g1_wbc.spider_task."
-                "G1WbcSamplingTask.replay_qpos_command_sequence"
+                "G1WbcSamplingTask.replay_command_chunks"
             ),
             "saved_command": str(Path(saved_command).expanduser().resolve()),
             "saved_command_sha256": _file_sha256(Path(saved_command)),
             "replay_mode": "shared_execute_backend",
+            "saved_command_replay_source": "window_command_chunks",
             "control_steps": control_steps,
             "num_command_frames": num_command_frames,
             "num_replay_steps": num_replay_steps,

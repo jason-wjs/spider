@@ -34,6 +34,8 @@ dependencies = [
   "gspread",
   "google-auth",
   "mink",
+  "jax[cuda13]",
+  "mujoco-mjx==3.7.0",
 ]
 
 [project.scripts]

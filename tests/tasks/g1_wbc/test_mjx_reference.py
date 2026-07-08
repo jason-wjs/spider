@@ -122,6 +122,11 @@ class MjxReferenceTest(unittest.TestCase):
             reference["score_reference"]["body_pos"].shape,
             (4, len(MUJOCO_BODY_NAMES), 3),
         )
+        self.assertEqual(reference["score_reference"]["joint_pos"].shape, (4, ACTION_DIM))
+        np.testing.assert_allclose(
+            reference["score_reference"]["joint_pos"],
+            motion.qpos()[[3, 4, 5, 5], 7:].numpy(),
+        )
         self.assertEqual(reference["score_reference"]["root_quat"].shape, (4, 4))
         self.assertEqual(
             reference["score_reference"]["body_quat"].shape,
@@ -136,8 +141,8 @@ class MjxReferenceTest(unittest.TestCase):
             (4, len(TASK_EE_BODY_NAMES), 4),
         )
         self.assertEqual(reference["score_reference"]["contact"].shape, (4, 2))
-        self.assertEqual(reference["prev_control"].shape, (QPOS_DIM - 1,))
-        self.assertAlmostEqual(float(reference["prev_control"][0]), 0.4)
+        self.assertEqual(reference["prev_control"].shape, (ACTION_DIM,))
+        self.assertAlmostEqual(float(reference["prev_control"][0]), 0.0)
         self.assertEqual(reference["joint_low"].shape, (ACTION_DIM,))
         self.assertEqual(reference["joint_high"].shape, (ACTION_DIM,))
         self.assertIsInstance(reference["obs_indices"], JaxObsIndices)
@@ -155,12 +160,15 @@ class MjxReferenceTest(unittest.TestCase):
             runtime=_Runtime(),
         )
 
-        expected = motion.qpos()[[2, 3, 3, 3, 3], 0].numpy()
+        expected = motion.qpos()[[3, 3, 3, 3, 3], 0].numpy()
         np.testing.assert_allclose(
             reference["score_reference"]["root_pos"][:, 0],
             expected,
         )
-        np.testing.assert_allclose(reference["base_qpos"][:, 0], expected)
+        np.testing.assert_allclose(
+            reference["base_qpos"][:, 0],
+            motion.qpos()[[2, 3, 3, 3, 3], 0].numpy(),
+        )
 
     def test_rollout_reference_accepts_live_state_overrides(self) -> None:
         motion = _motion(frames=6)
@@ -188,10 +196,12 @@ class MjxReferenceTest(unittest.TestCase):
             history={"joint_pos": np.full((5, ACTION_DIM), 2.0, dtype=np.float32)},
             last_action=np.full(ACTION_DIM, 0.125, dtype=np.float32),
         )
-        prev_control = np.full(QPOS_DIM - 1, 0.33, dtype=np.float32)
+        prev_control = np.full(ACTION_DIM, 0.33, dtype=np.float32)
         prev_joint_acc = np.full(ACTION_DIM, 0.21, dtype=np.float32)
         prev_contact = np.array([1.0, 0.0], dtype=np.float32)
         prev_contact_force = np.array([15.0, 25.0], dtype=np.float32)
+        mjx_data = object()
+        live_robot_state["mjx_data"] = mjx_data
 
         reference = build_mjx_rollout_reference(
             start=2,
@@ -212,6 +222,7 @@ class MjxReferenceTest(unittest.TestCase):
         np.testing.assert_allclose(reference["initial_robot_state"]["qpos"], 42.0)
         np.testing.assert_allclose(reference["initial_robot_state"]["qvel"], 0.25)
         np.testing.assert_allclose(reference["initial_robot_state"]["body_pos_w"], 1.5)
+        self.assertIs(reference["initial_robot_state"]["mjx_data"], mjx_data)
         np.testing.assert_allclose(
             reference["base_qpos"][:, 0],
             motion.qpos()[[2, 3, 4, 5], 0].numpy(),

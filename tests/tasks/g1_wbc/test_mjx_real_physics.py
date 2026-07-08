@@ -16,11 +16,18 @@ from spider.tasks.g1_wbc.constants import (
 )
 from spider.tasks.g1_wbc.mjx_model import build_mjx_model_bundle
 from spider.tasks.g1_wbc.mjx_physics import (
+    FootContactGeomGroups,
+    _warp_floor_contact_summary,
     action_to_model_ctrl,
     foot_contact_geom_groups,
+    contact_count_diagnostics_from_warp_impl,
     floor_contact_force_from_contact,
+    floor_contact_force_first_row_from_contact,
+    floor_contact_force_from_warp_impl,
+    floor_contact_force_first_row_from_warp_impl,
     foot_contact_indicator_from_contact,
     floor_contact_indicator_from_contact,
+    floor_contact_indicator_from_warp_impl,
     joint_order_to_model_ctrl,
     make_mjx_command_reference_fn,
     make_mjx_physics_step_fn,
@@ -59,8 +66,20 @@ class _NumpyJnp:
         return np.clip(value, low, high)
 
     @staticmethod
+    def cumsum(value):
+        return np.cumsum(value)
+
+    @staticmethod
     def maximum(left, right):
         return np.maximum(left, right)
+
+    @staticmethod
+    def minimum(left, right):
+        return np.minimum(left, right)
+
+    @staticmethod
+    def argmax(value):
+        return np.argmax(value)
 
     @staticmethod
     def sum(value, axis=None):
@@ -166,6 +185,41 @@ def _require_real_mjx_test_runtime():
     if not probe_mjx_runtime().available:
         raise unittest.SkipTest("jax/mujoco.mjx runtime is not available")
     return require_mjx_runtime()
+
+
+def _warp_contact_impl_fixture():
+    return SimpleNamespace(
+        contact__geom=np.array(
+            [
+                [3, 11],
+                [3, 25],
+                [31, 3],
+                [3, 25],
+            ],
+            dtype=np.int32,
+        ),
+        contact__dist=np.array([-0.001, -0.002, -0.003, -0.004], dtype=np.float32),
+        contact__includemargin=np.zeros(4, dtype=np.float32),
+        contact__worldid=np.array([0, 1, 0, 0], dtype=np.int32),
+        contact__dim=np.array([1, 1, 3, 1], dtype=np.int32),
+        contact__efc_address=np.array(
+            [
+                [0, -1, -1, -1],
+                [1, -1, -1, -1],
+                [1, 2, 3, 4],
+                [5, -1, -1, -1],
+            ],
+            dtype=np.int32,
+        ),
+        nacon=np.array([3], dtype=np.int32),
+        efc__force=np.array(
+            [
+                [5.0, 1.0, 2.0, 3.0, 4.0, 100.0],
+                [0.0, 7.0, 100.0, 100.0, 100.0, 100.0],
+            ],
+            dtype=np.float32,
+        ),
+    )
 
 
 class MjxRealPhysicsTest(unittest.TestCase):
@@ -415,6 +469,305 @@ class MjxRealPhysicsTest(unittest.TestCase):
             np.array([10.0, 5.0, 30.0], dtype=np.float32),
         )
 
+    def test_floor_contact_force_first_row_from_contact_matches_mujoco_warp_probe(
+        self,
+    ) -> None:
+        contact = SimpleNamespace(
+            geom=np.array(
+                [
+                    [3, 11],
+                    [3, 25],
+                    [31, 3],
+                    [31, 25],
+                ],
+                dtype=np.int32,
+            ),
+            dist=np.array([-0.001, -0.002, -0.003, -0.004], dtype=np.float32),
+            includemargin=np.zeros(4, dtype=np.float32),
+            dim=np.array([3, 1, 3, 3], dtype=np.int32),
+            efc_address=np.array([0, 8, 9, 13], dtype=np.int32),
+        )
+        efc_force = np.array(
+            [
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                50.0,
+                50.0,
+                50.0,
+                50.0,
+                5.0,
+                6.0,
+                7.0,
+                8.0,
+                9.0,
+                100.0,
+            ],
+            dtype=np.float32,
+        )
+
+        force = floor_contact_force_first_row_from_contact(
+            contact,
+            efc_force,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=tuple(range(11, 18)),
+            right_foot_geom_ids=tuple(range(21, 28)),
+            other_robot_geom_ids=(31, 32),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(
+            force,
+            np.array([1.0, 5.0, 6.0], dtype=np.float32),
+        )
+
+    def test_floor_contact_indicator_from_warp_impl_filters_world_and_padding(
+        self,
+    ) -> None:
+        impl = _warp_contact_impl_fixture()
+
+        world0 = floor_contact_indicator_from_warp_impl(
+            impl,
+            0,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+            jnp=_NumpyJnp,
+        )
+        world1 = floor_contact_indicator_from_warp_impl(
+            impl,
+            1,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(world0, np.array([1.0, 0.0, 1.0], dtype=np.float32))
+        np.testing.assert_allclose(world1, np.array([0.0, 1.0, 0.0], dtype=np.float32))
+
+    def test_floor_contact_force_from_warp_impl_sums_2d_efc_rows_per_world(
+        self,
+    ) -> None:
+        impl = _warp_contact_impl_fixture()
+
+        world0 = floor_contact_force_from_warp_impl(
+            impl,
+            0,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+            jnp=_NumpyJnp,
+        )
+        world1 = floor_contact_force_from_warp_impl(
+            impl,
+            1,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(world0, np.array([5.0, 0.0, 10.0], dtype=np.float32))
+        np.testing.assert_allclose(world1, np.array([0.0, 7.0, 0.0], dtype=np.float32))
+
+    def test_warp_contact_helpers_use_global_nacon_prefix_when_broadcast(self) -> None:
+        impl = SimpleNamespace(
+            contact__geom=np.array(
+                [
+                    [3, 11],
+                    [3, 25],
+                    [3, 11],
+                    [3, 25],
+                    [-1, -1],
+                ],
+                dtype=np.int32,
+            ),
+            contact__dist=np.array(
+                [-0.001, -0.002, -0.003, -0.004, 0.0],
+                dtype=np.float32,
+            ),
+            contact__includemargin=np.zeros(5, dtype=np.float32),
+            contact__worldid=np.array([0, 0, 1, 1, 1], dtype=np.int32),
+            contact__dim=np.array([1, 1, 1, 1, 1], dtype=np.int32),
+            contact__efc_address=np.array(
+                [
+                    [0, -1, -1, -1],
+                    [1, -1, -1, -1],
+                    [0, -1, -1, -1],
+                    [1, -1, -1, -1],
+                    [-1, -1, -1, -1],
+                ],
+                dtype=np.int32,
+            ),
+            nacon=np.array([2, 5], dtype=np.int32),
+            efc__force=np.array(
+                [
+                    [10.0, 20.0],
+                    [30.0, 40.0],
+                ],
+                dtype=np.float32,
+            ),
+        )
+
+        world1 = floor_contact_force_from_warp_impl(
+            impl,
+            1,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(),
+            jnp=_NumpyJnp,
+        )
+        counts = contact_count_diagnostics_from_warp_impl(impl, 1, jnp=_NumpyJnp)
+
+        np.testing.assert_allclose(
+            world1,
+            np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        )
+        self.assertEqual(float(counts["active_contact_count"]), 0.0)
+        self.assertEqual(float(counts["contact_pair_count"]), 0.0)
+
+    def test_floor_contact_force_first_row_from_warp_impl_uses_first_solver_row(
+        self,
+    ) -> None:
+        impl = _warp_contact_impl_fixture()
+
+        world0 = floor_contact_force_first_row_from_warp_impl(
+            impl,
+            0,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+            jnp=_NumpyJnp,
+        )
+        world1 = floor_contact_force_first_row_from_warp_impl(
+            impl,
+            1,
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+            jnp=_NumpyJnp,
+        )
+
+        np.testing.assert_allclose(world0, np.array([5.0, 0.0, 1.0], dtype=np.float32))
+        np.testing.assert_allclose(world1, np.array([0.0, 7.0, 0.0], dtype=np.float32))
+
+    def test_contact_count_diagnostics_from_warp_impl_counts_per_world(self) -> None:
+        impl = _warp_contact_impl_fixture()
+
+        world0 = contact_count_diagnostics_from_warp_impl(impl, 0, jnp=_NumpyJnp)
+        world1 = contact_count_diagnostics_from_warp_impl(impl, 1, jnp=_NumpyJnp)
+
+        self.assertEqual(float(world0["active_contact_count"]), 2.0)
+        self.assertEqual(float(world0["contact_pair_count"]), 2.0)
+        self.assertEqual(float(world1["active_contact_count"]), 1.0)
+        self.assertEqual(float(world1["contact_pair_count"]), 1.0)
+
+    def test_warp_floor_contact_summary_matches_public_helpers(self) -> None:
+        impl = _warp_contact_impl_fixture()
+        contact_groups = FootContactGeomGroups(
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+        )
+
+        for world_id in (0, 1):
+            summary = _warp_floor_contact_summary(
+                impl,
+                world_id,
+                contact_groups=contact_groups,
+                jnp=_NumpyJnp,
+            )
+            indicator = floor_contact_indicator_from_warp_impl(
+                impl,
+                world_id,
+                floor_geom_ids=contact_groups.floor_geom_ids,
+                left_foot_geom_ids=contact_groups.left_foot_geom_ids,
+                right_foot_geom_ids=contact_groups.right_foot_geom_ids,
+                other_robot_geom_ids=contact_groups.other_robot_geom_ids,
+                jnp=_NumpyJnp,
+            )
+            force = floor_contact_force_from_warp_impl(
+                impl,
+                world_id,
+                floor_geom_ids=contact_groups.floor_geom_ids,
+                left_foot_geom_ids=contact_groups.left_foot_geom_ids,
+                right_foot_geom_ids=contact_groups.right_foot_geom_ids,
+                other_robot_geom_ids=contact_groups.other_robot_geom_ids,
+                jnp=_NumpyJnp,
+            )
+            counts = contact_count_diagnostics_from_warp_impl(
+                impl,
+                world_id,
+                jnp=_NumpyJnp,
+            )
+
+            np.testing.assert_allclose(summary["floor_contact"], indicator)
+            np.testing.assert_allclose(summary["floor_contact_force"], force)
+            np.testing.assert_allclose(
+                summary["floor_contact_force_first_row"],
+                floor_contact_force_first_row_from_warp_impl(
+                    impl,
+                    world_id,
+                    floor_geom_ids=contact_groups.floor_geom_ids,
+                    left_foot_geom_ids=contact_groups.left_foot_geom_ids,
+                    right_foot_geom_ids=contact_groups.right_foot_geom_ids,
+                    other_robot_geom_ids=contact_groups.other_robot_geom_ids,
+                    jnp=_NumpyJnp,
+                ),
+            )
+            self.assertEqual(
+                float(summary["contact_counts"]["active_contact_count"]),
+                float(counts["active_contact_count"]),
+            )
+            self.assertEqual(
+                float(summary["contact_counts"]["contact_pair_count"]),
+                float(counts["contact_pair_count"]),
+            )
+
+    def test_warp_floor_contact_summary_reports_peak_source_rows(self) -> None:
+        impl = _warp_contact_impl_fixture()
+        contact_groups = FootContactGeomGroups(
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+        )
+
+        summary = _warp_floor_contact_summary(
+            impl,
+            0,
+            contact_groups=contact_groups,
+            include_peak_source=True,
+            jnp=_NumpyJnp,
+        )
+
+        source = summary["floor_contact_force_peak_source"]
+        self.assertEqual(source.shape, (3, 8))
+        # Columns: row_id, geom0, geom1, normal_force, first_row_force,
+        # group_sum_force, dim, efc0.
+        np.testing.assert_allclose(
+            source[0],
+            np.array([0.0, 3.0, 11.0, 5.0, 5.0, 5.0, 1.0, 0.0]),
+        )
+        np.testing.assert_allclose(
+            source[1],
+            np.array([-1.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, -1.0]),
+        )
+        np.testing.assert_allclose(
+            source[2],
+            np.array([2.0, 31.0, 3.0, 10.0, 1.0, 10.0, 3.0, 1.0]),
+        )
+
     def test_command_reference_fn_returns_command_body_kinematics(self) -> None:
         bundle = SimpleNamespace(
             mjx_model={"body_count": 3},
@@ -569,6 +922,8 @@ class MjxRealPhysicsTest(unittest.TestCase):
             score_state["floor_contact_force"].shape,
             (sample_count, 3),
         )
+        self.assertNotIn("contact_force_first_row", score_state)
+        self.assertNotIn("floor_contact_force_first_row", score_state)
         self.assertEqual(score_state["model_ctrl"].shape, (sample_count, ACTION_DIM))
         self.assertEqual(score_state["time"].shape, (sample_count,))
 
@@ -594,6 +949,61 @@ class MjxRealPhysicsTest(unittest.TestCase):
         )
         for values in (*next_robot.values(), *score_state.values()):
             self.assertTrue(np.all(np.isfinite(values)))
+
+    def test_real_mjx_physics_step_can_emit_first_row_force_diagnostics(self) -> None:
+        runtime = _require_real_mjx_test_runtime()
+        bundle = build_mjx_model_bundle(profile_name="wxy_parity", require_runtime=True)
+        default_joint_pos = default_joint_pos_tensor("cpu").numpy()
+        action_scale = joint_actuator_specs("cpu")["action_scale"].numpy()
+        physics_step = make_mjx_physics_step_fn(
+            default_joint_pos=default_joint_pos,
+            action_scale=action_scale,
+            contact_force_first_row_diagnostics=True,
+        )
+        sample_count = 1
+        qpos = np.zeros((sample_count, QPOS_DIM), dtype=np.float32)
+        qpos[:, 3] = 1.0
+        qpos[:, 7:] = default_joint_pos
+        qvel = np.zeros((sample_count, QVEL_DIM), dtype=np.float32)
+        robot_state = {
+            "qpos": qpos,
+            "qvel": qvel,
+            "body_pos_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 3),
+                dtype=np.float32,
+            ),
+            "body_quat_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 4),
+                dtype=np.float32,
+            ),
+            "body_ang_vel_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 3),
+                dtype=np.float32,
+            ),
+        }
+
+        _next_robot, score_state = physics_step(
+            bundle,
+            robot_state,
+            qpos,
+            np.zeros((sample_count, ACTION_DIM), dtype=np.float32),
+            0,
+            runtime=runtime,
+        )
+        score_state = {
+            name: runtime.jax.device_get(value)
+            for name, value in score_state.items()
+        }
+
+        self.assertEqual(
+            score_state["contact_force_first_row"].shape,
+            (sample_count, 2),
+        )
+        self.assertEqual(
+            score_state["floor_contact_force_first_row"].shape,
+            (sample_count, 3),
+        )
+        self.assertTrue(np.all(np.isfinite(score_state["contact_force_first_row"])))
 
     def test_real_mjx_physics_step_uses_carried_robot_qpos_not_command_qpos(
         self,
@@ -633,6 +1043,137 @@ class MjxRealPhysicsTest(unittest.TestCase):
         next_qpos = runtime.jax.device_get(next_robot["qpos"])
 
         self.assertAlmostEqual(float(next_qpos[0, 0]), 0.25, places=6)
+
+    def test_real_mjx_physics_step_carries_mjx_data_without_time_reset(self) -> None:
+        runtime = _require_real_mjx_test_runtime()
+        bundle = build_mjx_model_bundle(profile_name="wxy_parity", require_runtime=True)
+        default_joint_pos = default_joint_pos_tensor("cpu").numpy()
+        action_scale = joint_actuator_specs("cpu")["action_scale"].numpy()
+        physics_step = make_mjx_physics_step_fn(
+            default_joint_pos=default_joint_pos,
+            action_scale=action_scale,
+        )
+        qpos = np.zeros((1, QPOS_DIM), dtype=np.float32)
+        qpos[:, 3] = 1.0
+        qpos[:, 7:] = default_joint_pos
+        qvel = np.zeros((1, QVEL_DIM), dtype=np.float32)
+        robot_state = {
+            "qpos": qpos,
+            "qvel": qvel,
+            "body_pos_w": np.zeros((1, len(MUJOCO_BODY_NAMES), 3), dtype=np.float32),
+            "body_quat_w": np.zeros((1, len(MUJOCO_BODY_NAMES), 4), dtype=np.float32),
+            "body_ang_vel_w": np.zeros((1, len(MUJOCO_BODY_NAMES), 3), dtype=np.float32),
+        }
+        robot_state = physics_step.initialize_robot_state(
+            bundle,
+            robot_state,
+            1,
+            runtime=runtime,
+        )
+        action = np.zeros((1, ACTION_DIM), dtype=np.float32)
+
+        next_robot, first_score = physics_step(
+            bundle,
+            robot_state,
+            qpos,
+            action,
+            0,
+            runtime=runtime,
+        )
+        _next_robot, second_score = physics_step(
+            bundle,
+            next_robot,
+            qpos,
+            action,
+            1,
+            runtime=runtime,
+        )
+
+        first_time = runtime.jax.device_get(first_score["time"])
+        second_time = runtime.jax.device_get(second_score["time"])
+        np.testing.assert_allclose(
+            first_time,
+            np.array([PHYSICS_DT * DECIMATION], dtype=np.float32),
+            atol=1.0e-5,
+        )
+        np.testing.assert_allclose(
+            second_time,
+            np.array([2 * PHYSICS_DT * DECIMATION], dtype=np.float32),
+            atol=1.0e-5,
+        )
+
+    def test_real_warp_batched_physics_step_keeps_carried_contact_counts_bounded(
+        self,
+    ) -> None:
+        runtime = _require_real_mjx_test_runtime()
+        bundle = build_mjx_model_bundle(
+            profile_name="wxy_parity",
+            require_runtime=True,
+            mjx_impl="warp",
+            mjx_warp_naconmax=20000,
+            mjx_warp_njmax=256,
+            mjx_model_options={"iterations": 4, "ls_iterations": 5},
+        )
+        default_joint_pos = default_joint_pos_tensor("cpu").numpy()
+        action_scale = joint_actuator_specs("cpu")["action_scale"].numpy()
+        physics_step = make_mjx_physics_step_fn(
+            default_joint_pos=default_joint_pos,
+            action_scale=action_scale,
+        )
+        sample_count = 4
+        qpos = np.zeros((sample_count, QPOS_DIM), dtype=np.float32)
+        qpos[:, 3] = 1.0
+        qpos[:, 7:] = default_joint_pos
+        qvel = np.zeros((sample_count, QVEL_DIM), dtype=np.float32)
+        robot_state = {
+            "qpos": qpos,
+            "qvel": qvel,
+            "body_pos_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 3),
+                dtype=np.float32,
+            ),
+            "body_quat_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 4),
+                dtype=np.float32,
+            ),
+            "body_ang_vel_w": np.zeros(
+                (sample_count, len(MUJOCO_BODY_NAMES), 3),
+                dtype=np.float32,
+            ),
+        }
+        robot_state = physics_step.initialize_robot_state(
+            bundle,
+            robot_state,
+            sample_count,
+            runtime=runtime,
+        )
+        self.assertIn("mjx_data", robot_state)
+        action = np.zeros((sample_count, ACTION_DIM), dtype=np.float32)
+
+        next_robot, first_score = physics_step(
+            bundle,
+            robot_state,
+            qpos,
+            action,
+            0,
+            runtime=runtime,
+        )
+        self.assertIn("mjx_data", next_robot)
+        _next_robot, second_score = physics_step(
+            bundle,
+            next_robot,
+            qpos,
+            action,
+            1,
+            runtime=runtime,
+        )
+
+        first_force = runtime.jax.device_get(first_score["contact_force"])
+        first_pairs = runtime.jax.device_get(first_score["contact_pair_count"])
+        second_pairs = runtime.jax.device_get(second_score["contact_pair_count"])
+        self.assertGreater(float(np.min(first_force)), 1.0)
+        self.assertLess(float(np.max(first_pairs)), 512.0)
+        self.assertLess(float(np.max(second_pairs)), 512.0)
 
 
 if __name__ == "__main__":

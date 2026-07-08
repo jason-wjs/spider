@@ -25,7 +25,16 @@ class MjxContactProfilesTest(unittest.TestCase):
     def test_contact_profiles_include_wxy_and_hgpt_references(self) -> None:
         self.assertEqual(
             set(CONTACT_PROFILES),
-            {"wxy_parity", "hgpt_track_reference", "hgpt_loco_reference"},
+            {
+                "wxy_parity",
+                "wxy_explicit_pairs_7caps",
+                "wxy_explicit_floor_pairs_7caps",
+                "wxy_explicit_floor_leg_pairs_7caps",
+                "wxy_explicit_floor_leg_foot147_pairs_7caps",
+                "wxy_explicit_floor_leg_pair_param_parity_7caps",
+                "hgpt_track_reference",
+                "hgpt_loco_reference",
+            },
         )
 
     def test_wxy_parity_profile_names_floor_and_feet(self) -> None:
@@ -41,6 +50,97 @@ class MjxContactProfilesTest(unittest.TestCase):
         self.assertEqual(len(profile.foot_collision_geom_names), 14)
         self.assertEqual(profile.explicit_pair_names, ())
         self.assertTrue(profile.eligible_for_parity)
+
+    def test_wxy_explicit_floor_leg_profile_prunes_upper_body_self_pairs(self) -> None:
+        profile = get_contact_profile("wxy_explicit_floor_leg_pairs_7caps")
+
+        self.assertTrue(profile.eligible_for_parity)
+        self.assertEqual(profile.floor_geom_names, ("terrain",))
+        self.assertEqual(profile.max_geom_pairs, 128)
+        self.assertIn(
+            ("robot/left_foot1_collision", "terrain"),
+            profile.explicit_pair_names,
+        )
+        self.assertIn(
+            ("robot/right_shin_collision", "robot/left_thigh_collision"),
+            profile.explicit_pair_names,
+        )
+        self.assertNotIn(
+            ("robot/torso_collision", "robot/left_hand_collision"),
+            profile.explicit_pair_names,
+        )
+        self.assertNotIn(
+            ("robot/left_hand_collision", "robot/right_hand_collision"),
+            profile.explicit_pair_names,
+        )
+
+    def test_wxy_explicit_floor_profile_removes_all_self_pairs(self) -> None:
+        floor_leg = get_contact_profile("wxy_explicit_floor_leg_pairs_7caps")
+        profile = get_contact_profile("wxy_explicit_floor_pairs_7caps")
+
+        self.assertTrue(profile.eligible_for_parity)
+        self.assertEqual(profile.floor_geom_names, ("terrain",))
+        self.assertEqual(profile.max_contact_points, floor_leg.max_contact_points)
+        self.assertEqual(profile.max_geom_pairs, floor_leg.max_geom_pairs)
+        self.assertLess(len(profile.explicit_pair_names), len(floor_leg.explicit_pair_names))
+        self.assertIn(
+            ("robot/left_foot1_collision", "terrain"),
+            profile.explicit_pair_names,
+        )
+        self.assertIn(
+            ("robot/left_hand_collision", "terrain"),
+            profile.explicit_pair_names,
+        )
+        self.assertNotIn(
+            ("robot/right_shin_collision", "robot/left_thigh_collision"),
+            profile.explicit_pair_names,
+        )
+        for geom_a, geom_b in profile.explicit_pair_names:
+            self.assertIn("terrain", (geom_a, geom_b))
+        self.assertEqual(len(profile.explicit_pair_names), 31)
+
+    def test_wxy_pair_param_parity_reuses_floor_leg_pair_set(self) -> None:
+        base = get_contact_profile("wxy_explicit_floor_leg_pairs_7caps")
+        profile = get_contact_profile(
+            "wxy_explicit_floor_leg_pair_param_parity_7caps"
+        )
+
+        self.assertTrue(profile.eligible_for_parity)
+        self.assertEqual(profile.explicit_pair_names, base.explicit_pair_names)
+        self.assertEqual(profile.max_contact_points, base.max_contact_points)
+        self.assertEqual(profile.max_geom_pairs, base.max_geom_pairs)
+
+    def test_wxy_floor_leg_foot147_profile_reduces_only_foot_terrain_pairs(
+        self,
+    ) -> None:
+        base = get_contact_profile("wxy_explicit_floor_leg_pairs_7caps")
+        profile = get_contact_profile("wxy_explicit_floor_leg_foot147_pairs_7caps")
+
+        self.assertTrue(profile.eligible_for_parity)
+        self.assertEqual(profile.floor_geom_names, ("terrain",))
+        self.assertEqual(profile.max_contact_points, base.max_contact_points)
+        self.assertEqual(profile.max_geom_pairs, base.max_geom_pairs)
+        self.assertLess(len(profile.explicit_pair_names), len(base.explicit_pair_names))
+        for side in ("left", "right"):
+            for index in (1, 4, 7):
+                self.assertIn(
+                    (f"robot/{side}_foot{index}_collision", "terrain"),
+                    profile.explicit_pair_names,
+                )
+            for index in (2, 3, 5, 6):
+                self.assertNotIn(
+                    (f"robot/{side}_foot{index}_collision", "terrain"),
+                    profile.explicit_pair_names,
+                )
+        self.assertIn(
+            ("robot/left_hand_collision", "terrain"),
+            profile.explicit_pair_names,
+        )
+        self.assertIn(
+            ("robot/right_shin_collision", "robot/left_thigh_collision"),
+            profile.explicit_pair_names,
+        )
+        self.assertEqual(len(profile.explicit_pair_names), 36)
 
     def test_reference_profiles_are_not_parity_eligible(self) -> None:
         self.assertFalse(get_contact_profile("hgpt_track_reference").eligible_for_parity)

@@ -28,6 +28,7 @@ from spider.tasks.g1_wbc.constants import (
     RIGHT_FOOT_BODY_NAME,
     WXY_G1_MODEL_PATH,
 )
+from spider.tasks.g1_wbc.mjx_contacts import ContactProfile, get_contact_profile
 from spider.tasks.g1_wbc.motion import (
     G1CommandBatch,
     G1Motion,
@@ -99,6 +100,7 @@ class WbcRolloutConfig:
     """Configuration for batched G1 WBC rollouts."""
 
     model_path: str | Path = DEFAULT_G1_MODEL_PATH
+    collision_profile: str = "wxy_parity"
     device: str = "cuda:0"
     num_envs: int = 1
     max_steps: int | None = None
@@ -130,6 +132,9 @@ class RolloutResult:
     ref_indices: torch.Tensor
     floor_contact_indicator: torch.Tensor | None = None
     floor_contact_force: torch.Tensor | None = None
+    contact_force_first_row: torch.Tensor | None = None
+    floor_contact_force_first_row: torch.Tensor | None = None
+    floor_contact_force_peak_source: torch.Tensor | None = None
     dt: float = POLICY_DT
     final_last_action: torch.Tensor | None = None
     final_history_state: dict | None = None
@@ -190,7 +195,17 @@ def _wxy_actuator_joint_names() -> tuple[str, ...]:
     return tuple(names)
 
 
-def _configure_wxy_collision_spec(spec: mujoco.MjSpec) -> None:
+def _configure_wxy_collision_spec(
+    spec: mujoco.MjSpec,
+    *,
+    collision_profile: str = "wxy_parity",
+) -> None:
+    profile = get_contact_profile(collision_profile)
+    if not profile.eligible_for_parity:
+        raise ValueError(
+            f"Contact profile {profile.name!r} cannot be bound to the WXY model."
+        )
+    explicit_pairs_enabled = bool(profile.explicit_pair_names)
     foot_pattern = re.compile(r"^(?:robot/)?(left|right)_foot[1-7]_collision$")
     for geom in spec.geoms:
         name = geom.name or ""
@@ -203,14 +218,42 @@ def _configure_wxy_collision_spec(spec: mujoco.MjSpec) -> None:
             geom.contype = 0
             geom.conaffinity = 0
             continue
-        geom.contype = 1
-        geom.conaffinity = 1
+        geom.contype = 0 if explicit_pairs_enabled else 1
+        geom.conaffinity = 0 if explicit_pairs_enabled else 1
         geom.condim = 1
         geom.priority = 0
         if foot_pattern.fullmatch(name):
             geom.condim = 3
             geom.priority = 1
             geom.friction[0] = 0.6
+    _add_wxy_explicit_collision_pairs(spec, profile)
+
+
+def _add_wxy_explicit_collision_pairs(
+    spec: mujoco.MjSpec,
+    profile: ContactProfile,
+) -> None:
+    floor_geom_names = set(profile.floor_geom_names)
+    foot_geom_names = set(profile.foot_collision_geom_names)
+    foot_floor_frictional_only = (
+        profile.explicit_pair_parameter_mode == "foot_floor_frictional_only"
+    )
+    for geom_a, geom_b in profile.explicit_pair_names:
+        includes_floor = geom_a in floor_geom_names or geom_b in floor_geom_names
+        includes_foot = geom_a in foot_geom_names or geom_b in foot_geom_names
+        kwargs: dict[str, object] = {
+            "name": f"{geom_a}__{geom_b}",
+            "geomname1": geom_a,
+            "geomname2": geom_b,
+            "condim": (
+                3
+                if includes_floor and (includes_foot or not foot_floor_frictional_only)
+                else 1
+            ),
+        }
+        if includes_floor and includes_foot:
+            kwargs["friction"] = (0.6, 0.6, 0.005, 0.0001, 0.0001)
+        spec.add_pair(**kwargs)
 
 
 def _add_wxy_terrain_spec(spec: mujoco.MjSpec) -> None:
@@ -291,7 +334,11 @@ def _add_wxy_init_keyframe(spec: mujoco.MjSpec) -> None:
     spec.add_key(name="init_state", qpos=qpos, ctrl=ctrl)
 
 
-def _build_wxy_model(*, include_self_collision_sensors: bool = True) -> mujoco.MjModel:
+def _build_wxy_model(
+    *,
+    include_self_collision_sensors: bool = True,
+    collision_profile: str = "wxy_parity",
+) -> mujoco.MjModel:
     """Build a G1 WBC model matching tracking_bfm body/joint/actuator layout."""
 
     wxy_path = WXY_G1_MODEL_PATH.expanduser().resolve()
@@ -318,7 +365,7 @@ def _build_wxy_model(*, include_self_collision_sensors: bool = True) -> mujoco.M
     spec.attach(robot_spec, prefix="robot/",
                 frame=spec.worldbody.add_frame(name="robot_frame"))
 
-    _configure_wxy_collision_spec(spec)
+    _configure_wxy_collision_spec(spec, collision_profile=collision_profile)
     _add_wxy_actuators_to_spec(spec)
     _add_wxy_init_keyframe(spec)
     if include_self_collision_sensors:
@@ -332,6 +379,7 @@ def load_wbc_model(
     model_path: str | Path,
     *,
     include_self_collision_sensors: bool = True,
+    collision_profile: str = "wxy_parity",
 ) -> mujoco.MjModel:
     """Load a G1 WBC model with tracking_bfm-compatible physics semantics."""
 
@@ -342,7 +390,13 @@ def load_wbc_model(
             return _pickle.load(_f)
     if path.name == WXY_G1_MODEL_PATH.name:
         return _build_wxy_model(
-            include_self_collision_sensors=include_self_collision_sensors
+            include_self_collision_sensors=include_self_collision_sensors,
+            collision_profile=collision_profile,
+        )
+    if collision_profile != "wxy_parity":
+        raise ValueError(
+            f"Contact profile {collision_profile!r} is only supported for "
+            f"the dynamic WXY model {WXY_G1_MODEL_PATH.name!r}."
         )
     model = mujoco.MjModel.from_xml_path(str(path))
     configure_wbc_model(model)
@@ -449,6 +503,30 @@ def _resolve_actuator_ids_by_joint(model: mujoco.MjModel) -> list[int]:
         ids.append(act_id)
     return ids
 
+
+def _contact_normal_force_from_solver_rows(
+    efc_force: torch.Tensor,
+    worldid: torch.Tensor,
+    address: torch.Tensor,
+    dim: torch.Tensor,
+) -> torch.Tensor:
+    """Decode pyramidal solver rows into per-contact normal force."""
+
+    if address.ndim == 1:
+        address = address[:, None]
+    row_offsets = torch.arange(
+        address.shape[1],
+        dtype=torch.long,
+        device=address.device,
+    )
+    row_count = torch.where(dim == 1, torch.ones_like(dim), 2 * (dim - 1))
+    row_valid = (address >= 0) & (row_offsets[None, :] < row_count[:, None])
+    clipped = address.clamp(min=0, max=efc_force.shape[1] - 1)
+    rows = efc_force[worldid[:, None], clipped]
+    normal = torch.sum(torch.where(row_valid, rows, torch.zeros_like(rows)), dim=1)
+    return normal.clamp(min=0.0)
+
+
 class G1WbcMujocoWarpEnv:
     """Minimal standalone batched G1 simulator for WBC policy rollout."""
 
@@ -460,7 +538,10 @@ class G1WbcMujocoWarpEnv:
         self.torch_device = torch.device(config.device)
         self.num_envs = int(config.num_envs)
 
-        self.model_cpu = load_wbc_model(config.model_path)
+        self.model_cpu = load_wbc_model(
+            config.model_path,
+            collision_profile=config.collision_profile,
+        )
         self.data_cpu = mujoco.MjData(self.model_cpu)
         mujoco.mj_forward(self.model_cpu, self.data_cpu)
 
@@ -808,7 +889,8 @@ class G1WbcMujocoWarpEnv:
         worldid = wp.to_torch(contact.worldid).to(self.torch_device).long()
         dist = wp.to_torch(contact.dist).to(self.torch_device)
         includemargin = wp.to_torch(contact.includemargin).to(self.torch_device)
-        address = wp.to_torch(contact.efc_address).to(self.torch_device).long()[:, 0]
+        address = wp.to_torch(contact.efc_address).to(self.torch_device).long()
+        dim = wp.to_torch(contact.dim).to(self.torch_device).long()
         efc_force = wp.to_torch(self.data_wp.efc.force).to(self.torch_device)
         nacon = wp.to_torch(self.data_wp.nacon).to(self.torch_device).long()[0]
         contact_ids = torch.arange(
@@ -847,12 +929,16 @@ class G1WbcMujocoWarpEnv:
                 reduce="amax",
                 include_self=True,
             )
-            force_mask = mask & (address >= 0)
+            force_mask = mask & (address[:, 0] >= 0)
             if not torch.any(force_mask):
                 continue
             force_env_ids = worldid[force_mask]
-            addr = address[force_mask].clamp(min=0, max=efc_force.shape[1] - 1)
-            normal_force = efc_force[force_env_ids, addr].clamp(min=0.0)
+            normal_force = _contact_normal_force_from_solver_rows(
+                efc_force,
+                force_env_ids,
+                address[force_mask],
+                dim[force_mask],
+            )
             force[:, contact_idx].scatter_add_(0, force_env_ids, normal_force)
         return indicator.clamp(max=1.0), force
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -28,7 +29,12 @@ from spider.tasks.g1_wbc.constants import (
 from spider.tasks.g1_wbc.math_utils import normalize, quat_from_axis_angle, quat_mul
 from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion
 from spider.tasks.g1_wbc.policy import WbcActor
-from spider.tasks.g1_wbc.result_types import G1WbcMpcRun, G1WbcSpiderResult
+from spider.tasks.g1_wbc.result_types import (
+    G1WbcExecutedCommandChunk,
+    G1WbcMpcRun,
+    G1WbcSpiderResult,
+    G1WbcWindowReplayState,
+)
 from spider.tasks.g1_wbc.rollout import (
     RolloutResult,
     WbcRolloutConfig,
@@ -150,6 +156,7 @@ def build_g1_wbc_sampling_config(
     horizon_steps: int,
     ctrl_steps: int,
     knot_count: int,
+    elite_frac: float | None,
     temperature: float,
     control_update_mode: str,
     pos_noise_scale: float,
@@ -162,6 +169,18 @@ def build_g1_wbc_sampling_config(
     seed: int,
     use_warm_start: bool = True,
     use_guided_candidate: bool = False,
+    guided_candidate_period: int | None = None,
+    mjx_min_score_improvement: float = 1.0e-9,
+    mjx_min_top_score_gap: float = 0.0,
+    mjx_cem_update_min_top_score_gap: float = 0.0,
+    mjx_max_control_delta: float | None = None,
+    mjx_candidate_rank_diagnostics_top_k: int = 0,
+    mjx_candidate_rescore_diagnostics: bool = False,
+    mjx_candidate_rescore_selection_top_k: int = 0,
+    mjx_score_only_rescore_diagnostics: bool = False,
+    mjx_score_only_output_rescore_diagnostics: bool = False,
+    mjx_candidate_score_component_diagnostics_top_k: int = 0,
+    sigma_decay: float | None = None,
 ) -> Config:
     """Build the SPIDER sampling config for the G1 WBC task adapter."""
 
@@ -174,6 +193,60 @@ def build_g1_wbc_sampling_config(
         raise ValueError("knot_count must be at least 2.")
     if control_update_mode not in {"weighted_mean", "best"}:
         raise ValueError("control_update_mode must be one of: weighted_mean, best.")
+    guided_period = None
+    if guided_candidate_period is not None:
+        guided_period = int(guided_candidate_period)
+        if guided_period <= 0:
+            raise ValueError("guided_candidate_period must be positive.")
+        if not bool(use_guided_candidate):
+            raise ValueError(
+                "guided_candidate_period requires use_guided_candidate=True."
+            )
+    min_score_improvement = float(mjx_min_score_improvement)
+    if not math.isfinite(min_score_improvement) or min_score_improvement < 0.0:
+        raise ValueError("mjx_min_score_improvement must be non-negative.")
+    min_top_score_gap = float(mjx_min_top_score_gap)
+    if not math.isfinite(min_top_score_gap) or min_top_score_gap < 0.0:
+        raise ValueError("mjx_min_top_score_gap must be non-negative.")
+    cem_update_min_top_score_gap = float(mjx_cem_update_min_top_score_gap)
+    if (
+        not math.isfinite(cem_update_min_top_score_gap)
+        or cem_update_min_top_score_gap < 0.0
+    ):
+        raise ValueError("mjx_cem_update_min_top_score_gap must be non-negative.")
+    max_control_delta = (
+        None if mjx_max_control_delta is None else float(mjx_max_control_delta)
+    )
+    if max_control_delta is not None and (
+        not math.isfinite(max_control_delta) or max_control_delta <= 0.0
+    ):
+        raise ValueError("mjx_max_control_delta must be positive.")
+    candidate_rank_diagnostics_top_k = int(mjx_candidate_rank_diagnostics_top_k)
+    if candidate_rank_diagnostics_top_k < 0:
+        raise ValueError("mjx_candidate_rank_diagnostics_top_k must be non-negative.")
+    if candidate_rank_diagnostics_top_k > int(num_samples):
+        raise ValueError(
+            "mjx_candidate_rank_diagnostics_top_k must not exceed num_samples."
+        )
+    candidate_rescore_selection_top_k = int(mjx_candidate_rescore_selection_top_k)
+    if candidate_rescore_selection_top_k < 0:
+        raise ValueError("mjx_candidate_rescore_selection_top_k must be non-negative.")
+    if candidate_rescore_selection_top_k > int(num_samples):
+        raise ValueError(
+            "mjx_candidate_rescore_selection_top_k must not exceed num_samples."
+        )
+    candidate_score_component_diagnostics_top_k = int(
+        mjx_candidate_score_component_diagnostics_top_k
+    )
+    if candidate_score_component_diagnostics_top_k < 0:
+        raise ValueError(
+            "mjx_candidate_score_component_diagnostics_top_k must be non-negative."
+        )
+    if candidate_score_component_diagnostics_top_k > int(num_samples):
+        raise ValueError(
+            "mjx_candidate_score_component_diagnostics_top_k must not exceed "
+            "num_samples."
+        )
 
     config = Config(
         robot_type="g1",
@@ -210,10 +283,36 @@ def build_g1_wbc_sampling_config(
     config.nu = QPOS_DIM - 1
     config.env_params_list = [[{}] for _ in range(int(max_num_iterations))]
     config.num_knot_points = knot_count
+    config.elite_frac = 1.0 if elite_frac is None else float(elite_frac)
     config.rollout_batch_size = int(rollout_batch_size)
     config.control_update_mode = str(control_update_mode)
     config.use_warm_start = bool(use_warm_start)
     config.use_guided_candidate = bool(use_guided_candidate)
+    config.guided_candidate_period = guided_period
+    config.mjx_min_score_improvement = min_score_improvement
+    config.mjx_min_top_score_gap = min_top_score_gap
+    config.mjx_cem_update_min_top_score_gap = cem_update_min_top_score_gap
+    config.mjx_max_control_delta = max_control_delta
+    config.mjx_candidate_rank_diagnostics_top_k = candidate_rank_diagnostics_top_k
+    config.mjx_candidate_rescore_diagnostics = bool(
+        mjx_candidate_rescore_diagnostics
+    )
+    config.mjx_candidate_rescore_selection_top_k = (
+        candidate_rescore_selection_top_k
+    )
+    config.mjx_score_only_rescore_diagnostics = bool(
+        mjx_score_only_rescore_diagnostics
+    )
+    config.mjx_score_only_output_rescore_diagnostics = bool(
+        mjx_score_only_output_rescore_diagnostics
+    )
+    config.mjx_candidate_score_component_diagnostics_top_k = (
+        candidate_score_component_diagnostics_top_k
+    )
+    config.sigma_decay = None if sigma_decay is None else float(sigma_decay)
+    config.min_root_pos_sigma = 0.002
+    config.min_root_rot_sigma = 0.004
+    config.min_joint_sigma = 0.008
     config.noise_scale = _g1_wbc_noise_scale(config, knot_count)
     config.beta_traj = (
         config.final_noise_scale ** (1 / config.max_num_iterations)
@@ -352,6 +451,7 @@ class G1WbcSamplingTask:
         self._floor_contact_force: list[torch.Tensor] = []
         self._ref_indices: list[torch.Tensor] = []
         self._executed_controls: list[torch.Tensor] = []
+        self._executed_command_chunks: list[G1WbcExecutedCommandChunk] = []
 
     def reset_execution_state(self) -> None:
         """Reset the physical execute backend and accumulated result trace."""
@@ -479,6 +579,14 @@ class G1WbcSamplingTask:
             preserve_template_first=False,
             kinematics_batch_size=1,
         )
+        self._executed_command_chunks.append(
+            G1WbcExecutedCommandChunk(
+                start=sim_step,
+                execute_steps=int(command.num_frames),
+                horizon_steps=int(command.num_frames),
+                command=_command_prefix(command, int(command.num_frames)),
+            )
+        )
         self._execute_command_batch(command, sim_step)
         return {}
 
@@ -486,20 +594,39 @@ class G1WbcSamplingTask:
         self,
         command: G1CommandBatch,
         sim_step: int,
+        *,
+        execute_steps: int | None = None,
+        replay_state: G1WbcWindowReplayState | None = None,
     ) -> RolloutResult:
         """Execute one command chunk and update the receding-horizon task state."""
 
-        self.execute_backend.set_command(
-            command,
-            ref_start=sim_step,
-            initial_last_action=self.execute_backend.last_action,
-            initial_history_state=(
+        if replay_state is not None:
+            self.execute_backend.reset_physical_state(
+                replay_state.initial_qpos.to(self.device, dtype=torch.float32),
+                replay_state.initial_qvel.to(self.device, dtype=torch.float32),
+                ref_index=int(sim_step),
+            )
+            initial_last_action = replay_state.initial_last_action
+            initial_history_state = replay_state.initial_history_state
+        else:
+            initial_last_action = self.execute_backend.last_action
+            initial_history_state = (
                 None
                 if self.execute_backend.obs_builder is None
                 else self.execute_backend.obs_builder.history_state_dict()
-            ),
+            )
+        self.execute_backend.set_command(
+            command,
+            ref_start=sim_step,
+            initial_last_action=initial_last_action,
+            initial_history_state=initial_history_state,
         )
-        for _ in range(int(command.num_frames)):
+        steps = int(command.num_frames) if execute_steps is None else int(execute_steps)
+        if steps < 1 or steps > int(command.num_frames):
+            raise ValueError(
+                f"execute_steps must be in [1, {command.num_frames}], got {steps}."
+            )
+        for _ in range(steps):
             self.execute_backend.step()
         rollout_result = self.execute_backend.rollout_result()
         self._append_rollout(rollout_result)
@@ -586,6 +713,50 @@ class G1WbcSamplingTask:
         finally:
             self.replay_qvel_trajectory = previous_replay_qvel
 
+    def replay_command_chunks(
+        self,
+        chunks: list[G1WbcExecutedCommandChunk],
+        *,
+        total_steps: int | None = None,
+    ) -> RolloutResult:
+        """Replay saved per-window command chunks without rebuilding references."""
+
+        if not chunks:
+            raise ValueError("Need at least one saved command chunk.")
+        self.reset_execution_state()
+        executed_steps = 0
+        for chunk in sorted(chunks, key=lambda item: int(item.start)):
+            if int(chunk.start) != executed_steps:
+                raise ValueError(
+                    "Saved command chunks must be contiguous: "
+                    f"expected start {executed_steps}, got {chunk.start}."
+                )
+            remaining = None if total_steps is None else int(total_steps) - executed_steps
+            if remaining is not None and remaining <= 0:
+                break
+            execute_steps = int(chunk.execute_steps)
+            if remaining is not None:
+                execute_steps = min(execute_steps, remaining)
+            command = chunk.command.to(self.device)
+            if execute_steps > int(command.num_frames):
+                raise ValueError(
+                    "Saved command chunk execute_steps exceeds command horizon: "
+                    f"{execute_steps} > {command.num_frames}."
+                )
+            self._execute_command_batch(
+                command,
+                int(chunk.start),
+                execute_steps=execute_steps,
+                replay_state=chunk.replay_state,
+            )
+            executed_steps += execute_steps
+        if total_steps is not None and executed_steps != int(total_steps):
+            raise ValueError(
+                f"Saved command chunks cover {executed_steps} steps, "
+                f"expected {int(total_steps)}."
+            )
+        return self._stack_rollout()
+
     def controls_to_qpos(
         self,
         controls_time_major: torch.Tensor,
@@ -628,6 +799,7 @@ class G1WbcSamplingTask:
             infos=infos,
             scores=self._last_scores.detach().clone(),
             num_windows=len(infos),
+            executed_command_chunks=list(self._executed_command_chunks),
         )
 
     def _task_context(self) -> dict[str, Any]:
@@ -778,6 +950,23 @@ def _controls_to_qpos(
         joint_high,
     )
     return base.contiguous()
+
+
+def _command_prefix(command: G1CommandBatch, frames: int) -> G1CommandBatch:
+    frames = max(0, min(int(frames), int(command.num_frames)))
+    return G1CommandBatch(
+        path=command.path,
+        motion_type=command.motion_type,
+        fps=command.fps,
+        joint_pos=command.joint_pos[:frames].detach().clone(),
+        joint_vel=command.joint_vel[:frames].detach().clone(),
+        body_pos_w=command.body_pos_w[:frames].detach().clone(),
+        body_quat_w=command.body_quat_w[:frames].detach().clone(),
+        body_lin_vel_w=command.body_lin_vel_w[:frames].detach().clone(),
+        body_ang_vel_w=command.body_ang_vel_w[:frames].detach().clone(),
+        qpos_trajectory=command.qpos_trajectory[:frames].detach().clone(),
+        qvel_trajectory=command.qvel_trajectory[:frames].detach().clone(),
+    )
 
 
 def _minimal_backend_config(

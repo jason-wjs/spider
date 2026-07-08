@@ -16,6 +16,7 @@ from spider.tasks.g1_wbc.constants import (
     ACTION_DIM,
     MUJOCO_BODY_NAMES,
     MUJOCO_JOINT_NAMES,
+    OBS_HISTORY_LENGTH,
     QPOS_DIM,
     QVEL_DIM,
 )
@@ -236,9 +237,19 @@ class MjxBackendIntegrationTest(unittest.TestCase):
     def test_mjx_backend_contract_with_injected_fakes(self) -> None:
         calls: list[str] = []
 
+        model_kwargs = {}
+
         def fake_model_factory(**kwargs):
+            model_kwargs.update(kwargs)
             calls.append(f"model:{kwargs['profile_name']}")
-            return SimpleNamespace(profile=SimpleNamespace(name="wxy_parity"))
+            return SimpleNamespace(
+                profile=SimpleNamespace(name="wxy_parity"),
+                mjx_impl=kwargs.get("mjx_impl"),
+                mjx_warp_naconmax=kwargs.get("mjx_warp_naconmax"),
+                mjx_warp_njmax=kwargs.get("mjx_warp_njmax"),
+                mjx_model_options=kwargs.get("mjx_model_options"),
+                mjx_model=SimpleNamespace(impl=kwargs.get("mjx_impl")),
+            )
 
         def fake_policy_converter(actor, *, jnp):
             del actor, jnp
@@ -261,6 +272,10 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             optimizer=_fake_optimizer,
             rollout_factory=_fake_rollout_result,
             command_builder=_fake_command_builder,
+            mjx_impl="warp",
+            mjx_warp_naconmax=4096,
+            mjx_warp_njmax=512,
+            mjx_model_options={"iterations": 6, "ls_iterations": 10},
         )
 
         self.assertIsInstance(result, G1WbcMpcRun)
@@ -268,6 +283,9 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertTrue(result.metadata["accepted"])
         self.assertFalse(result.metadata["used_baseline_fallback"])
         self.assertFalse(result.metadata["use_guided_candidate"])
+        self.assertEqual(result.metadata["rollout_source"], "static_qpos_fallback")
+        self.assertFalse(result.metadata["rollout_dynamic_execute_trace"])
+        self.assertEqual(result.metadata["execute_trace_chunks"], 0)
         self.assertEqual(result.result.num_windows, 40)
         self.assertEqual(result.metadata["accepted_windows"], 40)
         self.assertEqual(result.result.rollout.qpos.shape, (801, 1, QPOS_DIM))
@@ -286,6 +304,21 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                 torch.full((800,), 0.25),
             )
         )
+        chunks = result.result.executed_command_chunks
+        self.assertEqual(len(chunks), 40)
+        self.assertEqual(chunks[0].start, 0)
+        self.assertEqual(chunks[0].execute_steps, 20)
+        self.assertEqual(chunks[0].horizon_steps, 40)
+        self.assertEqual(chunks[-1].start, 780)
+        self.assertEqual(chunks[-1].execute_steps, 20)
+        self.assertEqual(chunks[-1].horizon_steps, 40)
+        self.assertEqual(chunks[0].command.qpos_trajectory.shape, (40, 1, QPOS_DIM))
+        self.assertTrue(
+            torch.allclose(
+                chunks[0].command.qpos_trajectory[:21, 0, 0],
+                torch.full((21,), 0.25),
+            )
+        )
         self.assertAlmostEqual(
             float(result.result.command.qpos_trajectory[800, 0, 0]),
             0.25,
@@ -296,8 +329,36 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(result.receding.executed_steps, 800)
         self.assertIn("runtime_gpu_name", result.metadata)
         self.assertIsNone(result.metadata["runtime_gpu_name"])
+        self.assertEqual(model_kwargs["mjx_impl"], "warp")
+        self.assertEqual(model_kwargs["mjx_warp_naconmax"], 4096)
+        self.assertEqual(model_kwargs["mjx_warp_njmax"], 512)
+        self.assertEqual(
+            model_kwargs["mjx_model_options"],
+            {"iterations": 6, "ls_iterations": 10},
+        )
+        self.assertEqual(result.metadata["mjx_impl"], "warp")
+        self.assertEqual(result.metadata["mjx_model_impl"], "warp")
+        self.assertEqual(result.metadata["mjx_warp_naconmax"], 4096)
+        self.assertEqual(result.metadata["mjx_warp_njmax"], 512)
+        self.assertEqual(
+            result.metadata["mjx_model_options"],
+            {"iterations": 6, "ls_iterations": 10},
+        )
         self.assertIn("model:wxy_parity", calls)
         self.assertIn("policy", calls)
+        first_window = result.receding.infos[0]
+        for field in (
+            "reference_wall_time_sec",
+            "optimizer_wall_time_sec",
+            "optimizer_result_sync_wall_time_sec",
+            "execute_trace_wall_time_sec",
+            "shift_wall_time_sec",
+            "window_wall_time_sec",
+        ):
+            self.assertIn(field, first_window)
+            self.assertGreaterEqual(first_window[field], 0.0)
+        self.assertIn("optimizer_result_sync_wall_time_sec", result.metadata)
+        self.assertGreaterEqual(result.metadata["optimizer_result_sync_wall_time_sec"], 0.0)
 
     def test_command_from_refined_qpos_exports_finite_difference_qvel(self) -> None:
         refined_qpos = torch.zeros(3, QPOS_DIM)
@@ -403,6 +464,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             {
                 "bad_floor_contact": 4.5,
                 "bad_floor_force_excess": 0.7,
+                "contact_force_active": 1.1,
+                "contact_force_peak_excess": 0.9,
                 "contact_force_delta": 2.5,
                 "contact_mismatch": 2.0,
                 "contact_false_positive": 1.5,
@@ -415,6 +478,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
 
         self.assertEqual(weights["bad_floor_contact"], 4.5)
         self.assertEqual(weights["bad_floor_force_excess"], 0.7)
+        self.assertEqual(weights["contact_force_active"], 1.1)
+        self.assertEqual(weights["contact_force_peak_excess"], 0.9)
         self.assertEqual(weights["contact_force_delta"], 2.5)
         self.assertEqual(weights["contact"], 2.0)
         self.assertEqual(weights["contact_false_positive"], 1.5)
@@ -450,6 +515,62 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         for source_name, target_name in expected_mapping.items():
             self.assertEqual(weights[target_name], preset[source_name])
 
+    def test_mjx_score_weights_cover_formal_v14_terms(self) -> None:
+        expected_mapping = {
+            "root_pos_error": "root_pos",
+            "root_rot_error": "root_rot",
+            "joint_pos_error": "joint_pos",
+            "body_global_pos_error": "body_global_pos",
+            "body_global_rot_error": "body_global_rot",
+            "body_local_pos_error": "body_local_pos",
+            "body_local_rot_error": "body_local_rot",
+            "ee_global_pos_error": "ee_global_pos",
+            "ee_global_rot_error": "ee_global_rot",
+            "ee_local_pos_error": "ee_local_pos",
+            "ee_local_rot_error": "ee_local_rot",
+            "hand_global_pos_error": "hand_global_pos",
+            "hand_global_rot_error": "hand_global_rot",
+            "hand_local_pos_error": "hand_local_pos",
+            "hand_local_rot_error": "hand_local_rot",
+            "bad_floor_contact": "bad_floor_contact",
+            "bad_floor_force_excess": "bad_floor_force_excess",
+            "contact_force_active": "contact_force_active",
+            "contact_force_peak_excess": "contact_force_peak_excess",
+            "contact_force_delta": "contact_force_delta",
+            "contact_mismatch": "contact",
+            "contact_false_positive": "contact_false_positive",
+            "contact_false_negative": "contact_false_negative",
+            "contact_switch": "contact_switch",
+            "control_delta": "control_delta",
+            "action_delta": "action_delta",
+            "joint_acc": "joint_acc",
+            "joint_jerk": "joint_jerk",
+        }
+        reward_weights = {
+            source_name: float(index + 1)
+            for index, source_name in enumerate(expected_mapping)
+        }
+
+        weights = mjx_backend_module._mjx_score_weights(
+            "g1_wbc_joint_global",
+            reward_weights,
+        )
+
+        self.assertEqual(sorted(weights), sorted(expected_mapping.values()))
+        for source_name, target_name in expected_mapping.items():
+            self.assertEqual(weights[target_name], reward_weights[source_name])
+
+    def test_mjx_score_weights_reject_unsupported_nonzero_terms(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported_term"):
+            mjx_backend_module._mjx_score_weights(
+                "g1_wbc_joint_global",
+                {
+                    "body_global_pos_error": 58.0,
+                    "body_local_pos_error": 5.0,
+                    "unsupported_term": 3.0,
+                },
+            )
+
     def test_mjx_backend_emits_contact_capacity_metadata(self) -> None:
         def optimizer(**kwargs):
             del kwargs
@@ -482,8 +603,21 @@ class MjxBackendIntegrationTest(unittest.TestCase):
 
     def test_mjx_backend_emits_replay_control_metadata(self) -> None:
         config = _spider_config()
+        config.num_samples = 9
+        config.max_num_iterations = 3
         config.horizon_steps = 11
         config.ctrl_steps = 7
+        config.num_knot_points = 5
+        config.temperature = 0.9
+        config.pos_noise_scale = 0.03
+        config.rot_noise_scale = 0.08
+        config.joint_noise_scale = 0.12
+        config.first_ctrl_noise_scale = 0.6
+        config.last_ctrl_noise_scale = 0.7
+        config.final_noise_scale = 0.8
+        config.sigma_decay = 0.75
+        config.mjx_min_score_improvement = 0.01
+        config.use_warm_start = False
 
         def optimizer(**kwargs):
             window_config = kwargs["config"]
@@ -518,6 +652,19 @@ class MjxBackendIntegrationTest(unittest.TestCase):
 
         self.assertEqual(result.metadata["planning_horizon_steps"], 11)
         self.assertEqual(result.metadata["control_steps"], 7)
+        self.assertEqual(result.metadata["sample_count"], 9)
+        self.assertEqual(result.metadata["optimizer_iterations"], 3)
+        self.assertEqual(result.metadata["knot_count"], 5)
+        self.assertEqual(result.metadata["temperature"], 0.9)
+        self.assertEqual(result.metadata["root_pos_sigma"], 0.03)
+        self.assertEqual(result.metadata["root_rot_sigma"], 0.08)
+        self.assertEqual(result.metadata["joint_sigma"], 0.12)
+        self.assertEqual(result.metadata["first_ctrl_noise_scale"], 0.6)
+        self.assertEqual(result.metadata["last_ctrl_noise_scale"], 0.7)
+        self.assertEqual(result.metadata["final_noise_scale"], 0.8)
+        self.assertEqual(result.metadata["sigma_decay"], 0.75)
+        self.assertEqual(result.metadata["mjx_min_score_improvement"], 0.01)
+        self.assertFalse(result.metadata["use_warm_start"])
 
     def test_mjx_backend_honors_window_rejection_metadata(self) -> None:
         calls = 0
@@ -572,7 +719,9 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertGreater(len(calls), 0)
         self.assertEqual(calls[0], (4, 40, QPOS_DIM - 1))
 
-    def test_default_optimizer_rejects_when_scorer_favors_current_controls(self) -> None:
+    def test_default_optimizer_accepts_noop_when_scorer_favors_current_controls(
+        self,
+    ) -> None:
         def rollout_scorer(samples, reference, actor_params, model_bundle):
             del reference, actor_params, model_bundle
             return -np.sum(np.asarray(samples, dtype=np.float32) ** 2, axis=(1, 2))
@@ -584,9 +733,11 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             rollout_scorer=rollout_scorer,
         )
 
-        self.assertFalse(result.metadata["accepted"])
-        self.assertEqual(result.metadata["accepted_windows"], 0)
-        self.assertFalse(result.result.infos[0]["accepted"])
+        self.assertTrue(result.metadata["accepted"])
+        self.assertEqual(result.metadata["accepted_windows"], 40)
+        self.assertTrue(result.result.infos[0]["accepted"])
+        self.assertEqual(int(result.result.infos[0]["accepted_iterations"]), 0)
+        self.assertTrue(bool(result.result.infos[0]["current_controls_selected"]))
 
     def test_default_optimizer_warms_once_before_timed_windows(self) -> None:
         calls: list[dict[str, object]] = []
@@ -642,6 +793,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
 
     def test_jax_warmup_primes_execute_rollout_tracer_before_steady_loop(self) -> None:
         events: list[str] = []
+        include_guided_flags: list[bool] = []
 
         def rollout_scorer(samples, reference, actor_params, model_bundle):
             del reference, actor_params, model_bundle
@@ -658,6 +810,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
 
         def rollout_reference_factory(**kwargs):
             events.append("reference")
+            include_guided_flags.append(kwargs.get("include_guided_candidate", True))
             return {"start": kwargs["start"]}
 
         def rollout_tracer(samples, reference, actor_params, model_bundle):
@@ -702,6 +855,167 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertGreaterEqual(len(score_indices), 2)
         self.assertGreaterEqual(len(trace_indices), 2)
         self.assertLess(trace_indices[0], score_indices[1])
+        self.assertEqual(include_guided_flags[:4], [True, False, True, False])
+
+    def test_guided_candidate_period_applies_to_steady_windows(self) -> None:
+        reference_calls: list[dict[str, object]] = []
+
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            sample_array = np.asarray(samples, dtype=np.float32)
+            return {
+                "score": np.arange(int(sample_array.shape[0]), dtype=np.float32),
+                "physics_step_count": np.full(
+                    int(sample_array.shape[0]),
+                    40,
+                    dtype=np.float32,
+                ),
+            }
+
+        def rollout_reference_factory(**kwargs):
+            reference_calls.append(
+                {
+                    "include_guided_candidate": kwargs.get(
+                        "include_guided_candidate",
+                        True,
+                    ),
+                    "control_count": int(np.asarray(kwargs["controls"]).shape[0]),
+                }
+            )
+            return {"start": kwargs["start"]}
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del samples, reference, actor_params, model_bundle
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((1, QPOS_DIM), dtype=np.float32)
+            qpos[:, 3] = 1.0
+            qvel = np.zeros((1, QVEL_DIM), dtype=np.float32)
+            body_quat = np.zeros((1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            return {
+                "final_robot_state": {
+                    "qpos": qpos,
+                    "qvel": qvel,
+                    "body_pos_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                    "body_quat_w": body_quat,
+                    "body_lin_vel_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                    "body_ang_vel_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                },
+                "final_obs_state": SimpleNamespace(history={}, last_action=None),
+                "final_prev_control": np.zeros((1, QPOS_DIM - 1), dtype=np.float32),
+                "final_prev_joint_acc": np.zeros((1, ACTION_DIM), dtype=np.float32),
+                "final_prev_contact": np.zeros((1, 2), dtype=np.float32),
+                "final_prev_contact_valid": np.ones((1,), dtype=np.float32),
+                "final_prev_contact_force": np.zeros((1, 2), dtype=np.float32),
+                "final_prev_contact_force_valid": np.ones((1,), dtype=np.float32),
+            }
+
+        spider_config = _spider_config()
+        spider_config.use_guided_candidate = True
+        spider_config.guided_candidate_period = 3
+        result = _run_with_fakes(
+            optimizer=None,
+            rollout_factory=_fake_rollout_result,
+            spider_config=spider_config,
+            runtime=_FakeOptimizerRuntime(),
+            rollout_scorer=rollout_scorer,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+        )
+
+        expected = [index % 3 == 0 for index in range(40)]
+        steady_flags = [
+            info["guided_candidate_included"] for info in result.result.infos
+        ]
+        horizon_reference_flags = [
+            bool(call["include_guided_candidate"])
+            for call in reference_calls
+            if int(call["control_count"]) == 40
+        ]
+        self.assertEqual(steady_flags, expected)
+        self.assertEqual(horizon_reference_flags[:3], [True, True, False])
+        self.assertEqual(horizon_reference_flags[3:], expected)
+        self.assertEqual(result.metadata["guided_candidate_period"], 3)
+        self.assertEqual(result.metadata["guided_candidate_windows"], 14)
+
+    def test_default_optimizer_outer_jit_keeps_rollout_tracer_execute_source(
+        self,
+    ) -> None:
+        class RecordingJax(_FakeOptimizerJax):
+            def __init__(self) -> None:
+                self.jit_calls = 0
+
+            def jit(self, fn):
+                self.jit_calls += 1
+
+                def wrapped(*args):
+                    return fn(*args)
+
+                return wrapped
+
+        runtime = SimpleNamespace(jnp=_FakeOptimizerJnp(), jax=RecordingJax())
+
+        def rollout_scorer(samples, reference, actor_params, model_bundle):
+            del reference, actor_params, model_bundle
+            sample_array = np.asarray(samples, dtype=np.float32)
+            return {
+                "score": np.arange(int(sample_array.shape[0]), dtype=np.float32),
+                "physics_step_count": np.full(
+                    int(sample_array.shape[0]),
+                    40,
+                    dtype=np.float32,
+                ),
+            }
+
+        def rollout_reference_factory(**kwargs):
+            return {"start": kwargs["start"]}
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del samples, reference, actor_params, model_bundle
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((1, QPOS_DIM), dtype=np.float32)
+            qpos[:, 3] = 1.0
+            qvel = np.zeros((1, QVEL_DIM), dtype=np.float32)
+            body_quat = np.zeros((1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            return {
+                "final_robot_state": {
+                    "qpos": qpos,
+                    "qvel": qvel,
+                    "body_pos_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                    "body_quat_w": body_quat,
+                    "body_lin_vel_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                    "body_ang_vel_w": np.zeros((1, bodies, 3), dtype=np.float32),
+                },
+                "final_obs_state": SimpleNamespace(history={}, last_action=None),
+                "final_prev_control": np.zeros((1, QPOS_DIM - 1), dtype=np.float32),
+                "final_prev_joint_acc": np.zeros((1, ACTION_DIM), dtype=np.float32),
+                "final_prev_contact": np.zeros((1, 2), dtype=np.float32),
+                "final_prev_contact_valid": np.ones((1,), dtype=np.float32),
+                "final_prev_contact_force": np.zeros((1, 2), dtype=np.float32),
+                "final_prev_contact_force_valid": np.ones((1,), dtype=np.float32),
+            }
+
+        result = _run_with_fakes(
+            optimizer=None,
+            rollout_factory=_fake_rollout_result,
+            runtime=runtime,
+            rollout_scorer=rollout_scorer,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+        )
+
+        self.assertGreaterEqual(runtime.jax.jit_calls, 1)
+        self.assertEqual(
+            result.metadata["execute_trace_source_counts"],
+            {"rollout_tracer": 40},
+        )
+        self.assertTrue(
+            all(
+                info["execute_trace_source"] == "rollout_tracer"
+                for info in result.result.infos
+            )
+        )
 
     def test_jax_warmup_primes_live_state_rollout_signature_before_steady_loop(
         self,
@@ -888,6 +1202,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             self.assertIs(kwargs["runtime"], runtime)
             self.assertTrue(kwargs["use_guided_candidate"])
             self.assertEqual(kwargs["guided_joint_gain"], 0.5)
+            self.assertEqual(kwargs["contact_force_mode"], "sum_rows")
+            self.assertFalse(kwargs["contact_force_first_row_diagnostics"])
             return SimpleNamespace(
                 rollout_scorer=rollout_scorer,
                 rollout_reference_factory=rollout_reference_factory,
@@ -937,6 +1253,8 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertTrue(result.metadata["physics_scan_enabled"])
         self.assertEqual(result.metadata["physics_step_count_min"], 40)
         self.assertEqual(result.metadata["physics_step_count_windows"], 40)
+        self.assertEqual(result.metadata["contact_force_mode"], "sum_rows")
+        self.assertFalse(result.metadata["contact_force_first_row_diagnostics"])
 
     def test_mjx_backend_rejects_malformed_fake_rollout(self) -> None:
         with self.assertRaisesRegex(ValueError, "rollout.qvel"):
@@ -1061,7 +1379,10 @@ class MjxBackendIntegrationTest(unittest.TestCase):
     def test_mjx_backend_carries_execute_trace_state_between_windows(self) -> None:
         optimizer_references: list[dict[str, object]] = []
         tracer_references: list[dict[str, object]] = []
-        live_obs_state = SimpleNamespace(history={"sentinel": object()}, last_action="last")
+        live_obs_state = SimpleNamespace(
+            history={},
+            last_action=np.zeros((1, ACTION_DIM), dtype=np.float32),
+        )
         live_prev_control = np.full((1, QPOS_DIM - 1), 0.33, dtype=np.float32)
         live_prev_joint_acc = np.full((1, ACTION_DIM), 0.21, dtype=np.float32)
         live_prev_contact = np.array([[1.0, 0.0]], dtype=np.float32)
@@ -1150,6 +1471,663 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             [1.0],
         )
 
+    def test_mjx_backend_can_strip_live_mjx_data_between_windows(self) -> None:
+        optimizer_references: list[dict[str, object]] = []
+        mjx_data = object()
+
+        def optimizer(**kwargs):
+            optimizer_references.append(dict(kwargs["reference"]["kwargs"]))
+            updated = torch.zeros(40, QPOS_DIM - 1)
+            chunk = torch.zeros(21, QPOS_DIM - 1)
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25), "accepted": True},
+            )
+
+        def rollout_reference_factory(**kwargs):
+            return {"start": kwargs["start"], "kwargs": dict(kwargs)}
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del samples, actor_params, model_bundle
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((1, QPOS_DIM), dtype=np.float32)
+            qpos[:, 3] = 1.0
+            qvel = np.full((1, QVEL_DIM), 0.5, dtype=np.float32)
+            body_quat = np.zeros((1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            return {
+                "final_robot_state": {
+                    "qpos": qpos,
+                    "qvel": qvel,
+                    "body_pos_w": np.full((1, bodies, 3), 1.5, dtype=np.float32),
+                    "body_quat_w": body_quat,
+                    "body_lin_vel_w": np.full((1, bodies, 3), 2.5, dtype=np.float32),
+                    "body_ang_vel_w": np.full((1, bodies, 3), 3.5, dtype=np.float32),
+                    "mjx_data": mjx_data,
+                },
+            }
+
+        result = _run_with_fakes(
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+            strip_live_mjx_data_between_windows=True,
+        )
+
+        second_reference = optimizer_references[1]
+        second_robot_state = second_reference["initial_robot_state"]
+        self.assertNotIn("mjx_data", second_robot_state)
+        np.testing.assert_allclose(second_robot_state["qvel"], 0.5)
+        self.assertTrue(result.metadata["strip_live_mjx_data_between_windows"])
+
+    def test_mjx_backend_records_score_only_optimizer_diagnostic(self) -> None:
+        def optimizer(**kwargs):
+            window_config = kwargs["config"]
+            updated = torch.zeros(
+                int(window_config.horizon_steps),
+                QPOS_DIM - 1,
+            )
+            chunk = torch.zeros(
+                int(window_config.control_steps) + 1,
+                QPOS_DIM - 1,
+            )
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25), "accepted": True},
+            )
+
+        result = _run_with_fakes(
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+            rollout_reference_factory=lambda **kwargs: {"kwargs": dict(kwargs)},
+            score_only_optimizer=True,
+        )
+
+        self.assertTrue(result.metadata["score_only_optimizer"])
+
+    def test_mjx_backend_records_contact_force_first_row_diagnostic(self) -> None:
+        result = _run_with_fakes(
+            optimizer=_fake_optimizer,
+            rollout_factory=_fake_rollout_result,
+            contact_force_first_row_diagnostics=True,
+        )
+
+        self.assertTrue(result.metadata["contact_force_first_row_diagnostics"])
+
+    def test_mjx_backend_records_contact_force_mode_diagnostic(self) -> None:
+        result = _run_with_fakes(
+            optimizer=_fake_optimizer,
+            rollout_factory=_fake_rollout_result,
+            contact_force_mode="first_row",
+        )
+
+        self.assertEqual(result.metadata["contact_force_mode"], "first_row")
+
+    def test_mjx_backend_builds_rollout_from_execute_trace_when_available(self) -> None:
+        config = _spider_config()
+        config.horizon_steps = 4
+        config.ctrl_steps = 2
+        total_steps = 4
+        trace_starts: list[int] = []
+
+        def optimizer(**kwargs):
+            window_config = kwargs["config"]
+            updated = torch.zeros(int(window_config.horizon_steps), QPOS_DIM - 1)
+            chunk = torch.zeros(int(window_config.control_steps) + 1, QPOS_DIM - 1)
+            chunk[:, 0] = 0.25
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25), "accepted": True},
+            )
+
+        def rollout_reference_factory(**kwargs):
+            return {"start": kwargs["start"], "kwargs": dict(kwargs)}
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del actor_params, model_bundle
+            start = int(reference["start"])
+            trace_starts.append(start)
+            steps = int(samples.shape[1])
+            frames = steps + 1
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((frames, 1, QPOS_DIM), dtype=np.float32)
+            qpos[..., 3] = 1.0
+            qpos[:, 0, 0] = np.arange(frames, dtype=np.float32) + 10.0 + start
+            qvel = np.full((frames, 1, QVEL_DIM), 0.5 + start, dtype=np.float32)
+            body_quat = np.zeros((frames, 1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            actions = np.full((steps, 1, ACTION_DIM), 0.6 + start, dtype=np.float32)
+            controls = np.full((steps, 1, ACTION_DIM), 0.7 + start, dtype=np.float32)
+            contact = np.zeros((frames, 1, 2), dtype=np.float32)
+            contact[1:, :, 0] = 1.0
+            floor_contact = np.zeros((frames, 1, 3), dtype=np.float32)
+            floor_contact[..., :2] = contact
+            return {
+                "qpos": qpos,
+                "qvel": qvel,
+                "body_pos_w": np.full((frames, 1, bodies, 3), 1.5 + start, dtype=np.float32),
+                "body_quat_w": body_quat,
+                "body_lin_vel_w": np.full((frames, 1, bodies, 3), 2.5 + start, dtype=np.float32),
+                "body_ang_vel_w": np.full((frames, 1, bodies, 3), 3.5 + start, dtype=np.float32),
+                "actions": actions,
+                "controls": controls,
+                "contact_indicator": contact,
+                "contact_force": np.full((frames, 1, 2), 4.5 + start, dtype=np.float32),
+                "contact_force_first_row": np.full(
+                    (frames, 1, 2),
+                    1.5 + start,
+                    dtype=np.float32,
+                ),
+                "floor_contact_indicator": floor_contact,
+                "floor_contact_force": np.full((frames, 1, 3), 5.5 + start, dtype=np.float32),
+                "floor_contact_force_first_row": np.full(
+                    (frames, 1, 3),
+                    2.5 + start,
+                    dtype=np.float32,
+                ),
+                "floor_contact_force_peak_source": np.full(
+                    (frames, 1, 3, 8),
+                    8.5 + start,
+                    dtype=np.float32,
+                ),
+                "final_robot_state": {
+                    "qpos": qpos[-1],
+                    "qvel": qvel[-1],
+                    "body_pos_w": np.full((1, bodies, 3), 1.5 + start, dtype=np.float32),
+                    "body_quat_w": body_quat[-1],
+                    "body_lin_vel_w": np.full((1, bodies, 3), 2.5 + start, dtype=np.float32),
+                    "body_ang_vel_w": np.full((1, bodies, 3), 3.5 + start, dtype=np.float32),
+                },
+                "final_obs_state": SimpleNamespace(history={}, last_action=actions[-1]),
+                "final_prev_control": samples[:, -1],
+                "final_prev_joint_acc": np.zeros((1, ACTION_DIM), dtype=np.float32),
+                "final_prev_contact": contact[-1, :, :],
+                "final_prev_contact_valid": np.array([1.0], dtype=np.float32),
+                "final_prev_contact_force": np.full((1, 2), 4.5 + start, dtype=np.float32),
+                "final_prev_contact_force_valid": np.array([1.0], dtype=np.float32),
+            }
+
+        result = run_g1_wbc_mjx_mpc(
+            spider_config=config,
+            motion=_motion(frames=total_steps + 1),
+            actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
+            rollout_config=SimpleNamespace(device="cpu", max_steps=total_steps),
+            execute_rollout_config=SimpleNamespace(device="cpu", max_steps=total_steps),
+            method="g1_wbc_joint_global",
+            reward_weights=None,
+            total_steps=total_steps,
+            seed=5,
+            runtime=SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
+            model_factory=lambda **kwargs: _fake_model_bundle(
+                profile_name=kwargs["profile_name"]
+            ),
+            policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+            command_builder=_fake_command_builder,
+        )
+
+        self.assertEqual(trace_starts, [0, 2])
+        self.assertEqual(result.metadata["rollout_source"], "dynamic_execute_trace")
+        self.assertTrue(result.metadata["rollout_dynamic_execute_trace"])
+        self.assertEqual(result.metadata["execute_trace_chunks"], 2)
+        rollout = result.result.rollout
+        self.assertEqual(tuple(rollout.qpos.shape), (total_steps + 1, 1, QPOS_DIM))
+        torch.testing.assert_close(
+            rollout.qpos[:, 0, 0],
+            torch.tensor([10.0, 11.0, 12.0, 13.0, 14.0]),
+        )
+        torch.testing.assert_close(rollout.actions[:2], torch.full((2, 1, ACTION_DIM), 0.6))
+        torch.testing.assert_close(rollout.actions[2:], torch.full((2, 1, ACTION_DIM), 2.6))
+        torch.testing.assert_close(rollout.controls[:2], torch.full((2, 1, ACTION_DIM), 0.7))
+        self.assertIsNotNone(rollout.contact_force_first_row)
+        self.assertIsNotNone(rollout.floor_contact_force_first_row)
+        self.assertIsNotNone(rollout.floor_contact_force_peak_source)
+        torch.testing.assert_close(
+            rollout.contact_force_first_row[:3],
+            torch.full((3, 1, 2), 1.5),
+        )
+        torch.testing.assert_close(
+            rollout.contact_force_first_row[3:],
+            torch.full((2, 1, 2), 3.5),
+        )
+        torch.testing.assert_close(
+            rollout.floor_contact_force_peak_source[:3],
+            torch.full((3, 1, 3, 8), 8.5),
+        )
+        torch.testing.assert_close(
+            rollout.floor_contact_force_peak_source[3:],
+            torch.full((2, 1, 3, 8), 10.5),
+        )
+        torch.testing.assert_close(rollout.controls[2:], torch.full((2, 1, ACTION_DIM), 2.7))
+        torch.testing.assert_close(rollout.contact_indicator[1:, :, 0], torch.ones(4, 1))
+        torch.testing.assert_close(
+            rollout.ref_indices[:, 0],
+            torch.tensor([0, *range(total_steps)]),
+        )
+        self.assertFalse(torch.allclose(rollout.qpos[:, 0], result.result.refined_qpos))
+
+    def test_mjx_backend_exports_replay_state_for_executed_command_chunks(self) -> None:
+        config = _spider_config()
+        config.horizon_steps = 4
+        config.ctrl_steps = 2
+        total_steps = 4
+        history = np.arange(
+            OBS_HISTORY_LENGTH * ACTION_DIM,
+            dtype=np.float32,
+        ).reshape(1, OBS_HISTORY_LENGTH, ACTION_DIM)
+
+        def optimizer(**kwargs):
+            window_config = kwargs["config"]
+            updated = torch.zeros(int(window_config.horizon_steps), QPOS_DIM - 1)
+            chunk = torch.zeros(int(window_config.control_steps) + 1, QPOS_DIM - 1)
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25), "accepted": True},
+            )
+
+        def rollout_reference_factory(**kwargs):
+            return {"start": kwargs["start"], "kwargs": dict(kwargs)}
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del actor_params, model_bundle
+            start = int(reference["start"])
+            steps = int(samples.shape[1])
+            frames = steps + 1
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((frames, 1, QPOS_DIM), dtype=np.float32)
+            qpos[..., 3] = 1.0
+            qpos[:, 0, 0] = np.arange(frames, dtype=np.float32) + 10.0 + start
+            qvel = np.full((frames, 1, QVEL_DIM), 0.5 + start, dtype=np.float32)
+            body_quat = np.zeros((frames, 1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            actions = np.full((steps, 1, ACTION_DIM), 0.6 + start, dtype=np.float32)
+            controls = np.full((steps, 1, ACTION_DIM), 0.7 + start, dtype=np.float32)
+            contact = np.zeros((frames, 1, 2), dtype=np.float32)
+            floor_contact = np.zeros((frames, 1, 3), dtype=np.float32)
+            floor_contact[..., :2] = contact
+            return {
+                "qpos": qpos,
+                "qvel": qvel,
+                "body_pos_w": np.full((frames, 1, bodies, 3), 1.5 + start, dtype=np.float32),
+                "body_quat_w": body_quat,
+                "body_lin_vel_w": np.full((frames, 1, bodies, 3), 2.5 + start, dtype=np.float32),
+                "body_ang_vel_w": np.full((frames, 1, bodies, 3), 3.5 + start, dtype=np.float32),
+                "actions": actions,
+                "controls": controls,
+                "contact_indicator": contact,
+                "contact_force": np.full((frames, 1, 2), 4.5 + start, dtype=np.float32),
+                "floor_contact_indicator": floor_contact,
+                "floor_contact_force": np.full((frames, 1, 3), 5.5 + start, dtype=np.float32),
+                "final_robot_state": {
+                    "qpos": qpos[-1],
+                    "qvel": qvel[-1],
+                    "body_pos_w": np.full((1, bodies, 3), 1.5 + start, dtype=np.float32),
+                    "body_quat_w": body_quat[-1],
+                    "body_lin_vel_w": np.full((1, bodies, 3), 2.5 + start, dtype=np.float32),
+                    "body_ang_vel_w": np.full((1, bodies, 3), 3.5 + start, dtype=np.float32),
+                },
+                "final_obs_state": SimpleNamespace(
+                    history={"actions": history + start},
+                    last_action=actions[-1],
+                ),
+                "final_prev_control": samples[:, -1],
+                "final_prev_joint_acc": np.zeros((1, ACTION_DIM), dtype=np.float32),
+                "final_prev_contact": contact[-1, :, :],
+                "final_prev_contact_valid": np.array([1.0], dtype=np.float32),
+                "final_prev_contact_force": np.full((1, 2), 4.5 + start, dtype=np.float32),
+                "final_prev_contact_force_valid": np.array([1.0], dtype=np.float32),
+            }
+
+        result = run_g1_wbc_mjx_mpc(
+            spider_config=config,
+            motion=_motion(frames=total_steps + 1),
+            actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
+            rollout_config=SimpleNamespace(device="cpu", max_steps=total_steps),
+            execute_rollout_config=SimpleNamespace(device="cpu", max_steps=total_steps),
+            method="g1_wbc_joint_global",
+            reward_weights=None,
+            total_steps=total_steps,
+            seed=5,
+            runtime=SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
+            model_factory=lambda **kwargs: _fake_model_bundle(
+                profile_name=kwargs["profile_name"]
+            ),
+            policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+            command_builder=_fake_command_builder,
+        )
+
+        chunks = result.result.executed_command_chunks
+        self.assertEqual(len(chunks), 2)
+        first_state = chunks[0].replay_state
+        second_state = chunks[1].replay_state
+        self.assertIsNotNone(first_state)
+        self.assertIsNotNone(second_state)
+        assert first_state is not None
+        assert second_state is not None
+        expected_motion = _motion(5)
+        torch.testing.assert_close(first_state.initial_qpos, expected_motion.qpos()[0])
+        torch.testing.assert_close(first_state.initial_qvel, expected_motion.qvel()[0])
+        self.assertIsNone(first_state.initial_last_action)
+        torch.testing.assert_close(second_state.initial_qpos[0], torch.tensor(12.0))
+        torch.testing.assert_close(second_state.initial_qvel, torch.full((QVEL_DIM,), 0.5))
+        torch.testing.assert_close(
+            second_state.initial_last_action,
+            torch.full((ACTION_DIM,), 0.6),
+        )
+        actions_history = second_state.initial_history_state["actions"]
+        self.assertEqual(actions_history["pointer"], OBS_HISTORY_LENGTH - 1)
+        torch.testing.assert_close(
+            actions_history["num_pushes"],
+            torch.full((1,), OBS_HISTORY_LENGTH, dtype=torch.long),
+        )
+        torch.testing.assert_close(
+            actions_history["buffer"],
+            torch.tensor(history[0]).view(OBS_HISTORY_LENGTH, 1, ACTION_DIM),
+        )
+
+    def test_mjx_backend_defers_full_trace_when_state_advancer_available(self) -> None:
+        config = _spider_config()
+        config.horizon_steps = 4
+        config.ctrl_steps = 2
+        total_steps = 4
+        optimizer_references: list[dict[str, object]] = []
+        advancer_starts: list[int] = []
+        trace_starts: list[int] = []
+
+        def optimizer(**kwargs):
+            optimizer_references.append(dict(kwargs["reference"]["kwargs"]))
+            window_config = kwargs["config"]
+            updated = torch.zeros(int(window_config.horizon_steps), QPOS_DIM - 1)
+            chunk = torch.zeros(int(window_config.control_steps) + 1, QPOS_DIM - 1)
+            chunk[:, 0] = 0.25
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25), "accepted": True},
+            )
+
+        def rollout_reference_factory(**kwargs):
+            return {"start": kwargs["start"], "kwargs": dict(kwargs)}
+
+        def final_fields(samples, reference):
+            start = int(reference["start"])
+            steps = int(samples.shape[1])
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((1, QPOS_DIM), dtype=np.float32)
+            qpos[:, 0] = 100.0 + start + steps
+            qpos[:, 3] = 1.0
+            qvel = np.full((1, QVEL_DIM), 0.5 + start, dtype=np.float32)
+            body_quat = np.zeros((1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            return {
+                "final_robot_state": {
+                    "qpos": qpos,
+                    "qvel": qvel,
+                    "body_pos_w": np.full((1, bodies, 3), 1.5 + start, dtype=np.float32),
+                    "body_quat_w": body_quat,
+                    "body_lin_vel_w": np.full((1, bodies, 3), 2.5 + start, dtype=np.float32),
+                    "body_ang_vel_w": np.full((1, bodies, 3), 3.5 + start, dtype=np.float32),
+                },
+                "final_obs_state": SimpleNamespace(history={}, last_action=np.zeros((1, ACTION_DIM), dtype=np.float32)),
+                "final_prev_control": samples[:, -1],
+                "final_prev_joint_acc": np.zeros((1, ACTION_DIM), dtype=np.float32),
+                "final_prev_contact": np.array([[1.0, 0.0]], dtype=np.float32),
+                "final_prev_contact_valid": np.array([1.0], dtype=np.float32),
+                "final_prev_contact_force": np.full((1, 2), 4.5 + start, dtype=np.float32),
+                "final_prev_contact_force_valid": np.array([1.0], dtype=np.float32),
+            }
+
+        def final_only_trace(samples, reference, actor_params, model_bundle):
+            del actor_params, model_bundle
+            advancer_starts.append(int(reference["start"]))
+            return final_fields(samples, reference)
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del actor_params, model_bundle
+            start = int(reference["start"])
+            trace_starts.append(start)
+            steps = int(samples.shape[1])
+            frames = steps + 1
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((frames, 1, QPOS_DIM), dtype=np.float32)
+            qpos[..., 3] = 1.0
+            qpos[:, 0, 0] = np.arange(frames, dtype=np.float32) + 10.0 + start
+            qvel = np.full((frames, 1, QVEL_DIM), 0.5 + start, dtype=np.float32)
+            body_quat = np.zeros((frames, 1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            actions = np.full((steps, 1, ACTION_DIM), 0.6 + start, dtype=np.float32)
+            controls = np.full((steps, 1, ACTION_DIM), 0.7 + start, dtype=np.float32)
+            contact = np.zeros((frames, 1, 2), dtype=np.float32)
+            contact[1:, :, 0] = 1.0
+            floor_contact = np.zeros((frames, 1, 3), dtype=np.float32)
+            floor_contact[..., :2] = contact
+            return {
+                "qpos": qpos,
+                "qvel": qvel,
+                "body_pos_w": np.full((frames, 1, bodies, 3), 1.5 + start, dtype=np.float32),
+                "body_quat_w": body_quat,
+                "body_lin_vel_w": np.full((frames, 1, bodies, 3), 2.5 + start, dtype=np.float32),
+                "body_ang_vel_w": np.full((frames, 1, bodies, 3), 3.5 + start, dtype=np.float32),
+                "actions": actions,
+                "controls": controls,
+                "contact_indicator": contact,
+                "contact_force": np.full((frames, 1, 2), 4.5 + start, dtype=np.float32),
+                "floor_contact_indicator": floor_contact,
+                "floor_contact_force": np.full((frames, 1, 3), 5.5 + start, dtype=np.float32),
+                **final_fields(samples, reference),
+            }
+
+        result = run_g1_wbc_mjx_mpc(
+            spider_config=config,
+            motion=_motion(frames=total_steps + 1),
+            actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
+            rollout_config=SimpleNamespace(device="cpu", max_steps=total_steps),
+            execute_rollout_config=SimpleNamespace(device="cpu", max_steps=total_steps),
+            method="g1_wbc_joint_global",
+            reward_weights=None,
+            total_steps=total_steps,
+            seed=5,
+            runtime=SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
+            model_factory=lambda **kwargs: _fake_model_bundle(
+                profile_name=kwargs["profile_name"]
+            ),
+            policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+            rollout_state_advancer=final_only_trace,
+            command_builder=_fake_command_builder,
+        )
+
+        self.assertEqual(advancer_starts, [0, 2])
+        self.assertEqual(trace_starts, [0, 2])
+        np.testing.assert_allclose(
+            optimizer_references[1]["initial_robot_state"]["qpos"][:, 0],
+            [102.0],
+        )
+        self.assertEqual(result.metadata["rollout_source"], "dynamic_execute_trace")
+        self.assertTrue(result.metadata["rollout_dynamic_execute_trace"])
+        self.assertEqual(result.metadata["execute_trace_chunks"], 2)
+        self.assertEqual(result.metadata["deferred_execute_trace_chunks"], 2)
+        self.assertEqual(
+            result.metadata["execute_trace_source_counts"],
+            {"rollout_tracer": 2},
+        )
+        rollout = result.result.rollout
+        torch.testing.assert_close(
+            rollout.qpos[:, 0, 0],
+            torch.tensor([10.0, 11.0, 12.0, 13.0, 14.0]),
+        )
+
+    def test_mjx_backend_reuses_optimizer_execute_trace_when_available(self) -> None:
+        config = _spider_config()
+        config.horizon_steps = 4
+        config.ctrl_steps = 2
+        total_steps = 4
+        optimizer_references: list[dict[str, object]] = []
+
+        def execute_trace(start: int, steps: int) -> dict[str, object]:
+            frames = int(steps) + 1
+            bodies = len(MUJOCO_BODY_NAMES)
+            qpos = np.zeros((frames, 1, QPOS_DIM), dtype=np.float32)
+            qpos[..., 3] = 1.0
+            qpos[:, 0, 0] = np.arange(frames, dtype=np.float32) + 50.0 + start
+            qvel = np.full((frames, 1, QVEL_DIM), 0.5 + start, dtype=np.float32)
+            body_quat = np.zeros((frames, 1, bodies, 4), dtype=np.float32)
+            body_quat[..., 0] = 1.0
+            actions = np.full((steps, 1, ACTION_DIM), 0.6 + start, dtype=np.float32)
+            controls = np.full((steps, 1, ACTION_DIM), 0.7 + start, dtype=np.float32)
+            contact = np.zeros((frames, 1, 2), dtype=np.float32)
+            contact[1:, :, 0] = 1.0
+            floor_contact = np.zeros((frames, 1, 3), dtype=np.float32)
+            floor_contact[..., :2] = contact
+            return {
+                "qpos": qpos,
+                "qvel": qvel,
+                "body_pos_w": np.full(
+                    (frames, 1, bodies, 3),
+                    1.5 + start,
+                    dtype=np.float32,
+                ),
+                "body_quat_w": body_quat,
+                "body_lin_vel_w": np.full(
+                    (frames, 1, bodies, 3),
+                    2.5 + start,
+                    dtype=np.float32,
+                ),
+                "body_ang_vel_w": np.full(
+                    (frames, 1, bodies, 3),
+                    3.5 + start,
+                    dtype=np.float32,
+                ),
+                "actions": actions,
+                "controls": controls,
+                "contact_indicator": contact,
+                "contact_force": np.full(
+                    (frames, 1, 2),
+                    4.5 + start,
+                    dtype=np.float32,
+                ),
+                "floor_contact_indicator": floor_contact,
+                "floor_contact_force": np.full(
+                    (frames, 1, 3),
+                    5.5 + start,
+                    dtype=np.float32,
+                ),
+                "final_robot_state": {
+                    "qpos": qpos[-1],
+                    "qvel": qvel[-1],
+                    "body_pos_w": np.full(
+                        (1, bodies, 3),
+                        1.5 + start,
+                        dtype=np.float32,
+                    ),
+                    "body_quat_w": body_quat[-1],
+                    "body_lin_vel_w": np.full(
+                        (1, bodies, 3),
+                        2.5 + start,
+                        dtype=np.float32,
+                    ),
+                    "body_ang_vel_w": np.full(
+                        (1, bodies, 3),
+                        3.5 + start,
+                        dtype=np.float32,
+                    ),
+                },
+                "final_obs_state": SimpleNamespace(history={}, last_action=actions[-1]),
+                "final_prev_control": controls[-1],
+                "final_prev_joint_acc": np.zeros((1, ACTION_DIM), dtype=np.float32),
+                "final_prev_contact": contact[-1],
+                "final_prev_contact_valid": np.array([1.0], dtype=np.float32),
+                "final_prev_contact_force": np.full(
+                    (1, 2),
+                    4.5 + start,
+                    dtype=np.float32,
+                ),
+                "final_prev_contact_force_valid": np.array([1.0], dtype=np.float32),
+            }
+
+        def optimizer(**kwargs):
+            start = int(kwargs["reference"]["start"])
+            optimizer_references.append(dict(kwargs["reference"]["kwargs"]))
+            window_config = kwargs["config"]
+            updated = torch.zeros(int(window_config.horizon_steps), QPOS_DIM - 1)
+            chunk = torch.zeros(int(window_config.control_steps) + 1, QPOS_DIM - 1)
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={"best_score": torch.tensor(1.25), "accepted": True},
+                execute_trace=execute_trace(
+                    start,
+                    int(window_config.control_steps),
+                ),
+            )
+
+        def rollout_reference_factory(**kwargs):
+            return {"start": kwargs["start"], "kwargs": dict(kwargs)}
+
+        def rollout_tracer(samples, reference, actor_params, model_bundle):
+            del samples, reference, actor_params, model_bundle
+            raise AssertionError("optimizer execute_trace should avoid rollout_tracer")
+
+        result = run_g1_wbc_mjx_mpc(
+            spider_config=config,
+            motion=_motion(frames=total_steps + 1),
+            actor=WbcActor(input_dim=4, hidden_dims=(), output_dim=2),
+            rollout_config=SimpleNamespace(device="cpu", max_steps=total_steps),
+            execute_rollout_config=SimpleNamespace(device="cpu", max_steps=total_steps),
+            method="g1_wbc_joint_global",
+            reward_weights=None,
+            total_steps=total_steps,
+            seed=5,
+            runtime=SimpleNamespace(jnp=SimpleNamespace(), jax=SimpleNamespace()),
+            model_factory=lambda **kwargs: _fake_model_bundle(
+                profile_name=kwargs["profile_name"]
+            ),
+            policy_converter=lambda actor, *, jnp: SimpleNamespace(params=True),
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+            rollout_reference_factory=rollout_reference_factory,
+            rollout_tracer=rollout_tracer,
+            command_builder=_fake_command_builder,
+        )
+
+        self.assertGreaterEqual(len(optimizer_references), 2)
+        np.testing.assert_allclose(
+            optimizer_references[1]["initial_robot_state"]["qpos"][:, 0],
+            [52.0],
+        )
+        self.assertEqual(result.metadata["rollout_source"], "dynamic_execute_trace")
+        self.assertEqual(result.metadata["execute_trace_chunks"], 2)
+        self.assertEqual(
+            result.metadata["execute_trace_source_counts"],
+            {"optimizer_selected_prefix": 2},
+        )
+        self.assertTrue(
+            all(
+                info["execute_trace_source"] == "optimizer_selected_prefix"
+                for info in result.result.infos
+            )
+        )
+        rollout = result.result.rollout
+        torch.testing.assert_close(
+            rollout.qpos[:, 0, 0],
+            torch.tensor([50.0, 51.0, 52.0, 53.0, 54.0]),
+        )
+
     def test_mjx_backend_accepts_jax_optimizer_arrays(self) -> None:
         try:
             import jax.numpy as jnp
@@ -1208,7 +2186,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
 
         self.assertTrue(result.metadata["accepted"])
         self.assertEqual(converted_shapes.count((40, QPOS_DIM - 1)), 1)
-        self.assertEqual(converted_shapes.count((21, QPOS_DIM - 1)), 40)
+        self.assertEqual(converted_shapes.count((21, QPOS_DIM - 1)), 0)
 
     def test_default_mjx_optimizer_defers_best_score_scalarization(self) -> None:
         def rollout_scorer(samples, reference, actor_params, model_bundle):
@@ -1253,12 +2231,217 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         config.max_num_iterations = 3
         config.final_noise_scale = 0.25
         config.use_guided_candidate = False
+        config.mjx_min_score_improvement = 0.01
+        config.mjx_min_top_score_gap = 0.02
+        config.mjx_cem_update_min_top_score_gap = 0.015
+        config.mjx_max_control_delta = 0.25
+        config.mjx_candidate_rank_diagnostics_top_k = 8
+        config.mjx_candidate_rescore_diagnostics = True
+        config.mjx_candidate_score_component_diagnostics_top_k = 6
 
         window_config = mjx_backend_module._window_config_from_spider(config)
 
         self.assertEqual(window_config.iterations, 3)
         self.assertEqual(window_config.final_noise_scale, 0.25)
         self.assertFalse(window_config.use_guided_candidate)
+        self.assertEqual(window_config.min_score_improvement, 0.01)
+        self.assertEqual(window_config.min_top_score_gap, 0.02)
+        self.assertEqual(window_config.cem_update_min_top_score_gap, 0.015)
+        self.assertEqual(window_config.max_control_delta, 0.25)
+        self.assertEqual(window_config.candidate_rank_diagnostics_top_k, 8)
+        self.assertTrue(window_config.candidate_rescore_diagnostics)
+        self.assertEqual(window_config.candidate_score_component_diagnostics_top_k, 6)
+
+    def test_mjx_backend_aggregates_iteration_diagnostics(self) -> None:
+        def optimizer(**kwargs):
+            window_config = kwargs["config"]
+            updated = torch.zeros(int(window_config.horizon_steps), QPOS_DIM - 1)
+            chunk = torch.zeros(int(window_config.control_steps) + 1, QPOS_DIM - 1)
+            chunk[:, 0] = 0.25
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={
+                    "best_score": torch.tensor(1.25),
+                    "accepted": True,
+                    "accepted_iterations": 1,
+                    "current_controls_selected": True,
+                    "zero_delta_noop_selected": False,
+                    "zero_delta_noop_iterations": 1,
+                    "score_threshold_noop_selected": True,
+                    "score_threshold_noop_iterations": 1,
+                    "control_delta_guard_noop_selected": True,
+                    "control_delta_guard_noop_iterations": 1,
+                    "noop_candidate_selected": True,
+                    "noop_candidate_iterations": 3,
+                    "top_score_gap": torch.tensor(0.04),
+                    "iteration_accepted_flags": (
+                        torch.tensor(True),
+                        torch.tensor(False),
+                        torch.tensor(False),
+                    ),
+                    "iteration_current_controls_selected_flags": (
+                        torch.tensor(False),
+                        torch.tensor(True),
+                        torch.tensor(False),
+                    ),
+                    "iteration_zero_delta_noop_flags": (
+                        torch.tensor(False),
+                        torch.tensor(False),
+                        torch.tensor(True),
+                    ),
+                    "iteration_score_threshold_noop_flags": (
+                        torch.tensor(False),
+                        torch.tensor(True),
+                        torch.tensor(False),
+                    ),
+                    "iteration_control_delta_guard_noop_flags": (
+                        torch.tensor(True),
+                        torch.tensor(False),
+                        torch.tensor(False),
+                    ),
+                    "iteration_noop_candidate_flags": (
+                        torch.tensor(True),
+                        torch.tensor(True),
+                        torch.tensor(True),
+                    ),
+                    "iteration_top_score_gaps": (
+                        torch.tensor(0.03),
+                        torch.tensor(0.04),
+                        torch.tensor(0.05),
+                    ),
+                    "candidate_rank_diagnostics_top_k": 3,
+                    "iteration_candidate_top_indices": (
+                        (
+                            torch.tensor(2),
+                            torch.tensor(1),
+                            torch.tensor(0),
+                        ),
+                    ),
+                    "iteration_candidate_top_scores": (
+                        (
+                            torch.tensor(3.0),
+                            torch.tensor(2.0),
+                            torch.tensor(1.0),
+                        ),
+                    ),
+                    "candidate_rescore_diagnostics": True,
+                    "iteration_rescore_best_indices": (
+                        torch.tensor(2),
+                        torch.tensor(1),
+                    ),
+                    "iteration_rescore_top_score_gaps": (
+                        torch.tensor(0.02),
+                        torch.tensor(0.03),
+                    ),
+                    "iteration_rescore_score_delta_maxes": (
+                        torch.tensor(0.001),
+                        torch.tensor(0.004),
+                    ),
+                    "iteration_rescore_score_delta_means": (
+                        torch.tensor(0.0005),
+                        torch.tensor(0.002),
+                    ),
+                    "iteration_rescore_top1_changed_flags": (
+                        torch.tensor(False),
+                        torch.tensor(True),
+                    ),
+                },
+            )
+
+        result = _run_with_fakes(
+            optimizer=optimizer,
+            rollout_factory=_fake_rollout_result,
+        )
+
+        self.assertEqual(
+            result.metadata["iteration_accepted_window_counts"],
+            (40, 0, 0),
+        )
+        self.assertEqual(
+            result.metadata["iteration_current_selected_window_counts"],
+            (0, 40, 0),
+        )
+        self.assertEqual(result.metadata["iteration_noop_window_counts"], (0, 40, 0))
+        self.assertEqual(result.metadata["zero_delta_noop_iteration_sum"], 40)
+        self.assertEqual(result.metadata["zero_delta_noop_windows"], 0)
+        self.assertEqual(result.metadata["zero_delta_noop_accepted_windows"], 0)
+        self.assertEqual(result.metadata["score_threshold_noop_iteration_sum"], 40)
+        self.assertEqual(result.metadata["score_threshold_noop_windows"], 40)
+        self.assertEqual(result.metadata["score_threshold_noop_accepted_windows"], 0)
+        self.assertEqual(result.metadata["control_delta_guard_noop_iteration_sum"], 40)
+        self.assertEqual(result.metadata["control_delta_guard_noop_windows"], 40)
+        self.assertEqual(
+            result.metadata["control_delta_guard_noop_accepted_windows"],
+            0,
+        )
+        self.assertEqual(result.metadata["noop_candidate_iteration_sum"], 120)
+        self.assertEqual(result.metadata["noop_candidate_windows"], 40)
+        self.assertEqual(result.metadata["noop_candidate_accepted_windows"], 0)
+        self.assertEqual(result.metadata["candidate_rank_diagnostics_top_k"], 3)
+        self.assertEqual(result.metadata["candidate_rank_diagnostics_windows"], 40)
+        self.assertEqual(result.metadata["candidate_rescore_diagnostics_windows"], 40)
+        self.assertAlmostEqual(
+            result.metadata["candidate_rescore_score_delta_max"],
+            0.004,
+        )
+        self.assertAlmostEqual(
+            result.metadata["candidate_rescore_score_delta_mean"],
+            0.00125,
+        )
+        self.assertEqual(
+            result.metadata["candidate_rescore_top1_changed_iteration_sum"],
+            40,
+        )
+        self.assertEqual(
+            result.metadata["iteration_zero_delta_noop_window_counts"],
+            (0, 0, 40),
+        )
+        self.assertEqual(
+            result.metadata["iteration_score_threshold_noop_window_counts"],
+            (0, 40, 0),
+        )
+        self.assertEqual(
+            result.metadata["iteration_control_delta_guard_noop_window_counts"],
+            (40, 0, 0),
+        )
+        self.assertEqual(
+            result.metadata["iteration_noop_candidate_window_counts"],
+            (40, 40, 40),
+        )
+        self.assertAlmostEqual(result.metadata["top_score_gap_min"], 0.04)
+        self.assertAlmostEqual(result.metadata["top_score_gap_mean"], 0.04)
+        self.assertAlmostEqual(result.metadata["top_score_gap_max"], 0.04)
+        self.assertEqual(result.metadata["top_score_gap_windows"], 40)
+        self.assertEqual(
+            tuple(round(value, 2) for value in result.metadata["iteration_top_score_gap_mins"]),
+            (0.03, 0.04, 0.05),
+        )
+        self.assertEqual(
+            tuple(round(value, 2) for value in result.metadata["iteration_top_score_gap_means"]),
+            (0.03, 0.04, 0.05),
+        )
+
+    def test_mjx_backend_rejects_nonfinite_optimizer_score_flag(self) -> None:
+        def optimizer(**kwargs):
+            window_config = kwargs["config"]
+            updated = torch.zeros(int(window_config.horizon_steps), QPOS_DIM - 1)
+            chunk = torch.zeros(int(window_config.control_steps) + 1, QPOS_DIM - 1)
+            return SimpleNamespace(
+                updated_controls=updated,
+                execute_chunk=chunk,
+                info={
+                    "best_score": torch.tensor(1.0),
+                    "accepted": True,
+                    "scores_finite": False,
+                },
+            )
+
+        with self.assertRaisesRegex(ValueError, "finite scores"):
+            _run_with_fakes(
+                optimizer=optimizer,
+                rollout_factory=_fake_rollout_result,
+            )
 
 
 def _run_with_fakes(
@@ -1272,6 +2455,7 @@ def _run_with_fakes(
     rollout_tracer=None,
     enable_physics_scan=False,
     reward_weights=None,
+    **backend_kwargs,
 ):
     kwargs = {}
     if optimizer is not None:
@@ -1300,6 +2484,7 @@ def _run_with_fakes(
         rollout_factory=rollout_factory,
         command_builder=_fake_command_builder,
         enable_physics_scan=enable_physics_scan,
+        **backend_kwargs,
         **kwargs,
     )
 
@@ -1428,23 +2613,40 @@ class MjxBackendConversionTest(unittest.TestCase):
         updated_controls = Blockable()
         execute_chunk = Blockable()
         best_score = Blockable()
+        nested_iteration_score = Blockable()
 
         mjx_backend_module._block_window_result_until_ready(
             SimpleNamespace(
                 updated_controls=updated_controls,
                 execute_chunk=execute_chunk,
-                info={"best_score": best_score},
+                info={
+                    "best_score": best_score,
+                    "iteration_score_improvements": (nested_iteration_score,),
+                },
             )
         )
 
         self.assertTrue(updated_controls.blocked)
         self.assertTrue(execute_chunk.blocked)
         self.assertTrue(best_score.blocked)
+        self.assertTrue(nested_iteration_score.blocked)
 
 
-def _fake_model_bundle(*, profile_name: str = "wxy_parity"):
+def _fake_model_bundle(
+    *,
+    profile_name: str = "wxy_parity",
+    mjx_impl: str | None = "jax",
+    mjx_warp_naconmax: int | None = None,
+    mjx_warp_njmax: int | None = None,
+    mjx_model_options: dict[str, int] | None = None,
+):
     return SimpleNamespace(
         profile=SimpleNamespace(name=profile_name),
+        mjx_impl=mjx_impl,
+        mjx_warp_naconmax=mjx_warp_naconmax,
+        mjx_warp_njmax=mjx_warp_njmax,
+        mjx_model_options=mjx_model_options or {},
+        mjx_model=SimpleNamespace(impl=mjx_impl),
         cpu_model=SimpleNamespace(
             jnt_limited=np.ones(ACTION_DIM, dtype=np.int32),
             jnt_range=np.stack(

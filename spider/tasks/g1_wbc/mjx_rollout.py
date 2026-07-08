@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 
-from spider.tasks.g1_wbc.constants import ACTION_DIM, POLICY_DT, QPOS_DIM, QVEL_DIM
+from spider.tasks.g1_wbc.constants import (
+    ACTION_DIM,
+    MUJOCO_BODY_NAMES,
+    POLICY_DT,
+    QPOS_DIM,
+    QVEL_DIM,
+)
 from spider.tasks.g1_wbc.mjx_obs import (
     JaxObsIndices,
     JaxObsState,
@@ -15,6 +21,7 @@ from spider.tasks.g1_wbc.mjx_policy import jax_actor_forward
 from spider.tasks.g1_wbc.mjx_scoring import (
     JaxScoreWeights,
     finalize_score,
+    finalize_score_only,
     init_score_accumulator,
     score_step,
 )
@@ -29,6 +36,10 @@ def make_rollout_scorer(
     runtime,
     physics_step_fn: PhysicsStepFn,
     command_reference_fn: CommandReferenceFn | None = None,
+    trace_prefix_steps: int | None = None,
+    score_only: bool = False,
+    score_only_output: bool = False,
+    score_only_output_full_metrics: bool = False,
 ):
     """Bind runtime dependencies into the optimizer's four-argument scorer."""
 
@@ -46,6 +57,10 @@ def make_rollout_scorer(
                 physics_step_fn=physics_step_fn,
                 command_reference_fn=command_reference_fn,
                 return_metrics=True,
+                trace_prefix_steps=trace_prefix_steps,
+                score_only=score_only,
+                score_only_output=score_only_output,
+                score_only_output_full_metrics=score_only_output_full_metrics,
             )
         model_key = id(model_bundle)
         compiled = jitted_by_model_id.get(model_key)
@@ -61,6 +76,10 @@ def make_rollout_scorer(
                     physics_step_fn=physics_step_fn,
                     command_reference_fn=command_reference_fn,
                     return_metrics=True,
+                    trace_prefix_steps=trace_prefix_steps,
+                    score_only=score_only,
+                    score_only_output=score_only_output,
+                    score_only_output_full_metrics=score_only_output_full_metrics,
                 )
 
             compiled = jit(score_for_model)
@@ -75,6 +94,7 @@ def make_rollout_tracer(
     runtime,
     physics_step_fn: PhysicsStepFn,
     command_reference_fn: CommandReferenceFn | None = None,
+    record_trace: bool = True,
 ):
     """Bind runtime dependencies into a jitted rollout trace helper."""
 
@@ -91,6 +111,7 @@ def make_rollout_tracer(
                 runtime=runtime,
                 physics_step_fn=physics_step_fn,
                 command_reference_fn=command_reference_fn,
+                record_trace=record_trace,
             )
         model_key = id(model_bundle)
         compiled = jitted_by_model_id.get(model_key)
@@ -105,6 +126,7 @@ def make_rollout_tracer(
                     runtime=runtime,
                     physics_step_fn=physics_step_fn,
                     command_reference_fn=command_reference_fn,
+                    record_trace=record_trace,
                 )
 
             compiled = jit(trace_for_model)
@@ -193,6 +215,10 @@ def score_candidate_controls(
     physics_step_fn: PhysicsStepFn,
     command_reference_fn: CommandReferenceFn | None = None,
     return_metrics: bool = False,
+    trace_prefix_steps: int | None = None,
+    score_only: bool = False,
+    score_only_output: bool = False,
+    score_only_output_full_metrics: bool = False,
 ):
     """Score sampled high-level controls with a scan-compatible rollout loop."""
 
@@ -201,11 +227,20 @@ def score_candidate_controls(
     _validate_samples(samples)
     sample_count = int(samples.shape[0])
     horizon = int(samples.shape[1])
+    trace_prefix_steps = _normalized_trace_prefix_steps(trace_prefix_steps, horizon)
+    trace_enabled = trace_prefix_steps is not None
 
     robot_state = _batched_robot_state(
         _required(reference, "initial_robot_state"),
         sample_count,
         jnp=jnp,
+    )
+    robot_state = _initialize_physics_robot_state(
+        physics_step_fn,
+        model_bundle,
+        robot_state,
+        sample_count,
+        runtime=runtime,
     )
     obs_state = _initial_obs_state(reference, sample_count, jnp=jnp)
     obs_indices = _required(reference, "obs_indices")
@@ -241,7 +276,7 @@ def score_candidate_controls(
     )
     prev_control = _ensure_batch(
         jnp.asarray(
-            reference.get("prev_control", jnp.zeros((sample_count, QPOS_DIM - 1)))
+            reference.get("prev_control", jnp.zeros((sample_count, ACTION_DIM)))
         ),
         sample_count,
         jnp=jnp,
@@ -273,18 +308,29 @@ def score_candidate_controls(
     scan = _lax_scan(runtime)
     if scan is not None:
         obs_state = _materialized_obs_state(obs_state, sample_count, jnp=jnp)
-        carry = (
-            robot_state,
-            obs_state.history,
-            obs_state.last_action,
-            prev_control,
-            prev_joint_vel,
-            prev_joint_acc,
-            prev_contact,
-            prev_contact_valid,
-            prev_contact_force,
-            prev_contact_force_valid,
-            accumulator,
+        initial_trace = (
+            _initial_rollout_trace(
+                robot_state,
+                prev_contact,
+                prev_contact_force,
+                sample_count,
+                jnp=jnp,
+            )
+            if trace_enabled
+            else None
+        )
+        carry = _score_scan_carry(
+            robot_state=robot_state,
+            obs_state=obs_state,
+            prev_control=prev_control,
+            prev_joint_vel=prev_joint_vel,
+            prev_joint_acc=prev_joint_acc,
+            prev_contact=prev_contact,
+            prev_contact_valid=prev_contact_valid,
+            prev_contact_force=prev_contact_force,
+            prev_contact_force_valid=prev_contact_force_valid,
+            accumulator=accumulator,
+            trace_enabled=trace_enabled,
         )
 
         def scan_step(carry, step_index):
@@ -300,6 +346,7 @@ def score_candidate_controls(
                 prev_contact_force,
                 prev_contact_force_valid,
                 accumulator,
+                *prefix_values,
             ) = carry
             next_values = _score_rollout_step(
                 step_index,
@@ -328,8 +375,10 @@ def score_candidate_controls(
                 physics_step_fn=physics_step_fn,
                 runtime=runtime,
                 sample_count=sample_count,
+                include_trace=trace_enabled,
+                collect_metrics=not score_only,
             )
-            return (
+            next_carry = (
                 next_values["robot_state"],
                 next_values["obs_state"].history,
                 next_values["obs_state"].last_action,
@@ -341,20 +390,66 @@ def score_candidate_controls(
                 next_values["prev_contact_force"],
                 next_values["prev_contact_force_valid"],
                 next_values["accumulator"],
-            ), None
+            )
+            if not trace_enabled:
+                return next_carry, None
+            next_carry = next_carry + _updated_trace_prefix_carry(
+                prefix_values,
+                next_values,
+                step_index,
+                trace_prefix_steps=int(trace_prefix_steps),
+                runtime=runtime,
+                jnp=jnp,
+            )
+            return next_carry, next_values["trace"]
 
-        carry, _ = scan(scan_step, carry, jnp.arange(horizon))
-        accumulator = carry[-1]
-        metrics = finalize_score(accumulator, jnp=jnp)
-        if return_metrics:
-            return _with_physics_step_count(
+        carry, trace = scan(scan_step, carry, jnp.arange(horizon))
+        accumulator = carry[10]
+        metrics = (
+            finalize_score_only(accumulator, jnp=jnp)
+            if score_only or (score_only_output and not score_only_output_full_metrics)
+            else finalize_score(accumulator, jnp=jnp)
+        )
+        if return_metrics or trace_enabled:
+            metrics = _with_physics_step_count(
                 metrics,
                 sample_count=sample_count,
                 horizon=horizon,
                 jnp=jnp,
             )
+            if trace_enabled:
+                metrics = _with_trace_prefix(
+                    metrics,
+                    trace,
+                    initial_trace=initial_trace,
+                    prefix_carry=carry[11:],
+                    trace_prefix_steps=int(trace_prefix_steps),
+                    jnp=jnp,
+                )
+            return metrics
         return metrics["score"]
 
+    initial_trace = None
+    prefix_carry = None
+    if trace_enabled:
+        initial_trace = _initial_rollout_trace(
+            robot_state,
+            prev_contact,
+            prev_contact_force,
+            sample_count,
+            jnp=jnp,
+        )
+        prefix_carry = _initial_trace_prefix_carry(
+            robot_state=robot_state,
+            obs_state=obs_state,
+            prev_control=prev_control,
+            prev_joint_vel=prev_joint_vel,
+            prev_joint_acc=prev_joint_acc,
+            prev_contact=prev_contact,
+            prev_contact_valid=prev_contact_valid,
+            prev_contact_force=prev_contact_force,
+            prev_contact_force_valid=prev_contact_force_valid,
+        )
     for step_index in range(horizon):
         next_values = _score_rollout_step(
             step_index,
@@ -379,6 +474,8 @@ def score_candidate_controls(
             physics_step_fn=physics_step_fn,
             runtime=runtime,
             sample_count=sample_count,
+            include_trace=trace_enabled,
+            collect_metrics=not score_only,
         )
         robot_state = next_values["robot_state"]
         obs_state = next_values["obs_state"]
@@ -390,15 +487,43 @@ def score_candidate_controls(
         prev_contact_force = next_values["prev_contact_force"]
         prev_contact_force_valid = next_values["prev_contact_force_valid"]
         accumulator = next_values["accumulator"]
+        if trace_enabled:
+            _append_rollout_trace(initial_trace, next_values["trace"])
+            if step_index == int(trace_prefix_steps) - 1:
+                prefix_carry = _initial_trace_prefix_carry(
+                    robot_state=robot_state,
+                    obs_state=obs_state,
+                    prev_control=prev_control,
+                    prev_joint_vel=prev_joint_vel,
+                    prev_joint_acc=prev_joint_acc,
+                    prev_contact=prev_contact,
+                    prev_contact_valid=prev_contact_valid,
+                    prev_contact_force=prev_contact_force,
+                    prev_contact_force_valid=prev_contact_force_valid,
+                )
 
-    metrics = finalize_score(accumulator, jnp=jnp)
-    if return_metrics:
-        return _with_physics_step_count(
+    metrics = (
+        finalize_score_only(accumulator, jnp=jnp)
+        if score_only or (score_only_output and not score_only_output_full_metrics)
+        else finalize_score(accumulator, jnp=jnp)
+    )
+    if return_metrics or trace_enabled:
+        metrics = _with_physics_step_count(
             metrics,
             sample_count=sample_count,
             horizon=horizon,
             jnp=jnp,
         )
+        if trace_enabled:
+            metrics = _with_trace_prefix(
+                metrics,
+                _stack_rollout_trace(initial_trace, jnp=jnp),
+                initial_trace=None,
+                prefix_carry=prefix_carry,
+                trace_prefix_steps=int(trace_prefix_steps),
+                jnp=jnp,
+            )
+        return metrics
     return metrics["score"]
 
 
@@ -411,6 +536,7 @@ def rollout_candidate_controls(
     runtime,
     physics_step_fn: PhysicsStepFn,
     command_reference_fn: CommandReferenceFn | None = None,
+    record_trace: bool = True,
 ) -> dict[str, object]:
     """Roll out sampled high-level controls and return robot-state traces."""
 
@@ -424,6 +550,13 @@ def rollout_candidate_controls(
         _required(reference, "initial_robot_state"),
         sample_count,
         jnp=jnp,
+    )
+    robot_state = _initialize_physics_robot_state(
+        physics_step_fn,
+        model_bundle,
+        robot_state,
+        sample_count,
+        runtime=runtime,
     )
     obs_state = _initial_obs_state(reference, sample_count, jnp=jnp)
     obs_state = _materialized_obs_state(obs_state, sample_count, jnp=jnp)
@@ -460,7 +593,7 @@ def rollout_candidate_controls(
     )
     prev_control = _ensure_batch(
         jnp.asarray(
-            reference.get("prev_control", jnp.zeros((sample_count, QPOS_DIM - 1)))
+            reference.get("prev_control", jnp.zeros((sample_count, ACTION_DIM)))
         ),
         sample_count,
         jnp=jnp,
@@ -485,12 +618,19 @@ def rollout_candidate_controls(
         command_reference,
     )
 
-    qpos_trace = [robot_state["qpos"]]
-    qvel_trace = [robot_state["qvel"]]
+    initial_trace = (
+        _initial_rollout_trace(
+            robot_state,
+            prev_contact,
+            prev_contact_force,
+            sample_count,
+            jnp=jnp,
+        )
+        if record_trace
+        else None
+    )
     scan = _lax_scan(runtime)
     if scan is not None:
-        initial_qpos = robot_state["qpos"]
-        initial_qvel = robot_state["qvel"]
         obs_state = _materialized_obs_state(obs_state, sample_count, jnp=jnp)
         carry = (
             robot_state,
@@ -543,9 +683,10 @@ def rollout_candidate_controls(
                 physics_step_fn=physics_step_fn,
                 runtime=runtime,
                 sample_count=sample_count,
+                include_trace=record_trace,
             )
             next_robot_state = next_values["robot_state"]
-            return (
+            next_carry = (
                 next_robot_state,
                 next_values["obs_state"].history,
                 next_values["obs_state"].last_action,
@@ -556,21 +697,15 @@ def rollout_candidate_controls(
                 next_values["prev_contact_valid"],
                 next_values["prev_contact_force"],
                 next_values["prev_contact_force_valid"],
-            ), (next_robot_state["qpos"], next_robot_state["qvel"])
+            )
+            if not record_trace:
+                return next_carry, None
+            return next_carry, next_values["trace"]
 
         carry, trace = scan(scan_step, carry, jnp.arange(horizon))
-        qpos_steps, qvel_steps = trace
         robot_state = carry[0]
         obs_state = JaxObsState(history=carry[1], last_action=carry[2])
-        return {
-            "qpos": jnp.concatenate(
-                [jnp.expand_dims(initial_qpos, 0), qpos_steps],
-                axis=0,
-            ),
-            "qvel": jnp.concatenate(
-                [jnp.expand_dims(initial_qvel, 0), qvel_steps],
-                axis=0,
-            ),
+        result = {
             "final_robot_state": robot_state,
             "final_obs_state": obs_state,
             "final_prev_control": carry[3],
@@ -581,6 +716,9 @@ def rollout_candidate_controls(
             "final_prev_contact_force": carry[8],
             "final_prev_contact_force_valid": carry[9],
         }
+        if record_trace:
+            result.update(_prepend_initial_rollout_trace(initial_trace, trace, jnp=jnp))
+        return result
 
     for step_index in range(horizon):
         next_values = _rollout_trace_step(
@@ -604,6 +742,7 @@ def rollout_candidate_controls(
             physics_step_fn=physics_step_fn,
             runtime=runtime,
             sample_count=sample_count,
+            include_trace=record_trace,
         )
         robot_state = next_values["robot_state"]
         obs_state = next_values["obs_state"]
@@ -614,12 +753,10 @@ def rollout_candidate_controls(
         prev_contact_valid = next_values["prev_contact_valid"]
         prev_contact_force = next_values["prev_contact_force"]
         prev_contact_force_valid = next_values["prev_contact_force_valid"]
-        qpos_trace.append(robot_state["qpos"])
-        qvel_trace.append(robot_state["qvel"])
+        if record_trace:
+            _append_rollout_trace(initial_trace, next_values["trace"])
 
-    return {
-        "qpos": jnp.stack(qpos_trace, axis=0),
-        "qvel": jnp.stack(qvel_trace, axis=0),
+    result = {
         "final_robot_state": robot_state,
         "final_obs_state": obs_state,
         "final_prev_control": prev_control,
@@ -630,6 +767,9 @@ def rollout_candidate_controls(
         "final_prev_contact_force": prev_contact_force,
         "final_prev_contact_force_valid": prev_contact_force_valid,
     }
+    if record_trace:
+        result.update(_stack_rollout_trace(initial_trace, jnp=jnp))
+    return result
 
 
 def _with_physics_step_count(
@@ -645,6 +785,231 @@ def _with_physics_step_count(
         int(horizon),
     )
     return enriched
+
+
+def _normalized_trace_prefix_steps(value: int | None, horizon: int) -> int | None:
+    if value is None:
+        return None
+    steps = int(value)
+    if steps < 1:
+        raise ValueError("trace_prefix_steps must be positive")
+    return min(steps, int(horizon))
+
+
+def _score_scan_carry(
+    *,
+    robot_state,
+    obs_state: JaxObsState,
+    prev_control,
+    prev_joint_vel,
+    prev_joint_acc,
+    prev_contact,
+    prev_contact_valid,
+    prev_contact_force,
+    prev_contact_force_valid,
+    accumulator,
+    trace_enabled: bool,
+) -> tuple[object, ...]:
+    carry = (
+        robot_state,
+        obs_state.history,
+        obs_state.last_action,
+        prev_control,
+        prev_joint_vel,
+        prev_joint_acc,
+        prev_contact,
+        prev_contact_valid,
+        prev_contact_force,
+        prev_contact_force_valid,
+        accumulator,
+    )
+    if not trace_enabled:
+        return carry
+    return carry + _initial_trace_prefix_carry(
+        robot_state=robot_state,
+        obs_state=obs_state,
+        prev_control=prev_control,
+        prev_joint_vel=prev_joint_vel,
+        prev_joint_acc=prev_joint_acc,
+        prev_contact=prev_contact,
+        prev_contact_valid=prev_contact_valid,
+        prev_contact_force=prev_contact_force,
+        prev_contact_force_valid=prev_contact_force_valid,
+    )
+
+
+def _initial_trace_prefix_carry(
+    *,
+    robot_state,
+    obs_state: JaxObsState,
+    prev_control,
+    prev_joint_vel,
+    prev_joint_acc,
+    prev_contact,
+    prev_contact_valid,
+    prev_contact_force,
+    prev_contact_force_valid,
+) -> tuple[object, ...]:
+    return (
+        robot_state,
+        obs_state.history,
+        obs_state.last_action,
+        prev_control,
+        prev_joint_vel,
+        prev_joint_acc,
+        prev_contact,
+        prev_contact_valid,
+        prev_contact_force,
+        prev_contact_force_valid,
+    )
+
+
+def _updated_trace_prefix_carry(
+    prefix_values: list[object],
+    next_values: Mapping[str, object],
+    step_index,
+    *,
+    trace_prefix_steps: int,
+    runtime,
+    jnp,
+) -> tuple[object, ...]:
+    condition = step_index == int(trace_prefix_steps) - 1
+    next_prefix = _initial_trace_prefix_carry(
+        robot_state=next_values["robot_state"],
+        obs_state=next_values["obs_state"],
+        prev_control=next_values["prev_control"],
+        prev_joint_vel=next_values["prev_joint_vel"],
+        prev_joint_acc=next_values["prev_joint_acc"],
+        prev_contact=next_values["prev_contact"],
+        prev_contact_valid=next_values["prev_contact_valid"],
+        prev_contact_force=next_values["prev_contact_force"],
+        prev_contact_force_valid=next_values["prev_contact_force_valid"],
+    )
+    return tuple(
+        _tree_where(condition, new_value, old_value, runtime=runtime, jnp=jnp)
+        for old_value, new_value in zip(prefix_values, next_prefix)
+    )
+
+
+def _with_trace_prefix(
+    metrics: Mapping[str, object],
+    step_trace: Mapping[str, object],
+    *,
+    initial_trace: Mapping[str, list[object]] | None,
+    prefix_carry: tuple[object, ...],
+    trace_prefix_steps: int,
+    jnp,
+) -> dict[str, object]:
+    enriched = dict(metrics)
+    trace = (
+        _prepend_initial_rollout_trace(initial_trace, step_trace, jnp=jnp)
+        if initial_trace is not None
+        else dict(step_trace)
+    )
+    trace = _slice_rollout_trace_prefix(
+        trace,
+        trace_prefix_steps=int(trace_prefix_steps),
+    )
+    (
+        robot_state,
+        obs_history,
+        last_action,
+        prev_control,
+        prev_joint_vel,
+        prev_joint_acc,
+        prev_contact,
+        prev_contact_valid,
+        prev_contact_force,
+        prev_contact_force_valid,
+    ) = prefix_carry
+    trace.update(
+        {
+            "final_robot_state": robot_state,
+            "final_obs_state": JaxObsState(
+                history=obs_history,
+                last_action=last_action,
+            ),
+            "final_prev_control": prev_control,
+            "final_prev_joint_vel": prev_joint_vel,
+            "final_prev_joint_acc": prev_joint_acc,
+            "final_prev_contact": prev_contact,
+            "final_prev_contact_valid": prev_contact_valid,
+            "final_prev_contact_force": prev_contact_force,
+            "final_prev_contact_force_valid": prev_contact_force_valid,
+        }
+    )
+    enriched["execute_trace"] = trace
+    enriched["trace_prefix_steps"] = jnp.full((1,), int(trace_prefix_steps))
+    return enriched
+
+
+def _slice_rollout_trace_prefix(
+    trace: Mapping[str, object],
+    *,
+    trace_prefix_steps: int,
+) -> dict[str, object]:
+    prefix = int(trace_prefix_steps)
+    values = dict(trace)
+    for name in _FRAME_TRACE_FIELDS:
+        values[name] = values[name][: prefix + 1]
+    for name in _STEP_TRACE_FIELDS:
+        values[name] = values[name][:prefix]
+    return values
+
+
+def _tree_where(condition, true_value, false_value, *, runtime, jnp):
+    if isinstance(true_value, Mapping) and isinstance(false_value, Mapping):
+        return {
+            key: _tree_where(
+                condition,
+                true_value[key],
+                false_value[key],
+                runtime=runtime,
+                jnp=jnp,
+            )
+            for key in true_value
+        }
+    tree_map = _jax_tree_map(runtime)
+    if callable(tree_map) and not _is_plain_array_like(true_value):
+        return tree_map(
+            lambda new_leaf, old_leaf: _array_where(
+                condition,
+                new_leaf,
+                old_leaf,
+                jnp=jnp,
+            ),
+            true_value,
+            false_value,
+        )
+    return _array_where(condition, true_value, false_value, jnp=jnp)
+
+
+def _array_where(condition, true_value, false_value, *, jnp):
+    where = getattr(jnp, "where", None)
+    if callable(where):
+        try:
+            return where(condition, true_value, false_value)
+        except Exception:
+            return true_value if bool(condition) else false_value
+    return true_value if bool(condition) else false_value
+
+
+def _is_plain_array_like(value) -> bool:
+    return (
+        hasattr(value, "shape")
+        and hasattr(value, "dtype")
+        or isinstance(value, (int, float, bool))
+    )
+
+
+def _jax_tree_map(runtime):
+    jax = getattr(runtime, "jax", None)
+    tree_util = getattr(jax, "tree_util", None)
+    tree_map = getattr(tree_util, "tree_map", None)
+    if callable(tree_map):
+        return tree_map
+    tree = getattr(jax, "tree", None)
+    return getattr(tree, "map", None)
 
 
 def _score_rollout_step(
@@ -671,6 +1036,8 @@ def _score_rollout_step(
     physics_step_fn: PhysicsStepFn,
     runtime,
     sample_count: int,
+    include_trace: bool = False,
+    collect_metrics: bool = True,
 ) -> dict[str, object]:
     jnp = runtime.jnp
     commanded_qpos = _required(reference, "commanded_qpos")
@@ -715,11 +1082,22 @@ def _score_rollout_step(
     robot_state = _batched_robot_state(robot_state, sample_count, jnp=jnp)
     step_control = samples[:, step_index]
     step_state = dict(physics_score_state)
+    joint_control = _ensure_batch(
+        jnp.asarray(
+            physics_score_state.get(
+                "joint_control",
+                jnp.zeros((sample_count, ACTION_DIM)),
+            )
+        ),
+        sample_count,
+        jnp=jnp,
+    )
     current_joint_vel = _joint_vel(robot_state)
     current_joint_acc = current_joint_vel - prev_joint_vel
+    step_state.setdefault("joint_pos", robot_state["qpos"][:, 7:])
     step_state.setdefault("action", action)
     step_state.setdefault("prev_action", obs_state.last_action)
-    step_state.setdefault("control", step_control)
+    step_state.setdefault("control", joint_control)
     step_state.setdefault("prev_control", prev_control)
     step_state.setdefault("joint_vel", current_joint_vel)
     step_state.setdefault("prev_joint_vel", prev_joint_vel)
@@ -747,11 +1125,12 @@ def _score_rollout_step(
         score_reference,
         weights,
         jnp=jnp,
+        collect_metrics=collect_metrics,
     )
-    return {
+    result = {
         "robot_state": robot_state,
         "obs_state": JaxObsState(history=next_obs_state.history, last_action=action),
-        "prev_control": step_control,
+        "prev_control": joint_control,
         "prev_joint_vel": current_joint_vel,
         "prev_joint_acc": current_joint_acc,
         "prev_contact": current_contact,
@@ -760,6 +1139,49 @@ def _score_rollout_step(
         "prev_contact_force_valid": current_contact_force_valid,
         "accumulator": accumulator,
     }
+    if include_trace:
+        floor_contact = _ensure_floor_contact(
+            step_state,
+            current_contact,
+            sample_count,
+            jnp=jnp,
+        )
+        floor_contact_force = _ensure_floor_contact_force(
+            step_state,
+            current_contact_force,
+            sample_count,
+            jnp=jnp,
+        )
+        current_contact_force_first_row = _ensure_contact_force_first_row(
+            step_state,
+            current_contact_force,
+            sample_count,
+            jnp=jnp,
+        )
+        floor_contact_force_first_row = _ensure_floor_contact_force_first_row(
+            step_state,
+            current_contact_force_first_row,
+            sample_count,
+            jnp=jnp,
+        )
+        floor_contact_force_peak_source = _ensure_floor_contact_force_peak_source(
+            step_state,
+            sample_count,
+            jnp=jnp,
+        )
+        result["trace"] = {
+            **_robot_state_trace(robot_state, sample_count, jnp=jnp),
+            "actions": action,
+            "controls": joint_control,
+            "contact_indicator": current_contact,
+            "contact_force": current_contact_force,
+            "contact_force_first_row": current_contact_force_first_row,
+            "floor_contact_indicator": floor_contact,
+            "floor_contact_force": floor_contact_force,
+            "floor_contact_force_first_row": floor_contact_force_first_row,
+            "floor_contact_force_peak_source": floor_contact_force_peak_source,
+        }
+    return result
 
 
 def _rollout_trace_step(
@@ -784,6 +1206,7 @@ def _rollout_trace_step(
     physics_step_fn: PhysicsStepFn,
     runtime,
     sample_count: int,
+    include_trace: bool = True,
 ) -> dict[str, object]:
     jnp = runtime.jnp
     commanded_qpos = _required(reference, "commanded_qpos")
@@ -830,16 +1253,26 @@ def _rollout_trace_step(
     current_joint_vel = _joint_vel(robot_state)
     current_joint_acc = current_joint_vel - prev_joint_vel
     current_contact = jnp.asarray(_physics_score_state["contact"])
+    joint_control = _ensure_batch(
+        jnp.asarray(
+            _physics_score_state.get(
+                "joint_control",
+                jnp.zeros((sample_count, ACTION_DIM)),
+            )
+        ),
+        sample_count,
+        jnp=jnp,
+    )
     if "contact_force" in _physics_score_state:
         current_contact_force = jnp.asarray(_physics_score_state["contact_force"])
         current_contact_force_valid = jnp.zeros((sample_count,)) + 1.0
     else:
         current_contact_force = jnp.zeros((sample_count, 2))
         current_contact_force_valid = jnp.zeros((sample_count,))
-    return {
+    result = {
         "robot_state": robot_state,
         "obs_state": JaxObsState(history=next_obs_state.history, last_action=action),
-        "prev_control": step_control,
+        "prev_control": joint_control,
         "prev_joint_vel": current_joint_vel,
         "prev_joint_acc": current_joint_acc,
         "prev_contact": current_contact,
@@ -847,6 +1280,298 @@ def _rollout_trace_step(
         "prev_contact_force": current_contact_force,
         "prev_contact_force_valid": current_contact_force_valid,
     }
+    if include_trace:
+        floor_contact = _ensure_floor_contact(
+            _physics_score_state,
+            current_contact,
+            sample_count,
+            jnp=jnp,
+        )
+        floor_contact_force = _ensure_floor_contact_force(
+            _physics_score_state,
+            current_contact_force,
+            sample_count,
+            jnp=jnp,
+        )
+        current_contact_force_first_row = _ensure_contact_force_first_row(
+            _physics_score_state,
+            current_contact_force,
+            sample_count,
+            jnp=jnp,
+        )
+        floor_contact_force_first_row = _ensure_floor_contact_force_first_row(
+            _physics_score_state,
+            current_contact_force_first_row,
+            sample_count,
+            jnp=jnp,
+        )
+        floor_contact_force_peak_source = _ensure_floor_contact_force_peak_source(
+            _physics_score_state,
+            sample_count,
+            jnp=jnp,
+        )
+        result["trace"] = {
+            **_robot_state_trace(robot_state, sample_count, jnp=jnp),
+            "actions": action,
+            "controls": joint_control,
+            "contact_indicator": current_contact,
+            "contact_force": current_contact_force,
+            "contact_force_first_row": current_contact_force_first_row,
+            "floor_contact_indicator": floor_contact,
+            "floor_contact_force": floor_contact_force,
+            "floor_contact_force_first_row": floor_contact_force_first_row,
+            "floor_contact_force_peak_source": floor_contact_force_peak_source,
+        }
+    return result
+
+
+_FRAME_TRACE_FIELDS = (
+    "qpos",
+    "qvel",
+    "body_pos_w",
+    "body_quat_w",
+    "body_lin_vel_w",
+    "body_ang_vel_w",
+    "contact_indicator",
+    "contact_force",
+    "contact_force_first_row",
+    "floor_contact_indicator",
+    "floor_contact_force",
+    "floor_contact_force_first_row",
+    "floor_contact_force_peak_source",
+)
+
+_STEP_TRACE_FIELDS = ("actions", "controls")
+
+
+def _initial_rollout_trace(
+    robot_state: Mapping[str, object],
+    prev_contact,
+    prev_contact_force,
+    sample_count: int,
+    *,
+    jnp,
+) -> dict[str, list[object]]:
+    contact = _ensure_batch(jnp.asarray(prev_contact), sample_count, jnp=jnp)
+    contact_force = _ensure_batch(
+        jnp.asarray(prev_contact_force),
+        sample_count,
+        jnp=jnp,
+    )
+    floor_contact = jnp.concatenate(
+        [contact, jnp.zeros((int(sample_count), 1))],
+        axis=-1,
+    )
+    floor_contact_force = jnp.concatenate(
+        [contact_force, jnp.zeros((int(sample_count), 1))],
+        axis=-1,
+    )
+    trace = {
+        name: [value]
+        for name, value in _robot_state_trace(
+            robot_state,
+            sample_count,
+            jnp=jnp,
+        ).items()
+    }
+    trace["contact_indicator"] = [contact]
+    trace["contact_force"] = [contact_force]
+    trace["contact_force_first_row"] = [contact_force]
+    trace["floor_contact_indicator"] = [floor_contact]
+    trace["floor_contact_force"] = [floor_contact_force]
+    trace["floor_contact_force_first_row"] = [floor_contact_force]
+    trace["floor_contact_force_peak_source"] = [
+        _empty_floor_contact_force_peak_source(sample_count, jnp=jnp)
+    ]
+    trace["actions"] = []
+    trace["controls"] = []
+    return trace
+
+
+def _robot_state_trace(
+    robot_state: Mapping[str, object],
+    sample_count: int,
+    *,
+    jnp,
+) -> dict[str, object]:
+    bodies = len(MUJOCO_BODY_NAMES)
+    return {
+        "qpos": _ensure_batch(jnp.asarray(robot_state["qpos"]), sample_count, jnp=jnp),
+        "qvel": _ensure_batch(jnp.asarray(robot_state["qvel"]), sample_count, jnp=jnp),
+        "body_pos_w": _trace_state_field(
+            robot_state,
+            "body_pos_w",
+            (bodies, 3),
+            sample_count,
+            jnp=jnp,
+        ),
+        "body_quat_w": _trace_state_field(
+            robot_state,
+            "body_quat_w",
+            (bodies, 4),
+            sample_count,
+            identity_quat=True,
+            jnp=jnp,
+        ),
+        "body_lin_vel_w": _trace_state_field(
+            robot_state,
+            "body_lin_vel_w",
+            (bodies, 3),
+            sample_count,
+            jnp=jnp,
+        ),
+        "body_ang_vel_w": _trace_state_field(
+            robot_state,
+            "body_ang_vel_w",
+            (bodies, 3),
+            sample_count,
+            jnp=jnp,
+        ),
+    }
+
+
+def _trace_state_field(
+    robot_state: Mapping[str, object],
+    name: str,
+    trailing_shape: tuple[int, ...],
+    sample_count: int,
+    *,
+    jnp,
+    identity_quat: bool = False,
+):
+    if name in robot_state:
+        return _ensure_batch(jnp.asarray(robot_state[name]), sample_count, jnp=jnp)
+    shape = (int(sample_count), *trailing_shape)
+    if not identity_quat:
+        return jnp.zeros(shape)
+    value = jnp.zeros(shape)
+    if hasattr(value, "at"):
+        return value.at[..., 0].set(1.0)
+    value[..., 0] = 1.0
+    return value
+
+
+def _ensure_floor_contact(
+    step_state: Mapping[str, object],
+    contact,
+    sample_count: int,
+    *,
+    jnp,
+):
+    if "floor_contact" in step_state:
+        return _ensure_batch(
+            jnp.asarray(step_state["floor_contact"]),
+            sample_count,
+            jnp=jnp,
+        )
+    return jnp.concatenate([contact, jnp.zeros((int(sample_count), 1))], axis=-1)
+
+
+def _ensure_floor_contact_force(
+    step_state: Mapping[str, object],
+    contact_force,
+    sample_count: int,
+    *,
+    jnp,
+):
+    if "floor_contact_force" in step_state:
+        return _ensure_batch(
+            jnp.asarray(step_state["floor_contact_force"]),
+            sample_count,
+            jnp=jnp,
+        )
+    return jnp.concatenate([contact_force, jnp.zeros((int(sample_count), 1))], axis=-1)
+
+
+def _ensure_contact_force_first_row(
+    step_state: Mapping[str, object],
+    contact_force,
+    sample_count: int,
+    *,
+    jnp,
+):
+    if "contact_force_first_row" in step_state:
+        return _ensure_batch(
+            jnp.asarray(step_state["contact_force_first_row"]),
+            sample_count,
+            jnp=jnp,
+        )
+    return contact_force
+
+
+def _ensure_floor_contact_force_first_row(
+    step_state: Mapping[str, object],
+    contact_force_first_row,
+    sample_count: int,
+    *,
+    jnp,
+):
+    if "floor_contact_force_first_row" in step_state:
+        return _ensure_batch(
+            jnp.asarray(step_state["floor_contact_force_first_row"]),
+            sample_count,
+            jnp=jnp,
+        )
+    return jnp.concatenate(
+        [contact_force_first_row, jnp.zeros((int(sample_count), 1))],
+        axis=-1,
+    )
+
+
+def _ensure_floor_contact_force_peak_source(
+    step_state: Mapping[str, object],
+    sample_count: int,
+    *,
+    jnp,
+):
+    if "floor_contact_force_peak_source" in step_state:
+        return _ensure_batch(
+            jnp.asarray(step_state["floor_contact_force_peak_source"]),
+            sample_count,
+            jnp=jnp,
+        )
+    return _empty_floor_contact_force_peak_source(sample_count, jnp=jnp)
+
+
+def _empty_floor_contact_force_peak_source(sample_count: int, *, jnp):
+    value = jnp.zeros((int(sample_count), 3, 8))
+    if hasattr(value, "at"):
+        value = value.at[..., 0].set(-1.0)
+        value = value.at[..., 1].set(-1.0)
+        value = value.at[..., 2].set(-1.0)
+        return value.at[..., 7].set(-1.0)
+    value = value.copy()
+    value[..., 0] = -1.0
+    value[..., 1] = -1.0
+    value[..., 2] = -1.0
+    value[..., 7] = -1.0
+    return value
+
+
+def _append_rollout_trace(trace: dict[str, list[object]], step_trace: Mapping[str, object]) -> None:
+    for name in (*_FRAME_TRACE_FIELDS, *_STEP_TRACE_FIELDS):
+        trace[name].append(step_trace[name])
+
+
+def _stack_rollout_trace(trace: Mapping[str, list[object]], *, jnp) -> dict[str, object]:
+    return {name: jnp.stack(trace[name], axis=0) for name in trace}
+
+
+def _prepend_initial_rollout_trace(
+    initial_trace: Mapping[str, list[object]],
+    step_trace: Mapping[str, object],
+    *,
+    jnp,
+) -> dict[str, object]:
+    values: dict[str, object] = {}
+    for name in _FRAME_TRACE_FIELDS:
+        values[name] = jnp.concatenate(
+            [jnp.expand_dims(initial_trace[name][0], axis=0), step_trace[name]],
+            axis=0,
+        )
+    for name in _STEP_TRACE_FIELDS:
+        values[name] = step_trace[name]
+    return values
 
 
 def _lax_scan(runtime):
@@ -1050,7 +1775,7 @@ def _batched_robot_state(
         sample_count=sample_count,
         jnp=jnp,
     )
-    return {
+    batched = {
         "qpos": qpos,
         "qvel": qvel,
         "body_pos_w": body_pos_w,
@@ -1059,6 +1784,29 @@ def _batched_robot_state(
         "body_ang_vel_w": body_ang_vel_w,
         "base_ang_vel_b": base_ang_vel_b,
     }
+    if "mjx_data" in state and state["mjx_data"] is not None:
+        batched["mjx_data"] = state["mjx_data"]
+    return batched
+
+
+def _initialize_physics_robot_state(
+    physics_step_fn: PhysicsStepFn,
+    model_bundle,
+    robot_state: Mapping[str, object],
+    sample_count: int,
+    *,
+    runtime,
+) -> dict[str, object]:
+    initializer = getattr(physics_step_fn, "initialize_robot_state", None)
+    if not callable(initializer):
+        return dict(robot_state)
+    initialized = initializer(
+        model_bundle,
+        robot_state,
+        int(sample_count),
+        runtime=runtime,
+    )
+    return _batched_robot_state(initialized, sample_count, jnp=runtime.jnp)
 
 
 def _batched_base_ang_vel(
@@ -1217,7 +1965,7 @@ def _is_unbatched_reference(name: str, value) -> bool:
         return shape == (3,)
     if name in {"body_pos_w", "body_ang_vel_w", "body_pos", "ee_pos"}:
         return len(shape) == 2 and shape[-1] == 3
-    if name == "body_quat_w":
+    if name in {"body_quat_w", "body_quat", "ee_quat"}:
         return len(shape) == 2 and shape[-1] == 4
     if name == "contact":
         return len(shape) == 1

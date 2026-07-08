@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 SPIDER_ROOT = Path(__file__).resolve().parents[1]
 MODEL_BASED_ROOT = next(
     (
@@ -28,7 +30,7 @@ MODEL_BASED_ROOT = next(
 WBC_RESULTS_ROOT = MODEL_BASED_ROOT / "wbc_results"
 DEFAULT_JUMP_MOTION = WBC_RESULTS_ROOT / "assets" / "motion_data" / "jump" / "motion.npz"
 DEFAULT_WALK_MOTION = WBC_RESULTS_ROOT / "assets" / "motion_data" / "walk" / "motion.npz"
-DEFAULT_CHECKPOINT = WBC_RESULTS_ROOT / "assets" / "checkpoints" / "model_8000.pt"
+DEFAULT_CHECKPOINT = WBC_RESULTS_ROOT / "assets" / "checkpoints" / "WXY_8000" / "model_8000.pt"
 DEFAULT_REWARD_WEIGHTS = (
     WBC_RESULTS_ROOT
     / "g1_body_tracking_wbc"
@@ -44,8 +46,10 @@ DEFAULT_PYTHON_EXECUTABLE = (
 )
 BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
 RUNNER_PROVENANCE_FILENAME = "stage0_runner_provenance.json"
+CONTACT_FORCE_SEMANTICS = "pyramidal_contact_normal_v1"
 MOTIONS = ("jump", "walk")
 SEEDS = (0, 1, 2)
+COLLISION_PROFILES = ("wxy_parity", "wxy_explicit_pairs_7caps")
 SWEETPOINT_ARGS = (
     "--method",
     "g1_wbc_joint_global",
@@ -148,6 +152,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--python-executable", default=str(DEFAULT_PYTHON_EXECUTABLE))
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
+        "--collision-profile",
+        choices=COLLISION_PROFILES,
+        default="wxy_parity",
+        help="WXY contact profile passed through to evaluate.py.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Write the manifest without running evaluate.py.",
@@ -214,6 +224,8 @@ def build_stage0_commands(args: argparse.Namespace) -> list[Stage0Command]:
                 str(args.checkpoint),
                 "--device",
                 args.device,
+                "--collision-profile",
+                str(args.collision_profile),
                 "--output-dir",
                 str(run_output_dir),
                 "--seed",
@@ -335,6 +347,8 @@ def validate_checkpoint_format(args: argparse.Namespace) -> tuple[str, ...]:
         except TypeError:
             payload = torch.load(checkpoint, map_location="cpu")
     except Exception as exc:  # pragma: no cover - defensive around third-party I/O
+        if args.dry_run:
+            return ()
         return (f"checkpoint format: unable to inspect {checkpoint}: {exc}",)
 
     if not isinstance(payload, dict):
@@ -412,6 +426,8 @@ def build_stage0_runner_provenance(command: Stage0Command) -> dict[str, Any]:
         "output_dir": command.output_dir,
         "argv": list(command.argv),
         "command_text": command.command_text,
+        "collision_profile": _argv_value(command.argv, "--collision-profile"),
+        "contact_force_semantics": CONTACT_FORCE_SEMANTICS,
         "input_paths": input_paths,
         "input_sha256": {
             key: _path_sha256_or_none(value)
@@ -470,12 +486,14 @@ def build_manifest_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "reward_weights": file_sha256(reward_weights),
     }
     return {
+        "contact_force_semantics": CONTACT_FORCE_SEMANTICS,
         "provenance": {
             "worktree_path": str(SPIDER_ROOT),
             "git_commit": _git_output("rev-parse", "HEAD"),
             "git_status_short": _git_output("status", "--short"),
             "python_executable": str(Path(args.python_executable).expanduser()),
             "device": str(args.device),
+            "collision_profile": str(args.collision_profile),
         },
         "input_paths": input_paths,
         "input_sha256": input_hashes,
@@ -592,6 +610,8 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
         return None
     if mpc.get("config") != _expected_stage0_mpc_config(command):
         return None
+    if not _valid_stage0_window_command_npz(command_path, num_steps=num_steps):
+        return None
 
     row: dict[str, Any] = {
         "returncode": 0,
@@ -618,6 +638,52 @@ def load_existing_ok_row(command: Stage0Command) -> dict[str, Any] | None:
     if isinstance(mpc.get("runtime_gpu_name"), str):
         row["runtime_gpu_name"] = mpc["runtime_gpu_name"]
     return row
+
+
+def _valid_stage0_window_command_npz(path: Path, *, num_steps: int) -> bool:
+    try:
+        with np.load(path) as data:
+            required = (
+                "window_starts",
+                "window_execute_steps",
+                "window_horizons",
+                "window_command_qpos_chunks",
+                "window_command_qvel_chunks",
+            )
+            if any(name not in data.files for name in required):
+                return False
+            starts = np.asarray(data["window_starts"], dtype=np.int64)
+            execute_steps = np.asarray(data["window_execute_steps"], dtype=np.int64)
+            horizons = np.asarray(data["window_horizons"], dtype=np.int64)
+            if starts.ndim != 1 or execute_steps.shape != starts.shape:
+                return False
+            if horizons.shape != starts.shape or starts.shape[0] < 1:
+                return False
+            if np.any(execute_steps < 1) or np.any(horizons < execute_steps):
+                return False
+            expected_starts = np.concatenate(
+                [np.array([0], dtype=np.int64), np.cumsum(execute_steps[:-1])]
+            )
+            if not np.array_equal(starts, expected_starts):
+                return False
+            if int(starts[-1] + execute_steps[-1]) != int(num_steps):
+                return False
+            max_horizon = int(horizons.max())
+            qpos = np.asarray(data["window_command_qpos_chunks"])
+            qvel = np.asarray(data["window_command_qvel_chunks"])
+            return qpos.shape == (
+                starts.shape[0],
+                max_horizon,
+                1,
+                36,
+            ) and qvel.shape == (
+                starts.shape[0],
+                max_horizon,
+                1,
+                35,
+            )
+    except Exception:
+        return False
 
 
 def _strict_json_bool(value: Any) -> bool | None:
@@ -744,7 +810,15 @@ def _existing_row_provenance_matches(
     """Return whether an existing metrics payload belongs to this command."""
 
     expected = _command_expected_provenance(command)
-    for key in ("motion", "motion_type", "checkpoint", "device", "method", "max_steps"):
+    for key in (
+        "motion",
+        "motion_type",
+        "checkpoint",
+        "device",
+        "collision_profile",
+        "method",
+        "max_steps",
+    ):
         value = expected.get(key)
         if value is None:
             continue
@@ -774,6 +848,7 @@ def _command_expected_provenance(command: Stage0Command) -> dict[str, str]:
         "motion_type": _argv_value(command.argv, "--motion-type"),
         "checkpoint": _argv_value(command.argv, "--checkpoint"),
         "device": _argv_value(command.argv, "--device"),
+        "collision_profile": _argv_value(command.argv, "--collision-profile"),
         "method": _argv_value(command.argv, "--method"),
         "max_steps": _argv_value(command.argv, "--max-steps"),
         "mpc_backend": _argv_value(command.argv, "--mpc-backend"),

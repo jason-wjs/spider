@@ -57,6 +57,7 @@ def build_mjx_rollout_reference(
         raise ValueError("controls must contain at least one horizon step")
 
     indices = _window_indices(start, horizon, motion.num_frames)
+    score_indices = _window_indices(start + 1, horizon, motion.num_frames)
     initial_index = min(start, motion.num_frames - 1)
     qpos = motion.qpos()
     qvel = motion.qvel()
@@ -88,19 +89,20 @@ def build_mjx_rollout_reference(
         ),
     }
     score_reference = {
-        "root_pos": _to_jnp(_slice_window(qpos, indices)[:, :3], jnp=jnp),
-        "root_quat": _to_jnp(_slice_window(qpos, indices)[:, 3:7], jnp=jnp),
-        "body_pos": _to_jnp(_slice_window(motion.body_pos_w, indices), jnp=jnp),
-        "body_quat": _to_jnp(_slice_window(motion.body_quat_w, indices), jnp=jnp),
+        "root_pos": _to_jnp(_slice_window(qpos, score_indices)[:, :3], jnp=jnp),
+        "root_quat": _to_jnp(_slice_window(qpos, score_indices)[:, 3:7], jnp=jnp),
+        "joint_pos": _to_jnp(_slice_window(qpos, score_indices)[:, 7:], jnp=jnp),
+        "body_pos": _to_jnp(_slice_window(motion.body_pos_w, score_indices), jnp=jnp),
+        "body_quat": _to_jnp(_slice_window(motion.body_quat_w, score_indices), jnp=jnp),
         "ee_pos": _to_jnp(
-            _slice_window(motion.body_pos_w, indices)[:, ee_body_indices],
+            _slice_window(motion.body_pos_w, score_indices)[:, ee_body_indices],
             jnp=jnp,
         ),
         "ee_quat": _to_jnp(
-            _slice_window(motion.body_quat_w, indices)[:, ee_body_indices],
+            _slice_window(motion.body_quat_w, score_indices)[:, ee_body_indices],
             jnp=jnp,
         ),
-        "contact": _to_jnp(_slice_window(motion.contact, indices), jnp=jnp),
+        "contact": _to_jnp(_slice_window(motion.contact, score_indices), jnp=jnp),
     }
     return {
         "initial_robot_state": initial_robot_state,
@@ -114,7 +116,9 @@ def build_mjx_rollout_reference(
         "joint_low": _joint_limit_array(model_bundle, high=False, jnp=jnp),
         "joint_high": _joint_limit_array(model_bundle, high=True, jnp=jnp),
         "prev_control": (
-            controls[0] if prev_control is None else _to_jnp(prev_control, jnp=jnp)
+            _to_jnp([0.0] * ACTION_DIM, jnp=jnp)
+            if prev_control is None
+            else _to_jnp(prev_control, jnp=jnp)
         ),
         "prev_joint_acc": (
             _to_jnp([0.0] * ACTION_DIM, jnp=jnp)
@@ -199,7 +203,10 @@ def _robot_state_to_jnp(state: Mapping[str, object], *, jnp) -> dict[str, object
     if missing:
         names = ", ".join(missing)
         raise ValueError(f"initial_robot_state is missing fields: {names}")
-    return {name: _to_jnp(state[name], jnp=jnp) for name in fields}
+    values = {name: _to_jnp(state[name], jnp=jnp) for name in fields}
+    if "mjx_data" in state and state["mjx_data"] is not None:
+        values["mjx_data"] = state["mjx_data"]
+    return values
 
 
 def _to_jnp(value, *, jnp):

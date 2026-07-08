@@ -10,6 +10,8 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 RUNNER_PATH = (
     Path(__file__).resolve().parents[3] / "scripts" / "run_g1_wbc_stage0_baseline.py"
 )
@@ -50,8 +52,51 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         )
         self.assertEqual(
             args.checkpoint,
-            str(runner.WBC_RESULTS_ROOT / "assets" / "checkpoints" / "model_8000.pt"),
+            str(
+                runner.WBC_RESULTS_ROOT
+                / "assets"
+                / "checkpoints"
+                / "WXY_8000"
+                / "model_8000.pt"
+            ),
         )
+
+    def test_dry_run_does_not_require_checkpoint_payload_dependencies(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model_8000.pt"
+            reward_weights = root / "reward.json"
+            jump_motion.write_text("jump")
+            walk_motion.write_text("walk")
+            checkpoint.write_text("dry-run placeholder")
+            reward_weights.write_text("{}")
+
+            exit_code = runner.main(
+                [
+                    "--jump-motion",
+                    str(jump_motion),
+                    "--walk-motion",
+                    str(walk_motion),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--reward-weights",
+                    str(reward_weights),
+                    "--output-dir",
+                    str(output_root),
+                    "--dry-run",
+                    "--skip-manifest",
+                    "--only-motion",
+                    "jump",
+                    "--only-seed",
+                    "0",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
 
     def test_parse_args_accepts_stage0_inputs(self) -> None:
         runner = load_runner()
@@ -79,6 +124,38 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
         self.assertEqual(args.reward_weights, Path("/tmp/missing/reward.json"))
         self.assertEqual(args.output_dir, Path("/tmp/stage0"))
         self.assertTrue(args.dry_run)
+
+    def test_build_stage0_commands_records_collision_profile(self) -> None:
+        runner = load_runner()
+        args = runner.parse_args(
+            [
+                "--jump-motion",
+                "/tmp/missing/jump.npz",
+                "--walk-motion",
+                "/tmp/missing/walk.npz",
+                "--checkpoint",
+                "model.pt",
+                "--reward-weights",
+                "/tmp/missing/reward.json",
+                "--output-dir",
+                "/tmp/stage0",
+                "--dry-run",
+                "--collision-profile",
+                "wxy_explicit_pairs_7caps",
+                "--only-motion",
+                "jump",
+                "--only-seed",
+                "0",
+            ]
+        )
+
+        commands = runner.build_stage0_commands(args)
+
+        self.assertEqual(len(commands), 1)
+        command = commands[0]
+        self.assertIn("--collision-profile", command.argv)
+        profile_index = command.argv.index("--collision-profile")
+        self.assertEqual(command.argv[profile_index + 1], "wxy_explicit_pairs_7caps")
 
     def test_build_stage0_commands_covers_motions_and_seeds(self) -> None:
         runner = load_runner()
@@ -638,6 +715,9 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                             "motion_type": "isaaclab",
                             "checkpoint": command.argv[command.argv.index("--checkpoint") + 1],
                             "device": "cuda:0",
+                            "collision_profile": command.argv[
+                                command.argv.index("--collision-profile") + 1
+                            ],
                             "method": "g1_wbc_joint_global",
                             "max_steps": 800,
                             "metrics": _passing_metrics(),
@@ -657,7 +737,7 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
                     )
                 )
                 (output_dir / "rollout.npz").write_text("{}")
-                (output_dir / "mpc_command.npz").write_text("{}")
+                _write_window_command_npz(output_dir / "mpc_command.npz")
                 runner.write_stage0_runner_provenance(command)
 
             with mock.patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": "0"}):
@@ -881,6 +961,76 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
             samples_index = provenance["argv"].index("--mpc-samples") + 1
             provenance["argv"][samples_index] = "256"
             provenance_path.write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+
+            row = runner.load_existing_ok_row(command)
+
+        self.assertIsNone(row)
+
+    def test_existing_row_reuse_rejects_legacy_force_semantics_provenance(self) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_root = root / "stage0"
+            jump_motion = root / "jump.npz"
+            walk_motion = root / "walk.npz"
+            checkpoint = root / "model.pt"
+            reward_weights = root / "reward.json"
+            for path in (jump_motion, walk_motion, checkpoint, reward_weights):
+                path.write_text("{}")
+            args = runner.parse_args(
+                [
+                    "--jump-motion",
+                    str(jump_motion),
+                    "--walk-motion",
+                    str(walk_motion),
+                    "--checkpoint",
+                    str(checkpoint),
+                    "--reward-weights",
+                    str(reward_weights),
+                    "--output-dir",
+                    str(output_root),
+                    "--reuse-existing-ok",
+                ]
+            )
+            command = next(
+                command
+                for command in runner.build_stage0_commands(args)
+                if command.motion_name == "jump" and command.seed == 0
+            )
+            output_dir = Path(command.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "motion": command.motion,
+                        "motion_type": "isaaclab",
+                        "checkpoint": command.argv[command.argv.index("--checkpoint") + 1],
+                        "device": "cuda:0",
+                        "collision_profile": command.argv[
+                            command.argv.index("--collision-profile") + 1
+                        ],
+                        "method": "g1_wbc_joint_global",
+                        "max_steps": 800,
+                        "metrics": _passing_metrics(),
+                        "mpc": {
+                            "mpc_backend": "mujoco_warp",
+                            "mpc_optimizer": "legacy",
+                            "reward_weight_source": str(reward_weights.resolve()),
+                            "accepted": True,
+                            "accepted_windows": 40,
+                            "used_baseline_fallback": False,
+                            "config": _stage0_mpc_config(command),
+                        },
+                    }
+                )
+            )
+            (output_dir / "rollout.npz").write_text("{}")
+            _write_window_command_npz(output_dir / "mpc_command.npz")
+            legacy_provenance = runner.build_stage0_runner_provenance(command)
+            legacy_provenance.pop("contact_force_semantics", None)
+            (output_dir / runner.RUNNER_PROVENANCE_FILENAME).write_text(
+                json.dumps(legacy_provenance, indent=2, sort_keys=True) + "\n"
+            )
 
             row = runner.load_existing_ok_row(command)
 
@@ -1392,6 +1542,10 @@ class Stage0BaselineRunnerTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(manifest["input_paths"]["checkpoint"], str(checkpoint.resolve()))
+        self.assertEqual(
+            manifest["contact_force_semantics"],
+            runner.CONTACT_FORCE_SEMANTICS,
+        )
         self.assertTrue(
             all(
                 row["argv"][row["argv"].index("--checkpoint") + 1]
@@ -1521,6 +1675,19 @@ def _passing_metrics() -> dict[str, float | bool]:
         "joint_acc_mean": 1.0,
         "joint_jerk_mean": 1.0,
     }
+
+
+def _write_window_command_npz(path: Path) -> None:
+    windows = 40
+    horizon = 40
+    np.savez_compressed(
+        path,
+        window_starts=np.arange(windows, dtype=np.int32) * 20,
+        window_execute_steps=np.full(windows, 20, dtype=np.int32),
+        window_horizons=np.full(windows, horizon, dtype=np.int32),
+        window_command_qpos_chunks=np.zeros((windows, horizon, 1, 36), dtype=np.float32),
+        window_command_qvel_chunks=np.zeros((windows, horizon, 1, 35), dtype=np.float32),
+    )
 
 
 def _stage0_mpc_config(command) -> dict[str, float | int | str | bool | None]:

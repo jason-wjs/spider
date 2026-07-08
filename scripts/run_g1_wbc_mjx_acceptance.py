@@ -15,7 +15,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean, median, pstdev
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -49,6 +49,7 @@ MIN_REALTIME_FACTOR = 1.0
 DEFAULT_REQUIRED_GPU_NAME_FRAGMENT = "H100"
 ARTIFACT_FRESHNESS_TOLERANCE_NS = 2_000_000_000
 FORMAL_BASELINE_NAME = "g1_wbc_stage0_mujoco_warp_sweetpoint"
+CONTACT_FORCE_SEMANTICS = "pyramidal_contact_normal_v1"
 TARGET_H100_SPEEDUP = "h100_speedup"
 COMMAND_QVEL_CONSISTENCY_ATOL = 5.0e-5
 COMMAND_QVEL_CONSISTENCY_RTOL = 1.0e-5
@@ -56,6 +57,7 @@ TARGET_4090_REALTIME = "4090_realtime"
 ACCEPTANCE_REPORT_NAME = "acceptance_report.json"
 ACCEPTANCE_PARTIAL_REPORT_NAME = "acceptance_report.partial.json"
 ACCEPTANCE_ROW_SIDECAR_NAME = "acceptance_row.json"
+STAGE0_RUNNER_PROVENANCE_FILENAME = "stage0_runner_provenance.json"
 REQUIRED_INPUT_SHA256_FIELDS = (
     "jump_motion",
     "walk_motion",
@@ -117,8 +119,6 @@ FORMAL_STAGE0_FORBIDDEN_FLAGS = (
 LEGACY_ONLY_MJX_DROP_ARG_VALUES = (
     "--mpc-preset",
     "--mpc-sampling-mode",
-    "--mpc-elite-frac",
-    "--mpc-sigma-decay",
     "--mpc-smooth-passes",
     "--mpc-command-reg-weight",
     "--mpc-command-smooth-weight",
@@ -137,6 +137,20 @@ LEGACY_ONLY_MJX_DROP_FLAGS = (
     "--mpc-acceptance-gate",
     "--no-mpc-acceptance-gate",
 )
+MJX_GENERIC_ARG_VALUES = {
+    "--mpc-first-ctrl-noise-scale": "1.0",
+    "--mpc-last-ctrl-noise-scale": "1.0",
+    "--mpc-final-noise-scale": "1.0",
+}
+MJX_MPC_NUMERIC_OVERRIDE_FLAGS = {
+    "mjx_mpc_root_pos_sigma": "--mpc-root-pos-sigma",
+    "mjx_mpc_root_rot_sigma": "--mpc-root-rot-sigma",
+    "mjx_mpc_joint_sigma": "--mpc-joint-sigma",
+    "mjx_mpc_first_ctrl_noise_scale": "--mpc-first-ctrl-noise-scale",
+    "mjx_mpc_last_ctrl_noise_scale": "--mpc-last-ctrl-noise-scale",
+    "mjx_mpc_final_noise_scale": "--mpc-final-noise-scale",
+    "mjx_mpc_sigma_decay": "--mpc-sigma-decay",
+}
 MJX_CONTACT_SATURATION_FIELDS = (
     "contact_saturated",
     "max_contact_points_saturated",
@@ -176,7 +190,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=TARGET_H100_SPEEDUP,
         help=(
             "Formal acceptance target. The H100 target gates on baseline-relative "
-            "speedup; the 4090 target gates on real-time factor."
+            "speedup; the 4090 target gates on both baseline-relative speedup "
+            "and real-time factor."
         ),
     )
     parser.add_argument("--min-speedup", type=float, default=MIN_SPEEDUP)
@@ -190,8 +205,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--required-gpu-name-fragment",
         default=DEFAULT_REQUIRED_GPU_NAME_FRAGMENT,
         help=(
-            "Substring required in baseline and MJX runtime GPU names for this "
-            "acceptance milestone. Use an empty value to disable the model-name check."
+            "Substring required in baseline, MJX, and replay runtime GPU names "
+            "for this acceptance milestone. Use an empty value to disable the "
+            "model-name check."
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
@@ -204,12 +220,360 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--collision-profile",
+        default=None,
+        help=(
+            "Override the WXY collision profile for both MJX optimization and "
+            "replay validation rows. Omit to preserve the baseline row setting."
+        ),
+    )
+    parser.add_argument(
         "--mjx-guided-candidate",
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
             "Enable MJX-generated guided candidate controls in the generic MJX "
             "acceptance run. The replay validation run never receives this flag."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-guided-candidate-period",
+        type=int,
+        default=None,
+        help=(
+            "Diagnostic: when guided candidate is enabled, generate it every N "
+            "MPC windows to reduce guided no-MPC rollout overhead."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-guided-candidate-period-override",
+        action="append",
+        default=[],
+        metavar="MOTION:SEED:VALUE",
+        help=(
+            "Enable guided candidate and override its period for one MJX row, "
+            "e.g. jump:0:4. Repeat for multiple rows."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-min-score-improvement",
+        type=float,
+        default=None,
+        help=(
+            "Diagnostic: require this score improvement before accepting a "
+            "non-current MJX optimizer candidate. Defaults to evaluate.py's "
+            "legacy 1e-9 when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-min-top-score-gap",
+        type=float,
+        default=None,
+        help=(
+            "Diagnostic: require this best-vs-second-best score gap before "
+            "accepting a non-current MJX optimizer candidate. Defaults to "
+            "evaluate.py's 0.0 when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-cem-update-min-top-score-gap",
+        type=float,
+        default=None,
+        help=(
+            "Diagnostic: require this best-vs-second-best score gap before "
+            "updating the adaptive CEM sampling center/sigma. Defaults to "
+            "evaluate.py's 0.0 when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-min-top-score-gap-override",
+        action="append",
+        default=[],
+        metavar="MOTION:SEED:VALUE",
+        help=(
+            "Override --mjx-min-top-score-gap for one row, e.g. jump:0:0.03. "
+            "Repeat for multiple rows."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-min-score-improvement-override",
+        action="append",
+        default=[],
+        metavar="MOTION:SEED:VALUE",
+        help=(
+            "Override --mjx-min-score-improvement for one row, e.g. jump:2:0.01. "
+            "Repeat for multiple rows."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-max-control-delta",
+        type=float,
+        default=None,
+        help=(
+            "Diagnostic: keep current controls when the selected MJX candidate "
+            "exceeds this max absolute control delta."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-max-control-delta-override",
+        action="append",
+        default=[],
+        metavar="MOTION:SEED:VALUE",
+        help=(
+            "Override --mjx-max-control-delta for one row, e.g. walk:1:0.25. "
+            "Repeat for multiple rows."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-candidate-rank-diagnostics-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Diagnostic: record per-iteration top-k MJX optimizer candidate "
+            "indices and scores in MPC history. Defaults to 0/off."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-candidate-rescore-diagnostics",
+        action="store_true",
+        help=(
+            "Diagnostic: rescore the same sampled MJX optimizer candidates once "
+            "per iteration and record score deltas. Defaults to off."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-candidate-rescore-selection-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Diagnostic: rescore the current top-k MJX optimizer candidates once "
+            "per iteration and select using the average score. Defaults to 0/off."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-candidate-score-component-diagnostics-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Diagnostic: record score-component values for current, selected, "
+            "and top-k MJX optimizer candidates. Defaults to 0/off."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-score-only-rescore-diagnostics",
+        action="store_true",
+        help=(
+            "Diagnostic: keep the primary MJX optimizer scorer unchanged, but "
+            "shadow-rescore sampled candidates with a score-only scorer and "
+            "record score deltas. Shadow scores are not used for selection."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-score-only-output-rescore-diagnostics",
+        action="store_true",
+        help=(
+            "Diagnostic: keep the primary MJX optimizer scorer unchanged, but "
+            "shadow-rescore sampled candidates with a scorer that accumulates "
+            "full metrics and returns only score. Shadow scores are not used "
+            "for selection."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-contact-force-first-row-diagnostics",
+        action="store_true",
+        help=(
+            "Diagnostic: ask the MJX artifact trace to materialize first solver-row "
+            "contact-force fields. This is off by default for formal speed runs."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-contact-force-mode",
+        choices=("sum_rows", "first_row"),
+        default="sum_rows",
+        help=(
+            "Diagnostic: choose which MJX contact-force signal enters scoring. "
+            "The default sum_rows preserves the current acceptance surface; "
+            "first_row is experimental and must be explicitly recorded."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-contact-force-active-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Diagnostic MJX-only scorer weight for active foot contact-force "
+            "magnitude. The term is normalized by 300N and defaults to 0/off."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-contact-force-delta-weight",
+        type=float,
+        default=None,
+        help=(
+            "Diagnostic MJX-only override for the contact-force-delta scorer "
+            "weight. Omit to preserve the method reward config."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-contact-force-peak-excess-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Diagnostic MJX-only scorer weight for peak contact force above "
+            "300N. The excess is normalized by 300N and defaults to 0/off."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-contact-false-positive-weight",
+        type=float,
+        default=None,
+        help=(
+            "Diagnostic MJX-only override for the contact false-positive scorer "
+            "weight. Omit to preserve the method reward config."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-strip-live-mjx-data",
+        action="store_true",
+        help=(
+            "Diagnostic: strip live MJX data between MPC windows so each window "
+            "reconstructs MJX state from explicit qpos/qvel carry fields."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-score-only-optimizer",
+        action="store_true",
+        help=(
+            "Diagnostic: score optimizer candidates with compact score-only "
+            "metrics. Formal acceptance must keep the default full metrics unless "
+            "criteria promote this path."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-mpc-samples",
+        type=int,
+        default=None,
+        help=(
+            "Diagnostic: MJX-only override for --mpc-samples. Replay validation "
+            "keeps the Stage 0 sample count because it consumes the saved command."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-mpc-root-pos-sigma",
+        type=float,
+        default=None,
+        help="Diagnostic: MJX-only override for --mpc-root-pos-sigma.",
+    )
+    parser.add_argument(
+        "--mjx-mpc-root-rot-sigma",
+        type=float,
+        default=None,
+        help="Diagnostic: MJX-only override for --mpc-root-rot-sigma.",
+    )
+    parser.add_argument(
+        "--mjx-mpc-joint-sigma",
+        type=float,
+        default=None,
+        help="Diagnostic: MJX-only override for --mpc-joint-sigma.",
+    )
+    parser.add_argument(
+        "--mjx-mpc-joint-sigma-override",
+        action="append",
+        default=[],
+        metavar="MOTION:SEED:VALUE",
+        help=(
+            "Override MJX-only --mpc-joint-sigma for one row, e.g. walk:1:0.12. "
+            "Repeat for multiple rows."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-mpc-first-ctrl-noise-scale",
+        type=float,
+        default=None,
+        help="Diagnostic: MJX-only override for --mpc-first-ctrl-noise-scale.",
+    )
+    parser.add_argument(
+        "--mjx-mpc-last-ctrl-noise-scale",
+        type=float,
+        default=None,
+        help="Diagnostic: MJX-only override for --mpc-last-ctrl-noise-scale.",
+    )
+    parser.add_argument(
+        "--mjx-mpc-final-noise-scale",
+        type=float,
+        default=None,
+        help="Diagnostic: MJX-only override for --mpc-final-noise-scale.",
+    )
+    parser.add_argument(
+        "--mjx-mpc-sigma-decay",
+        type=float,
+        default=None,
+        help="Diagnostic: MJX-only override for --mpc-sigma-decay.",
+    )
+    parser.add_argument(
+        "--mjx-impl",
+        choices=("jax", "warp"),
+        default="jax",
+        help="MJX implementation used for the formal MJX row.",
+    )
+    parser.add_argument(
+        "--mjx-warp-naconmax",
+        type=int,
+        default=30000,
+        help="Global MJX-Warp contact buffer passed to evaluate.py when using Warp.",
+    )
+    parser.add_argument(
+        "--mjx-warp-naconmax-override",
+        action="append",
+        default=[],
+        metavar="MOTION:SEED:VALUE",
+        help=(
+            "Override --mjx-warp-naconmax for one row, e.g. jump:1:24250. "
+            "Repeat for multiple rows."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-warp-njmax",
+        type=int,
+        default=256,
+        help="Global MJX-Warp constraint buffer passed to evaluate.py when using Warp.",
+    )
+    parser.add_argument(
+        "--mjx-model-iterations",
+        type=int,
+        default=None,
+        help=(
+            "Diagnostic MJX model opt.iterations override. Non-default values "
+            "must be promoted in criteria before they are formal evidence."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-model-iterations-override",
+        action="append",
+        default=[],
+        metavar="MOTION:SEED:VALUE",
+        help=(
+            "Override --mjx-model-iterations for one row, e.g. walk:2:5. "
+            "Repeat for multiple rows."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-model-ls-iterations",
+        type=int,
+        default=None,
+        help=(
+            "Diagnostic MJX model opt.ls_iterations override. Non-default values "
+            "must be promoted in criteria before they are formal evidence."
+        ),
+    )
+    parser.add_argument(
+        "--mjx-model-ls-iterations-override",
+        action="append",
+        default=[],
+        metavar="MOTION:SEED:VALUE",
+        help=(
+            "Override --mjx-model-ls-iterations for one row, e.g. walk:2:5. "
+            "Repeat for multiple rows."
         ),
     )
     parser.add_argument(
@@ -232,7 +596,224 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Run selected row shards without writing shared acceptance reports.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.mjx_model_iterations is not None and int(args.mjx_model_iterations) <= 0:
+        parser.error("--mjx-model-iterations must be positive.")
+    if (
+        args.mjx_model_ls_iterations is not None
+        and int(args.mjx_model_ls_iterations) <= 0
+    ):
+        parser.error("--mjx-model-ls-iterations must be positive.")
+    if args.mjx_guided_candidate_period is not None:
+        if int(args.mjx_guided_candidate_period) <= 0:
+            parser.error("--mjx-guided-candidate-period must be positive.")
+        if not bool(args.mjx_guided_candidate):
+            parser.error(
+                "--mjx-guided-candidate-period requires --mjx-guided-candidate."
+            )
+    if args.mjx_min_score_improvement is not None:
+        min_score_improvement = float(args.mjx_min_score_improvement)
+        if not math.isfinite(min_score_improvement) or min_score_improvement < 0.0:
+            parser.error("--mjx-min-score-improvement must be non-negative.")
+    for flag_name, value in (
+        ("--mjx-min-top-score-gap", args.mjx_min_top_score_gap),
+        (
+            "--mjx-cem-update-min-top-score-gap",
+            args.mjx_cem_update_min_top_score_gap,
+        ),
+    ):
+        if value is None:
+            continue
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            parser.error(f"{flag_name} must be non-negative.")
+    if args.mjx_max_control_delta is not None:
+        max_control_delta = float(args.mjx_max_control_delta)
+        if not math.isfinite(max_control_delta) or max_control_delta <= 0.0:
+            parser.error("--mjx-max-control-delta must be positive.")
+    contact_force_active_weight = float(args.mjx_contact_force_active_weight)
+    if (
+        not math.isfinite(contact_force_active_weight)
+        or contact_force_active_weight < 0.0
+    ):
+        parser.error("--mjx-contact-force-active-weight must be non-negative.")
+    if args.mjx_contact_force_delta_weight is not None:
+        contact_force_delta_weight = float(args.mjx_contact_force_delta_weight)
+        if (
+            not math.isfinite(contact_force_delta_weight)
+            or contact_force_delta_weight < 0.0
+        ):
+            parser.error("--mjx-contact-force-delta-weight must be non-negative.")
+    contact_force_peak_excess_weight = float(
+        args.mjx_contact_force_peak_excess_weight
+    )
+    if (
+        not math.isfinite(contact_force_peak_excess_weight)
+        or contact_force_peak_excess_weight < 0.0
+    ):
+        parser.error(
+            "--mjx-contact-force-peak-excess-weight must be non-negative."
+        )
+    if args.mjx_contact_false_positive_weight is not None:
+        contact_false_positive_weight = float(
+            args.mjx_contact_false_positive_weight
+        )
+        if (
+            not math.isfinite(contact_false_positive_weight)
+            or contact_false_positive_weight < 0.0
+        ):
+            parser.error(
+                "--mjx-contact-false-positive-weight must be non-negative."
+            )
+    if int(args.mjx_candidate_rank_diagnostics_top_k) < 0:
+        parser.error("--mjx-candidate-rank-diagnostics-top-k must be non-negative.")
+    if int(args.mjx_candidate_rescore_selection_top_k) < 0:
+        parser.error("--mjx-candidate-rescore-selection-top-k must be non-negative.")
+    if int(args.mjx_candidate_score_component_diagnostics_top_k) < 0:
+        parser.error(
+            "--mjx-candidate-score-component-diagnostics-top-k must be non-negative."
+        )
+    if args.mjx_mpc_samples is not None and int(args.mjx_mpc_samples) <= 0:
+        parser.error("--mjx-mpc-samples must be positive.")
+    for attr, flag in MJX_MPC_NUMERIC_OVERRIDE_FLAGS.items():
+        value = getattr(args, attr)
+        if value is None:
+            continue
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            parser.error(f"{flag} override must be finite.")
+        if attr == "mjx_mpc_final_noise_scale":
+            if numeric < 0.0:
+                parser.error(f"{flag} override must be non-negative.")
+        elif numeric <= 0.0:
+            parser.error(f"{flag} override must be positive.")
+    args.mjx_guided_candidate_period_overrides = _parse_row_positive_int_overrides(
+        parser,
+        args.mjx_guided_candidate_period_override,
+        "--mjx-guided-candidate-period-override",
+    )
+    args.mjx_min_score_improvement_overrides = _parse_row_non_negative_float_overrides(
+        parser,
+        args.mjx_min_score_improvement_override,
+        "--mjx-min-score-improvement-override",
+    )
+    args.mjx_min_top_score_gap_overrides = _parse_row_non_negative_float_overrides(
+        parser,
+        args.mjx_min_top_score_gap_override,
+        "--mjx-min-top-score-gap-override",
+    )
+    args.mjx_max_control_delta_overrides = _parse_row_positive_float_overrides(
+        parser,
+        args.mjx_max_control_delta_override,
+        "--mjx-max-control-delta-override",
+    )
+    args.mjx_mpc_joint_sigma_overrides = _parse_row_positive_float_overrides(
+        parser,
+        args.mjx_mpc_joint_sigma_override,
+        "--mjx-mpc-joint-sigma-override",
+    )
+    args.mjx_warp_naconmax_overrides = _parse_mjx_warp_naconmax_overrides(
+        parser,
+        args.mjx_warp_naconmax_override,
+    )
+    args.mjx_model_iterations_overrides = _parse_row_positive_int_overrides(
+        parser,
+        args.mjx_model_iterations_override,
+        "--mjx-model-iterations-override",
+    )
+    args.mjx_model_ls_iterations_overrides = _parse_row_positive_int_overrides(
+        parser,
+        args.mjx_model_ls_iterations_override,
+        "--mjx-model-ls-iterations-override",
+    )
+    return args
+
+
+def _parse_mjx_warp_naconmax_overrides(
+    parser: argparse.ArgumentParser,
+    raw_overrides: list[str],
+) -> dict[tuple[str, int], int]:
+    return _parse_row_positive_int_overrides(
+        parser,
+        raw_overrides,
+        "--mjx-warp-naconmax-override",
+    )
+
+
+def _parse_row_positive_int_overrides(
+    parser: argparse.ArgumentParser,
+    raw_overrides: list[str],
+    flag_name: str,
+) -> dict[tuple[str, int], int]:
+    overrides: dict[tuple[str, int], int] = {}
+    for raw in raw_overrides:
+        parts = str(raw).split(":")
+        if len(parts) != 3:
+            parser.error(f"{flag_name} must have form MOTION:SEED:VALUE.")
+        motion, seed_text, value_text = parts
+        if motion not in MOTIONS:
+            parser.error(f"Unsupported row override motion: {motion!r}.")
+        try:
+            seed = int(seed_text)
+            value = int(value_text)
+        except ValueError:
+            parser.error(f"{flag_name} seed and value must be integers.")
+        if seed not in SEEDS:
+            parser.error(f"Unsupported row override seed: {seed!r}.")
+        if value <= 0:
+            parser.error(f"{flag_name} value must be positive.")
+        key = (motion, seed)
+        if key in overrides:
+            parser.error(f"Duplicate row override for {motion}/seed_{seed}.")
+        overrides[key] = value
+    return overrides
+
+
+def _parse_row_non_negative_float_overrides(
+    parser: argparse.ArgumentParser,
+    raw_overrides: list[str],
+    flag_name: str,
+) -> dict[tuple[str, int], float]:
+    overrides: dict[tuple[str, int], float] = {}
+    for raw in raw_overrides:
+        parts = str(raw).split(":")
+        if len(parts) != 3:
+            parser.error(f"{flag_name} must have form MOTION:SEED:VALUE.")
+        motion, seed_text, value_text = parts
+        if motion not in MOTIONS:
+            parser.error(f"Unsupported row override motion: {motion!r}.")
+        try:
+            seed = int(seed_text)
+            value = float(value_text)
+        except ValueError:
+            parser.error(f"{flag_name} seed must be integer and value must be float.")
+        if seed not in SEEDS:
+            parser.error(f"Unsupported row override seed: {seed!r}.")
+        if not math.isfinite(value) or value < 0.0:
+            parser.error(f"{flag_name} value must be non-negative.")
+        key = (motion, seed)
+        if key in overrides:
+            parser.error(f"Duplicate row override for {motion}/seed_{seed}.")
+        overrides[key] = value
+    return overrides
+
+
+def _parse_row_positive_float_overrides(
+    parser: argparse.ArgumentParser,
+    raw_overrides: list[str],
+    flag_name: str,
+) -> dict[tuple[str, int], float]:
+    overrides = _parse_row_non_negative_float_overrides(
+        parser,
+        raw_overrides,
+        flag_name,
+    )
+    for (motion, seed), value in overrides.items():
+        if value <= 0.0:
+            parser.error(
+                f"{flag_name} value must be positive for {motion}/seed_{seed}."
+            )
+    return overrides
 
 
 def build_acceptance_plan(
@@ -245,6 +826,7 @@ def build_acceptance_plan(
     _validate_formal_baseline_manifest(manifest, matrix)
     selected_motions = set(args.only_motion) if args.only_motion else set(MOTIONS)
     selected_seeds = set(args.only_seed) if args.only_seed else set(SEEDS)
+    mjx_mpc_numeric_overrides = _mjx_mpc_numeric_overrides_from_args(args)
     plan: list[PlannedAcceptanceRun] = []
     for motion in MOTIONS:
         if motion not in selected_motions:
@@ -255,12 +837,72 @@ def build_acceptance_plan(
             row = matrix[(motion, seed)]
             output_dir = output_root / motion / f"seed_{seed}" / "mjx"
             replay_output_dir = output_root / motion / f"seed_{seed}" / "replay"
+            row_key = (motion, seed)
+            guided_period = args.mjx_guided_candidate_period_overrides.get(
+                row_key,
+                (
+                    int(args.mjx_guided_candidate_period)
+                    if args.mjx_guided_candidate_period is not None
+                    else None
+                ),
+            )
+            use_guided_candidate = bool(args.mjx_guided_candidate) or (
+                row_key in args.mjx_guided_candidate_period_overrides
+            )
+            min_score_improvement = args.mjx_min_score_improvement_overrides.get(
+                row_key,
+                args.mjx_min_score_improvement,
+            )
+            min_top_score_gap = args.mjx_min_top_score_gap_overrides.get(
+                row_key,
+                args.mjx_min_top_score_gap,
+            )
+            max_control_delta = args.mjx_max_control_delta_overrides.get(
+                row_key,
+                args.mjx_max_control_delta,
+            )
+            row_mjx_mpc_numeric_overrides = dict(mjx_mpc_numeric_overrides)
+            if row_key in args.mjx_mpc_joint_sigma_overrides:
+                row_mjx_mpc_numeric_overrides["--mpc-joint-sigma"] = float(
+                    args.mjx_mpc_joint_sigma_overrides[row_key]
+                )
             mjx_argv = _mjx_argv_from_baseline_row(
                 row,
                 args.python_executable,
                 output_dir,
                 args.device,
-                bool(args.mjx_guided_candidate),
+                args.collision_profile,
+                use_guided_candidate,
+                args.mjx_impl,
+                guided_period,
+                int(
+                    args.mjx_warp_naconmax_overrides.get(
+                        row_key,
+                        args.mjx_warp_naconmax,
+                    )
+                ),
+                int(args.mjx_warp_njmax),
+                _mjx_model_options_from_args(args, row_key=row_key),
+                row_mjx_mpc_numeric_overrides,
+                min_score_improvement,
+                min_top_score_gap,
+                args.mjx_cem_update_min_top_score_gap,
+                max_control_delta,
+                int(args.mjx_candidate_rank_diagnostics_top_k),
+                bool(args.mjx_candidate_rescore_diagnostics),
+                int(args.mjx_candidate_rescore_selection_top_k),
+                int(args.mjx_candidate_score_component_diagnostics_top_k),
+                bool(args.mjx_score_only_rescore_diagnostics),
+                bool(args.mjx_score_only_output_rescore_diagnostics),
+                bool(args.mjx_contact_force_first_row_diagnostics),
+                str(args.mjx_contact_force_mode),
+                float(args.mjx_contact_force_active_weight),
+                args.mjx_contact_force_delta_weight,
+                float(args.mjx_contact_force_peak_excess_weight),
+                args.mjx_contact_false_positive_weight,
+                bool(args.mjx_strip_live_mjx_data),
+                bool(args.mjx_score_only_optimizer),
+                args.mjx_mpc_samples,
             )
             replay_argv = _replay_argv_from_mjx(
                 row,
@@ -283,6 +925,16 @@ def build_acceptance_plan(
                 )
             )
     return plan
+
+
+def _mjx_mpc_numeric_overrides_from_args(
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    return {
+        flag: float(value)
+        for attr, flag in MJX_MPC_NUMERIC_OVERRIDE_FLAGS.items()
+        if (value := getattr(args, attr)) is not None
+    }
 
 
 def run_command(argv: list[str], *, cwd: Path) -> dict[str, Any]:
@@ -438,6 +1090,12 @@ def main(argv: list[str] | None = None) -> int:
                 }
         attached_mjx_row = _attach_artifacts(mjx_row, planned.output_dir)
         attached_replay_row = _attach_artifacts(replay_row, planned.replay_output_dir)
+        attached_mjx_row = _attach_single_row_speed_evidence(
+            attached_mjx_row,
+            baseline_rows,
+            min_speedup=float(args.min_speedup),
+            min_realtime_factor=float(args.min_realtime_factor),
+        )
         mjx_rows.append(attached_mjx_row)
         replay_rows.append(attached_replay_row)
         if not args.dry_run:
@@ -453,14 +1111,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.skip_report:
         print(str(output_dir))
-        rows_ok = all(
-            row.get("status") == "ok" and row.get("returncode") == 0
-            for row in (
-                *mjx_rows,
-                *replay_rows,
-            )
+        failures = _skip_report_row_evidence_failures(
+            mjx_rows,
+            replay_rows,
+            required_gpu_name_fragment=str(args.required_gpu_name_fragment),
         )
-        return 0 if rows_ok else 1
+        return 0 if not failures else 1
 
     report = _build_report(
         baseline_manifest=baseline_manifest,
@@ -627,7 +1283,13 @@ def _verify_existing_acceptance_row(
         return None
     if _artifact_freshness_failures([row], artifact_fields=expected_artifacts):
         return None
-    if _artifact_npz_schema_failures([row], require_command=kind == "mjx"):
+    if _artifact_npz_schema_failures(
+        [row],
+        require_command=kind == "mjx",
+        require_rollout_command_match=False,
+    ):
+        return None
+    if kind == "mjx" and _mjx_dynamic_trace_evidence_failures([row]):
         return None
 
     metrics_path = output_dir / "metrics.json"
@@ -727,6 +1389,25 @@ def _mjx_metrics_provenance_matches(
 ) -> bool:
     if mpc.get("mpc_backend") != "mjx":
         return False
+    expected_collision_profile = _argv_value(argv, "--collision-profile") or "wxy_parity"
+    observed_collision_profile = mpc.get("collision_profile", parsed.get("collision_profile"))
+    if observed_collision_profile is None:
+        if expected_collision_profile != "wxy_parity":
+            return False
+    elif observed_collision_profile != expected_collision_profile:
+        return False
+    expected_impl = _argv_value(argv, "--mjx-impl") or "jax"
+    if mpc.get("mjx_impl") != expected_impl:
+        return False
+    if expected_impl == "warp":
+        if _safe_int(mpc.get("mjx_warp_naconmax")) != _safe_int(
+            _argv_value(argv, "--mjx-warp-naconmax")
+        ):
+            return False
+        if _safe_int(mpc.get("mjx_warp_njmax")) != _safe_int(
+            _argv_value(argv, "--mjx-warp-njmax")
+        ):
+            return False
     expected_optimizer = _argv_value(argv, "--mpc-optimizer")
     if expected_optimizer is not None and mpc.get("mpc_optimizer") != expected_optimizer:
         return False
@@ -745,6 +1426,427 @@ def _mjx_metrics_provenance_matches(
         return False
     if mpc.get("use_guided_candidate") is not expected_guided_candidate:
         return False
+    expected_guided_period = _argv_value(argv, "--mjx-guided-candidate-period")
+    if expected_guided_period is None:
+        if mpc.get("guided_candidate_period") not in {None, 0}:
+            return False
+    elif _safe_int(mpc.get("guided_candidate_period")) != int(expected_guided_period):
+        return False
+    expected_guided_windows = _expected_guided_candidate_windows(
+        use_guided_candidate=expected_guided_candidate,
+        guided_candidate_period=expected_guided_period,
+        accepted_windows=parsed.get("accepted_windows"),
+    )
+    if expected_guided_windows is None:
+        return False
+    if _safe_int(mpc.get("guided_candidate_windows")) != expected_guided_windows:
+        return False
+    try:
+        expected_warm_start = _argv_bool_optional(argv, "--mpc-warm-start")
+    except ValueError:
+        return False
+    if mpc.get("use_warm_start") is not expected_warm_start:
+        return False
+    for field, flag in (
+        ("sample_count", "--mpc-samples"),
+        ("optimizer_iterations", "--mpc-iterations"),
+        ("planning_horizon_steps", "--mpc-planning-horizon-steps"),
+        ("control_steps", "--mpc-control-steps"),
+        ("knot_count", "--mpc-knot-count"),
+    ):
+        expected = _safe_int(_argv_value(argv, flag))
+        if expected is None or _safe_int(mpc.get(field)) != expected:
+            return False
+    for field, flag in (
+        ("elite_frac", "--mpc-elite-frac"),
+        ("temperature", "--mpc-temperature"),
+        ("root_pos_sigma", "--mpc-root-pos-sigma"),
+        ("root_rot_sigma", "--mpc-root-rot-sigma"),
+        ("joint_sigma", "--mpc-joint-sigma"),
+        ("first_ctrl_noise_scale", "--mpc-first-ctrl-noise-scale"),
+        ("last_ctrl_noise_scale", "--mpc-last-ctrl-noise-scale"),
+        ("final_noise_scale", "--mpc-final-noise-scale"),
+    ):
+        expected = _argv_value(argv, flag)
+        if expected is None or not _numeric_values_equivalent(
+            mpc.get(field),
+            float(expected),
+        ):
+            return False
+    expected_sigma_decay = _argv_value(argv, "--mpc-sigma-decay")
+    if expected_sigma_decay is not None and not _numeric_values_equivalent(
+        mpc.get("sigma_decay"),
+        float(expected_sigma_decay),
+    ):
+        return False
+    expected_min_score_improvement = _argv_value(argv, "--mjx-min-score-improvement")
+    try:
+        expected_min_score_improvement_value = (
+            1.0e-9
+            if expected_min_score_improvement is None
+            else float(expected_min_score_improvement)
+        )
+    except ValueError:
+        return False
+    if not _numeric_values_equivalent(
+        mpc.get("mjx_min_score_improvement"),
+        expected_min_score_improvement_value,
+    ):
+        return False
+    expected_min_top_score_gap = _argv_value(argv, "--mjx-min-top-score-gap")
+    try:
+        expected_min_top_score_gap_value = (
+            0.0
+            if expected_min_top_score_gap is None
+            else float(expected_min_top_score_gap)
+        )
+    except ValueError:
+        return False
+    if not _numeric_values_equivalent(
+        mpc.get("mjx_min_top_score_gap"),
+        expected_min_top_score_gap_value,
+    ):
+        return False
+    expected_cem_update_min_top_score_gap = _argv_value(
+        argv,
+        "--mjx-cem-update-min-top-score-gap",
+    )
+    try:
+        expected_cem_update_min_top_score_gap_value = (
+            0.0
+            if expected_cem_update_min_top_score_gap is None
+            else float(expected_cem_update_min_top_score_gap)
+        )
+    except ValueError:
+        return False
+    if not _numeric_values_equivalent(
+        mpc.get("mjx_cem_update_min_top_score_gap"),
+        expected_cem_update_min_top_score_gap_value,
+    ):
+        return False
+    expected_max_control_delta = _argv_value(argv, "--mjx-max-control-delta")
+    try:
+        expected_max_control_delta_value = (
+            None
+            if expected_max_control_delta is None
+            else float(expected_max_control_delta)
+        )
+    except ValueError:
+        return False
+    observed_max_control_delta = mpc.get("mjx_max_control_delta")
+    if expected_max_control_delta_value is None:
+        if observed_max_control_delta is not None:
+            return False
+    elif not _numeric_values_equivalent(
+        observed_max_control_delta,
+        expected_max_control_delta_value,
+    ):
+        return False
+    expected_candidate_rank_top_k = _argv_value(
+        argv,
+        "--mjx-candidate-rank-diagnostics-top-k",
+    )
+    try:
+        expected_candidate_rank_top_k_value = (
+            0
+            if expected_candidate_rank_top_k is None
+            else int(expected_candidate_rank_top_k)
+        )
+    except ValueError:
+        return False
+    if expected_candidate_rank_top_k_value < 0:
+        return False
+    observed_candidate_rank_top_k = mpc.get(
+        "candidate_rank_diagnostics_top_k",
+        mpc.get("mjx_candidate_rank_diagnostics_top_k"),
+    )
+    if expected_candidate_rank_top_k_value == 0:
+        if observed_candidate_rank_top_k not in {0, None}:
+            return False
+    elif not _numeric_values_equivalent(
+        observed_candidate_rank_top_k,
+        expected_candidate_rank_top_k_value,
+    ):
+        return False
+    expected_candidate_rescore_diagnostics = (
+        "--mjx-candidate-rescore-diagnostics" in argv
+    )
+    observed_candidate_rescore_diagnostics = mpc.get(
+        "mjx_candidate_rescore_diagnostics",
+        mpc.get("candidate_rescore_diagnostics"),
+    )
+    observed_candidate_rescore_windows = mpc.get(
+        "candidate_rescore_diagnostics_windows"
+    )
+    if expected_candidate_rescore_diagnostics:
+        if observed_candidate_rescore_diagnostics is not True and not (
+            isinstance(observed_candidate_rescore_windows, int)
+            and observed_candidate_rescore_windows > 0
+        ):
+            return False
+    elif observed_candidate_rescore_diagnostics not in {False, None}:
+        return False
+    elif (
+        isinstance(observed_candidate_rescore_windows, int)
+        and observed_candidate_rescore_windows > 0
+    ):
+        return False
+    expected_candidate_rescore_selection_top_k = _argv_value(
+        argv,
+        "--mjx-candidate-rescore-selection-top-k",
+    )
+    try:
+        expected_candidate_rescore_selection_top_k_value = (
+            0
+            if expected_candidate_rescore_selection_top_k is None
+            else int(expected_candidate_rescore_selection_top_k)
+        )
+    except ValueError:
+        return False
+    if expected_candidate_rescore_selection_top_k_value < 0:
+        return False
+    observed_candidate_rescore_selection_top_k = mpc.get(
+        "candidate_rescore_selection_top_k",
+        mpc.get("mjx_candidate_rescore_selection_top_k"),
+    )
+    observed_candidate_rescore_selection_windows = mpc.get(
+        "candidate_rescore_selection_windows"
+    )
+    if expected_candidate_rescore_selection_top_k_value == 0:
+        if observed_candidate_rescore_selection_top_k not in {0, None}:
+            return False
+        if (
+            isinstance(observed_candidate_rescore_selection_windows, int)
+            and observed_candidate_rescore_selection_windows > 0
+        ):
+            return False
+    elif not _numeric_values_equivalent(
+        observed_candidate_rescore_selection_top_k,
+        expected_candidate_rescore_selection_top_k_value,
+    ):
+        return False
+    elif not (
+        isinstance(observed_candidate_rescore_selection_windows, int)
+        and observed_candidate_rescore_selection_windows > 0
+    ):
+        return False
+    expected_score_component_top_k = _argv_value(
+        argv,
+        "--mjx-candidate-score-component-diagnostics-top-k",
+    )
+    try:
+        expected_score_component_top_k_value = (
+            0
+            if expected_score_component_top_k is None
+            else int(expected_score_component_top_k)
+        )
+    except ValueError:
+        return False
+    if expected_score_component_top_k_value < 0:
+        return False
+    observed_score_component_top_k = mpc.get(
+        "candidate_score_component_diagnostics_top_k",
+        mpc.get("mjx_candidate_score_component_diagnostics_top_k"),
+    )
+    if expected_score_component_top_k_value == 0:
+        if observed_score_component_top_k not in {0, None}:
+            return False
+    elif not _numeric_values_equivalent(
+        observed_score_component_top_k,
+        expected_score_component_top_k_value,
+    ):
+        return False
+    expected_first_row_diagnostics = "--mjx-contact-force-first-row-diagnostics" in argv
+    observed_first_row_diagnostics = mpc.get(
+        "contact_force_first_row_diagnostics"
+    )
+    if expected_first_row_diagnostics:
+        if observed_first_row_diagnostics is not True:
+            return False
+    elif observed_first_row_diagnostics not in {False, None}:
+        return False
+    expected_contact_force_mode = _argv_value(argv, "--mjx-contact-force-mode")
+    expected_contact_force_mode_value = (
+        "sum_rows" if expected_contact_force_mode is None else expected_contact_force_mode
+    )
+    if expected_contact_force_mode_value not in {"sum_rows", "first_row"}:
+        return False
+    observed_contact_force_mode = mpc.get("contact_force_mode")
+    if observed_contact_force_mode != expected_contact_force_mode_value:
+        return False
+    expected_contact_force_active_weight = _argv_value(
+        argv,
+        "--mjx-contact-force-active-weight",
+    )
+    try:
+        expected_contact_force_active_weight_value = (
+            0.0
+            if expected_contact_force_active_weight is None
+            else float(expected_contact_force_active_weight)
+        )
+    except ValueError:
+        return False
+    if expected_contact_force_active_weight_value < 0.0:
+        return False
+    observed_reward_weights = mpc.get("reward_weights") or {}
+    if not isinstance(observed_reward_weights, Mapping):
+        return False
+    observed_contact_force_active_weight = observed_reward_weights.get(
+        "contact_force_active",
+        0.0,
+    )
+    if expected_contact_force_active_weight_value == 0.0:
+        if not _numeric_values_equivalent(
+            observed_contact_force_active_weight,
+            0.0,
+        ):
+            return False
+    elif not _numeric_values_equivalent(
+        observed_contact_force_active_weight,
+        expected_contact_force_active_weight_value,
+    ):
+        return False
+    expected_contact_force_delta_weight = _argv_value(
+        argv,
+        "--mjx-contact-force-delta-weight",
+    )
+    if expected_contact_force_delta_weight is not None:
+        try:
+            expected_contact_force_delta_weight_value = float(
+                expected_contact_force_delta_weight
+            )
+        except ValueError:
+            return False
+        if expected_contact_force_delta_weight_value < 0.0:
+            return False
+        observed_contact_force_delta_weight = observed_reward_weights.get(
+            "contact_force_delta",
+            0.0,
+        )
+        if not _numeric_values_equivalent(
+            observed_contact_force_delta_weight,
+            expected_contact_force_delta_weight_value,
+        ):
+            return False
+    expected_contact_force_peak_excess_weight = _argv_value(
+        argv,
+        "--mjx-contact-force-peak-excess-weight",
+    )
+    try:
+        expected_contact_force_peak_excess_weight_value = (
+            0.0
+            if expected_contact_force_peak_excess_weight is None
+            else float(expected_contact_force_peak_excess_weight)
+        )
+    except ValueError:
+        return False
+    if expected_contact_force_peak_excess_weight_value < 0.0:
+        return False
+    observed_contact_force_peak_excess_weight = observed_reward_weights.get(
+        "contact_force_peak_excess",
+        0.0,
+    )
+    if expected_contact_force_peak_excess_weight_value == 0.0:
+        if not _numeric_values_equivalent(
+            observed_contact_force_peak_excess_weight,
+            0.0,
+        ):
+            return False
+    elif not _numeric_values_equivalent(
+        observed_contact_force_peak_excess_weight,
+        expected_contact_force_peak_excess_weight_value,
+    ):
+        return False
+    expected_contact_false_positive_weight = _argv_value(
+        argv,
+        "--mjx-contact-false-positive-weight",
+    )
+    if expected_contact_false_positive_weight is not None:
+        try:
+            expected_contact_false_positive_weight_value = float(
+                expected_contact_false_positive_weight
+            )
+        except ValueError:
+            return False
+        if expected_contact_false_positive_weight_value < 0.0:
+            return False
+        observed_contact_false_positive_weight = observed_reward_weights.get(
+            "contact_false_positive",
+            0.0,
+        )
+        if not _numeric_values_equivalent(
+            observed_contact_false_positive_weight,
+            expected_contact_false_positive_weight_value,
+        ):
+            return False
+    expected_strip_live_mjx_data = "--mjx-strip-live-mjx-data" in argv
+    observed_strip_live_mjx_data = mpc.get("strip_live_mjx_data_between_windows")
+    if expected_strip_live_mjx_data:
+        if observed_strip_live_mjx_data is not True:
+            return False
+    elif observed_strip_live_mjx_data not in {False, None}:
+        return False
+    expected_score_only_optimizer = "--mjx-score-only-optimizer" in argv
+    observed_score_only_optimizer = mpc.get("score_only_optimizer")
+    if expected_score_only_optimizer:
+        if observed_score_only_optimizer is not True:
+            return False
+    elif observed_score_only_optimizer not in {False, None}:
+        return False
+    expected_score_only_rescore_diagnostics = (
+        "--mjx-score-only-rescore-diagnostics" in argv
+    )
+    observed_score_only_rescore_diagnostics = mpc.get(
+        "mjx_score_only_rescore_diagnostics",
+        mpc.get("score_only_rescore_diagnostics"),
+    )
+    observed_score_only_rescore_windows = mpc.get(
+        "score_only_rescore_diagnostics_windows"
+    )
+    if expected_score_only_rescore_diagnostics:
+        if observed_score_only_rescore_diagnostics is not True and not (
+            isinstance(observed_score_only_rescore_windows, int)
+            and observed_score_only_rescore_windows > 0
+        ):
+            return False
+    elif observed_score_only_rescore_diagnostics not in {False, None}:
+        return False
+    elif (
+        isinstance(observed_score_only_rescore_windows, int)
+        and observed_score_only_rescore_windows > 0
+    ):
+        return False
+    expected_score_only_output_rescore_diagnostics = (
+        "--mjx-score-only-output-rescore-diagnostics" in argv
+    )
+    observed_score_only_output_rescore_diagnostics = mpc.get(
+        "mjx_score_only_output_rescore_diagnostics",
+        mpc.get("score_only_output_rescore_diagnostics"),
+    )
+    observed_score_only_output_rescore_windows = mpc.get(
+        "score_only_output_rescore_diagnostics_windows"
+    )
+    if expected_score_only_output_rescore_diagnostics:
+        if observed_score_only_output_rescore_diagnostics is not True and not (
+            isinstance(observed_score_only_output_rescore_windows, int)
+            and observed_score_only_output_rescore_windows > 0
+        ):
+            return False
+    elif observed_score_only_output_rescore_diagnostics not in {False, None}:
+        return False
+    elif (
+        isinstance(observed_score_only_output_rescore_windows, int)
+        and observed_score_only_output_rescore_windows > 0
+    ):
+        return False
+    expected_model_options = _mjx_model_options_from_argv(argv)
+    if expected_model_options is None:
+        return False
+    if not _mjx_model_options_match(
+        mpc.get("mjx_model_options"),
+        expected_model_options,
+    ):
+        return False
     for field in (
         "steady_state_wall_time_sec",
         "compile_init_wall_time_sec",
@@ -753,6 +1855,25 @@ def _mjx_metrics_provenance_matches(
         if not _valid_timing(_row_value(parsed, field)):
             return False
     return True
+
+
+def _expected_guided_candidate_windows(
+    *,
+    use_guided_candidate: bool,
+    guided_candidate_period: Any,
+    accepted_windows: Any,
+) -> int | None:
+    windows = _safe_int(accepted_windows)
+    if windows is None or windows < 0:
+        return None
+    if not bool(use_guided_candidate):
+        return 0
+    if guided_candidate_period is None:
+        return windows
+    period = _safe_int(guided_candidate_period)
+    if period is None or period <= 0:
+        return None
+    return (windows + period - 1) // period
 
 
 def _replay_metrics_provenance_matches(
@@ -832,6 +1953,7 @@ def _environment_failure_report(
         "schema_version": 1,
         "backend": "mjx_canonical",
         "baseline_manifest": str(baseline_manifest),
+        "contact_force_semantics": CONTACT_FORCE_SEMANTICS,
         "baseline_envelopes": baseline_envelopes,
         "classification": "invalid_benchmark",
         "target": str(args.target),
@@ -898,6 +2020,8 @@ def _validate_formal_baseline_manifest(
         seeds = ()
     if seeds != SEEDS:
         failures.append("seeds")
+    if manifest.get("contact_force_semantics") != CONTACT_FORCE_SEMANTICS:
+        failures.append("contact_force_semantics")
     failures.extend(_formal_manifest_provenance_failures(manifest, matrix))
     failures.extend(_formal_manifest_baseline_envelope_failures(manifest, matrix))
 
@@ -1094,6 +2218,9 @@ def _formal_stage0_row_failures(
     if not _same_path(_argv_value(argv, "--output-dir"), row.get("output_dir")):
         failures.append("--output-dir")
 
+    failures.extend(
+        _stage0_runner_provenance_failures(row, motion=motion, seed=seed)
+    )
     failures.extend(_baseline_metrics_artifact_failures(row, argv=argv))
 
     motion_path = _argv_value(argv, "--motion")
@@ -1108,6 +2235,39 @@ def _formal_stage0_row_failures(
     if row.get("motion_name") != motion:
         failures.append("motion_name")
     return failures
+
+
+def _stage0_runner_provenance_failures(
+    row: dict[str, Any],
+    *,
+    motion: str,
+    seed: int,
+) -> list[str]:
+    output_dir = row.get("output_dir")
+    if not isinstance(output_dir, str):
+        return ["stage0_runner_provenance"]
+    path = Path(output_dir).expanduser() / STAGE0_RUNNER_PROVENANCE_FILENAME
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return ["stage0_runner_provenance"]
+    if not isinstance(payload, dict):
+        return ["stage0_runner_provenance"]
+    if payload.get("schema_version") != 1:
+        return ["stage0_runner_provenance"]
+    if payload.get("kind") != "g1_wbc_stage0_runner_provenance":
+        return ["stage0_runner_provenance"]
+    if payload.get("contact_force_semantics") != CONTACT_FORCE_SEMANTICS:
+        return ["stage0_runner_provenance"]
+    if payload.get("motion_name") != motion:
+        return ["stage0_runner_provenance"]
+    if _safe_int(payload.get("seed")) != seed:
+        return ["stage0_runner_provenance"]
+    if not _same_path(payload.get("motion"), row.get("motion")):
+        return ["stage0_runner_provenance"]
+    if not _same_path(payload.get("output_dir"), row.get("output_dir")):
+        return ["stage0_runner_provenance"]
+    return []
 
 
 def _baseline_metrics_artifact_failures(
@@ -1286,12 +2446,94 @@ def _argv_bool_optional(argv: list[str], flag: str) -> bool:
     return positive
 
 
+def _mjx_model_options_from_args(
+    args: argparse.Namespace,
+    *,
+    row_key: tuple[str, int] | None = None,
+) -> dict[str, int]:
+    options: dict[str, int] = {}
+    iterations = args.mjx_model_iterations
+    ls_iterations = args.mjx_model_ls_iterations
+    if row_key is not None:
+        iterations = args.mjx_model_iterations_overrides.get(row_key, iterations)
+        ls_iterations = args.mjx_model_ls_iterations_overrides.get(
+            row_key,
+            ls_iterations,
+        )
+    if iterations is not None:
+        options["iterations"] = int(iterations)
+    if ls_iterations is not None:
+        options["ls_iterations"] = int(ls_iterations)
+    return options
+
+
+def _mjx_model_options_from_argv(argv: list[str]) -> dict[str, int] | None:
+    options: dict[str, int] = {}
+    try:
+        iterations = _argv_value(argv, "--mjx-model-iterations")
+        if iterations is not None:
+            options["iterations"] = int(iterations)
+        ls_iterations = _argv_value(argv, "--mjx-model-ls-iterations")
+        if ls_iterations is not None:
+            options["ls_iterations"] = int(ls_iterations)
+    except (TypeError, ValueError):
+        return None
+    return options
+
+
+def _mjx_model_options_match(observed: Any, expected: dict[str, int]) -> bool:
+    if observed is None:
+        return expected == {}
+    if not isinstance(observed, dict):
+        return False
+    if set(observed) != set(expected):
+        return False
+    for key, expected_value in expected.items():
+        observed_value = observed.get(key)
+        if isinstance(observed_value, bool) or not isinstance(
+            observed_value,
+            (int, float),
+        ):
+            return False
+        if int(observed_value) != int(expected_value):
+            return False
+        if float(observed_value) != float(int(observed_value)):
+            return False
+    return True
+
+
 def _mjx_argv_from_baseline_row(
     row: dict[str, Any],
     python_executable: str,
     output_dir: Path,
     device: str,
+    collision_profile: str | None,
     use_guided_candidate: bool,
+    mjx_impl: str,
+    guided_candidate_period: int | None,
+    mjx_warp_naconmax: int,
+    mjx_warp_njmax: int,
+    mjx_model_options: dict[str, int],
+    mjx_mpc_numeric_overrides: dict[str, float],
+    mjx_min_score_improvement: float | None,
+    mjx_min_top_score_gap: float | None,
+    mjx_cem_update_min_top_score_gap: float | None,
+    mjx_max_control_delta: float | None,
+    mjx_candidate_rank_diagnostics_top_k: int,
+    mjx_candidate_rescore_diagnostics: bool,
+    mjx_candidate_rescore_selection_top_k: int,
+    mjx_candidate_score_component_diagnostics_top_k: int,
+    mjx_score_only_rescore_diagnostics: bool,
+    mjx_score_only_output_rescore_diagnostics: bool,
+    mjx_contact_force_first_row_diagnostics: bool,
+    mjx_contact_force_mode: str,
+    mjx_contact_force_active_weight: float,
+    mjx_contact_force_delta_weight: float | None,
+    mjx_contact_force_peak_excess_weight: float,
+    mjx_contact_false_positive_weight: float | None,
+    mjx_strip_live_mjx_data: bool,
+    mjx_score_only_optimizer: bool,
+    mjx_mpc_samples: int | None,
 ) -> list[str]:
     argv = list(row["argv"])
     argv[0] = str(python_executable)
@@ -1299,12 +2541,141 @@ def _mjx_argv_from_baseline_row(
     argv = _set_arg(argv, "--mpc-optimizer", "generic")
     argv = _set_arg(argv, "--output-dir", str(output_dir))
     argv = _set_arg(argv, "--device", str(device))
+    if collision_profile is not None:
+        argv = _set_arg(argv, "--collision-profile", str(collision_profile))
     for flag in LEGACY_ONLY_MJX_DROP_ARG_VALUES:
         argv = _drop_arg_with_value(argv, flag)
     for flag in LEGACY_ONLY_MJX_DROP_FLAGS:
         argv = _drop_flag(argv, flag)
+    for flag, value in MJX_GENERIC_ARG_VALUES.items():
+        argv = _set_arg(argv, flag, value)
+    for flag, value in mjx_mpc_numeric_overrides.items():
+        argv = _set_arg(argv, flag, str(float(value)))
+    if mjx_mpc_samples is not None:
+        argv = _set_arg(argv, "--mpc-samples", str(int(mjx_mpc_samples)))
     if "--mjx-enable-scan" not in argv:
         argv.append("--mjx-enable-scan")
+    argv = _set_arg(argv, "--mjx-impl", str(mjx_impl))
+    argv = _set_arg(argv, "--mjx-warp-naconmax", str(int(mjx_warp_naconmax)))
+    argv = _set_arg(argv, "--mjx-warp-njmax", str(int(mjx_warp_njmax)))
+    for flag in ("--mjx-model-iterations", "--mjx-model-ls-iterations"):
+        argv = _drop_arg_with_value(argv, flag)
+    if "iterations" in mjx_model_options:
+        argv = _set_arg(
+            argv,
+            "--mjx-model-iterations",
+            str(int(mjx_model_options["iterations"])),
+        )
+    if "ls_iterations" in mjx_model_options:
+        argv = _set_arg(
+            argv,
+            "--mjx-model-ls-iterations",
+            str(int(mjx_model_options["ls_iterations"])),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-min-score-improvement")
+    if mjx_min_score_improvement is not None:
+        argv = _set_arg(
+            argv,
+            "--mjx-min-score-improvement",
+            str(float(mjx_min_score_improvement)),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-min-top-score-gap")
+    if mjx_min_top_score_gap is not None:
+        argv = _set_arg(
+            argv,
+            "--mjx-min-top-score-gap",
+            str(float(mjx_min_top_score_gap)),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-cem-update-min-top-score-gap")
+    if mjx_cem_update_min_top_score_gap is not None:
+        argv = _set_arg(
+            argv,
+            "--mjx-cem-update-min-top-score-gap",
+            str(float(mjx_cem_update_min_top_score_gap)),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-max-control-delta")
+    if mjx_max_control_delta is not None:
+        argv = _set_arg(
+            argv,
+            "--mjx-max-control-delta",
+            str(float(mjx_max_control_delta)),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-candidate-rank-diagnostics-top-k")
+    if int(mjx_candidate_rank_diagnostics_top_k) > 0:
+        argv = _set_arg(
+            argv,
+            "--mjx-candidate-rank-diagnostics-top-k",
+            str(int(mjx_candidate_rank_diagnostics_top_k)),
+        )
+    argv = _drop_flag(argv, "--mjx-candidate-rescore-diagnostics")
+    if bool(mjx_candidate_rescore_diagnostics):
+        argv.append("--mjx-candidate-rescore-diagnostics")
+    argv = _drop_arg_with_value(argv, "--mjx-candidate-rescore-selection-top-k")
+    if int(mjx_candidate_rescore_selection_top_k) > 0:
+        argv = _set_arg(
+            argv,
+            "--mjx-candidate-rescore-selection-top-k",
+            str(int(mjx_candidate_rescore_selection_top_k)),
+        )
+    argv = _drop_arg_with_value(
+        argv, "--mjx-candidate-score-component-diagnostics-top-k"
+    )
+    if int(mjx_candidate_score_component_diagnostics_top_k) > 0:
+        argv = _set_arg(
+            argv,
+            "--mjx-candidate-score-component-diagnostics-top-k",
+            str(int(mjx_candidate_score_component_diagnostics_top_k)),
+        )
+    argv = _drop_flag(argv, "--mjx-score-only-rescore-diagnostics")
+    if bool(mjx_score_only_rescore_diagnostics):
+        argv.append("--mjx-score-only-rescore-diagnostics")
+    argv = _drop_flag(argv, "--mjx-score-only-output-rescore-diagnostics")
+    if bool(mjx_score_only_output_rescore_diagnostics):
+        argv.append("--mjx-score-only-output-rescore-diagnostics")
+    argv = _drop_flag(argv, "--mjx-contact-force-first-row-diagnostics")
+    if bool(mjx_contact_force_first_row_diagnostics):
+        argv.append("--mjx-contact-force-first-row-diagnostics")
+    argv = _drop_arg_with_value(argv, "--mjx-contact-force-mode")
+    if str(mjx_contact_force_mode) != "sum_rows":
+        argv = _set_arg(
+            argv,
+            "--mjx-contact-force-mode",
+            str(mjx_contact_force_mode),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-contact-force-active-weight")
+    if float(mjx_contact_force_active_weight) > 0.0:
+        argv = _set_arg(
+            argv,
+            "--mjx-contact-force-active-weight",
+            str(float(mjx_contact_force_active_weight)),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-contact-force-delta-weight")
+    if mjx_contact_force_delta_weight is not None:
+        argv = _set_arg(
+            argv,
+            "--mjx-contact-force-delta-weight",
+            str(float(mjx_contact_force_delta_weight)),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-contact-force-peak-excess-weight")
+    if float(mjx_contact_force_peak_excess_weight) > 0.0:
+        argv = _set_arg(
+            argv,
+            "--mjx-contact-force-peak-excess-weight",
+            str(float(mjx_contact_force_peak_excess_weight)),
+        )
+    argv = _drop_arg_with_value(argv, "--mjx-contact-false-positive-weight")
+    if mjx_contact_false_positive_weight is not None:
+        argv = _set_arg(
+            argv,
+            "--mjx-contact-false-positive-weight",
+            str(float(mjx_contact_false_positive_weight)),
+        )
+    argv = _drop_flag(argv, "--mjx-strip-live-mjx-data")
+    if bool(mjx_strip_live_mjx_data):
+        argv.append("--mjx-strip-live-mjx-data")
+    argv = _drop_flag(argv, "--mjx-score-only-optimizer")
+    if bool(mjx_score_only_optimizer):
+        argv.append("--mjx-score-only-optimizer")
     if "--save-rollout" not in argv:
         argv.append("--save-rollout")
     for flag in ("--mjx-guided-candidate", "--no-mjx-guided-candidate"):
@@ -1314,6 +2685,13 @@ def _mjx_argv_from_baseline_row(
         if use_guided_candidate
         else "--no-mjx-guided-candidate"
     )
+    argv = _drop_arg_with_value(argv, "--mjx-guided-candidate-period")
+    if guided_candidate_period is not None:
+        argv = _set_arg(
+            argv,
+            "--mjx-guided-candidate-period",
+            str(int(guided_candidate_period)),
+        )
     return argv
 
 
@@ -1328,9 +2706,44 @@ def _replay_argv_from_mjx(
     argv = _set_arg(argv, "--mpc-backend", "mujoco_warp")
     argv = _set_arg(argv, "--output-dir", str(replay_output_dir))
     argv = _drop_arg_with_value(argv, "--mpc-reward-weights")
+    argv = _drop_arg_with_value(argv, "--mjx-impl")
+    argv = _drop_arg_with_value(argv, "--mjx-warp-naconmax")
+    argv = _drop_arg_with_value(argv, "--mjx-warp-njmax")
+    argv = _drop_arg_with_value(argv, "--mjx-model-iterations")
+    argv = _drop_arg_with_value(argv, "--mjx-model-ls-iterations")
+    argv = _drop_arg_with_value(argv, "--mjx-min-score-improvement")
+    argv = _drop_arg_with_value(argv, "--mjx-min-top-score-gap")
+    argv = _drop_arg_with_value(argv, "--mjx-cem-update-min-top-score-gap")
+    argv = _drop_arg_with_value(argv, "--mjx-max-control-delta")
+    argv = _drop_arg_with_value(argv, "--mjx-candidate-rank-diagnostics-top-k")
+    argv = _drop_flag(argv, "--mjx-candidate-rescore-diagnostics")
+    argv = _drop_arg_with_value(argv, "--mjx-candidate-rescore-selection-top-k")
+    argv = _drop_arg_with_value(
+        argv, "--mjx-candidate-score-component-diagnostics-top-k"
+    )
+    argv = _drop_flag(argv, "--mjx-score-only-rescore-diagnostics")
+    argv = _drop_flag(argv, "--mjx-score-only-output-rescore-diagnostics")
+    argv = _drop_flag(argv, "--mjx-contact-force-first-row-diagnostics")
+    argv = _drop_arg_with_value(argv, "--mjx-contact-force-mode")
+    argv = _drop_arg_with_value(argv, "--mjx-contact-force-active-weight")
+    argv = _drop_arg_with_value(argv, "--mjx-contact-force-delta-weight")
+    argv = _drop_arg_with_value(argv, "--mjx-contact-force-peak-excess-weight")
+    argv = _drop_arg_with_value(argv, "--mjx-contact-false-positive-weight")
+    argv = _drop_flag(argv, "--mjx-strip-live-mjx-data")
+    argv = _drop_flag(argv, "--mjx-score-only-optimizer")
+    for flag in MJX_MPC_NUMERIC_OVERRIDE_FLAGS.values():
+        if flag in FORMAL_STAGE0_ARG_VALUES:
+            argv = _set_arg(argv, flag, FORMAL_STAGE0_ARG_VALUES[flag])
+        elif flag in MJX_GENERIC_ARG_VALUES:
+            argv = _set_arg(argv, flag, MJX_GENERIC_ARG_VALUES[flag])
+        else:
+            argv = _drop_arg_with_value(argv, flag)
+    argv = _set_arg(argv, "--mpc-samples", FORMAL_STAGE0_ARG_VALUES["--mpc-samples"])
+    argv = _drop_arg_with_value(argv, "--mpc-sigma-decay")
     argv = _drop_flag(argv, "--mjx-enable-scan")
     argv = _drop_flag(argv, "--mjx-guided-candidate")
     argv = _drop_flag(argv, "--no-mjx-guided-candidate")
+    argv = _drop_arg_with_value(argv, "--mjx-guided-candidate-period")
     argv.extend(["--saved-command", str(mjx_output_dir / "mpc_command.npz")])
     argv.extend(["--replay-control-steps", "20"])
     argv.extend(["--replay-task-mode", "g1_wbc_joint_global"])
@@ -1390,6 +2803,7 @@ def _build_report(
                     required_gpu_name_fragment=required_gpu_name_fragment,
                 ),
                 *_mjx_contact_evidence_failures(mjx_group),
+                *_mjx_dynamic_trace_evidence_failures(mjx_group),
                 *_artifact_freshness_failures(
                     mjx_group,
                     artifact_fields=REQUIRED_ARTIFACT_FIELDS,
@@ -1401,6 +2815,7 @@ def _build_report(
                 *_artifact_npz_schema_failures(
                     mjx_group,
                     require_command=True,
+                    require_rollout_command_match=False,
                 ),
             )
         )
@@ -1468,7 +2883,7 @@ def _build_report(
         )
         realtime_results[motion] = realtime_gate
         target_speed_passed = (
-            bool(realtime_gate["passed"])
+            speed_gate.passed and bool(realtime_gate["passed"])
             if target == TARGET_4090_REALTIME
             else speed_gate.passed
         )
@@ -1491,6 +2906,7 @@ def _build_report(
         "schema_version": 1,
         "backend": "mjx_canonical",
         "baseline_manifest": str(baseline_manifest),
+        "contact_force_semantics": CONTACT_FORCE_SEMANTICS,
         "baseline_envelopes": baseline_envelopes,
         "classification": classification,
         "target": target,
@@ -1506,7 +2922,11 @@ def _build_report(
             mjx_rows=mjx_rows,
             replay_rows=replay_rows,
         ),
-        "contact_summary": _contact_summary(mjx_rows=mjx_rows),
+        "contact_summary": _contact_summary(
+            baseline_rows=baseline_rows,
+            mjx_rows=mjx_rows,
+            replay_rows=replay_rows,
+        ),
         "baseline_rows": baseline_rows,
         "mjx_rows": mjx_rows,
         "replay_rows": replay_rows,
@@ -1568,11 +2988,23 @@ def _timing_summary(
     return summary
 
 
-def _contact_summary(*, mjx_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _contact_summary(
+    *,
+    baseline_rows: list[dict[str, Any]],
+    mjx_rows: list[dict[str, Any]],
+    replay_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     for motion in MOTIONS:
         mjx_group = [row for row in mjx_rows if row.get("motion") == motion]
+        baseline_group = [
+            row for row in baseline_rows if row.get("motion_name") == motion
+        ]
+        replay_group = [row for row in replay_rows if row.get("motion") == motion]
         summary[motion] = {
+            "baseline": {
+                "force": _force_metrics_summary(baseline_group),
+            },
             "mjx": {
                 "max_contact_points": _timing_stats(
                     _contact_count_values(mjx_group, "max_contact_points")
@@ -1590,9 +3022,220 @@ def _contact_summary(*, mjx_rows: list[dict[str, Any]]) -> dict[str, Any]:
                     field: [_contact_flag_value(row, field) for row in mjx_group]
                     for field in MJX_CONTACT_SATURATION_FIELDS
                 },
+                "force": _force_metrics_summary(mjx_group),
             },
+            "replay": {
+                "force": _force_metrics_summary(replay_group),
+            },
+            "force_semantics": _force_semantics_summary(
+                baseline_rows=baseline_group,
+                mjx_rows=mjx_group,
+                replay_rows=replay_group,
+            ),
         }
     return summary
+
+
+def _force_metrics_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "contact_force_active_mean": _timing_stats(
+            _metric_float_values(rows, "contact_force_active_mean")
+        ),
+        "contact_force_peak": _timing_stats(
+            _metric_float_values(rows, "contact_force_peak")
+        ),
+        "contact_force_first_row_active_mean": _timing_stats(
+            _metric_float_values(rows, "contact_force_first_row_active_mean")
+        ),
+        "contact_force_first_row_peak": _timing_stats(
+            _metric_float_values(rows, "contact_force_first_row_peak")
+        ),
+        "contact_force_sum_to_first_row_active_ratio": _timing_stats(
+            _metric_float_values(rows, "contact_force_sum_to_first_row_active_ratio")
+        ),
+        "contact_force_sum_to_first_row_peak_ratio": _timing_stats(
+            _metric_float_values(rows, "contact_force_sum_to_first_row_peak_ratio")
+        ),
+    }
+
+
+def _force_semantics_summary(
+    *,
+    baseline_rows: list[dict[str, Any]],
+    mjx_rows: list[dict[str, Any]],
+    replay_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "active": _force_semantics_metric_summary(
+            baseline_rows=baseline_rows,
+            mjx_rows=mjx_rows,
+            replay_rows=replay_rows,
+            metric="contact_force_active_mean",
+        ),
+        "peak": _force_semantics_metric_summary(
+            baseline_rows=baseline_rows,
+            mjx_rows=mjx_rows,
+            replay_rows=replay_rows,
+            metric="contact_force_peak",
+        ),
+    }
+
+
+def _force_semantics_metric_summary(
+    *,
+    baseline_rows: list[dict[str, Any]],
+    mjx_rows: list[dict[str, Any]],
+    replay_rows: list[dict[str, Any]],
+    metric: str,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    mjx_ratios: list[float] = []
+    replay_ratios: list[float] = []
+    for seed in SEEDS:
+        baseline_value = _metric_float_for_seed(
+            baseline_rows,
+            seed=seed,
+            metric=metric,
+        )
+        mjx_value = _metric_float_for_seed(mjx_rows, seed=seed, metric=metric)
+        replay_value = _metric_float_for_seed(
+            replay_rows,
+            seed=seed,
+            metric=metric,
+        )
+        mjx_ratio = _ratio(mjx_value, baseline_value)
+        replay_ratio = _ratio(replay_value, baseline_value)
+        if mjx_ratio is not None:
+            mjx_ratios.append(mjx_ratio)
+        if replay_ratio is not None:
+            replay_ratios.append(replay_ratio)
+        rows.append(
+            {
+                "seed": seed,
+                "baseline": baseline_value,
+                "mjx": mjx_value,
+                "replay": replay_value,
+                "mjx_to_baseline": mjx_ratio,
+                "replay_to_baseline": replay_ratio,
+                "classification": _force_ratio_classification(
+                    mjx_ratio=mjx_ratio,
+                    replay_ratio=replay_ratio,
+                ),
+                "semantic_classification": _force_semantics_classification(
+                    mjx_ratio=mjx_ratio,
+                    replay_ratio=replay_ratio,
+                ),
+            }
+        )
+    semantic_counts = _classification_counts(rows, "semantic_classification")
+    return {
+        "rows": rows,
+        "mjx_to_baseline": _timing_stats(mjx_ratios),
+        "replay_to_baseline": _timing_stats(replay_ratios),
+        "force_ratio_high_count": sum(
+            1 for row in rows if row["classification"] == "force_ratio_high"
+        ),
+        "semantic_classification_counts": semantic_counts,
+        "isolated_raw_mjx_force_high_count": semantic_counts.get(
+            "isolated_raw_mjx_force_high",
+            0,
+        ),
+        "shared_force_high_count": semantic_counts.get("shared_force_high", 0),
+        "replay_force_high_count": sum(
+            1
+            for ratio in replay_ratios
+            if ratio > FORCE_REPLAY_NEAR_BASELINE_RATIO_MAX
+        ),
+    }
+
+
+def _metric_float_values(rows: list[dict[str, Any]], metric: str) -> list[float]:
+    values: list[float] = []
+    for row in rows:
+        value = _metric_float(row, metric)
+        if value is not None:
+            values.append(value)
+    return values
+
+
+def _metric_float_for_seed(
+    rows: list[dict[str, Any]],
+    *,
+    seed: int,
+    metric: str,
+) -> float | None:
+    for row in rows:
+        if _safe_int(row.get("seed")) == seed:
+            return _metric_float(row, metric)
+    return None
+
+
+def _metric_float(row: dict[str, Any], metric: str) -> float | None:
+    metrics = row.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    value = metrics.get(metric)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def _force_ratio_classification(
+    *,
+    mjx_ratio: float | None,
+    replay_ratio: float | None,
+) -> str:
+    if mjx_ratio is None or replay_ratio is None:
+        return "force_ratio_missing"
+    if mjx_ratio >= 3.0 and replay_ratio <= 1.5:
+        return "force_ratio_high"
+    return "force_ratio_not_isolated"
+
+
+FORCE_MJX_HIGH_RATIO_MIN = 3.0
+FORCE_REPLAY_NEAR_BASELINE_RATIO_MAX = 1.5
+
+
+def _force_semantics_classification(
+    *,
+    mjx_ratio: float | None,
+    replay_ratio: float | None,
+) -> str:
+    if mjx_ratio is None or replay_ratio is None:
+        return "force_ratio_missing"
+    if (
+        mjx_ratio >= FORCE_MJX_HIGH_RATIO_MIN
+        and replay_ratio <= FORCE_REPLAY_NEAR_BASELINE_RATIO_MAX
+    ):
+        return "isolated_raw_mjx_force_high"
+    if (
+        mjx_ratio >= FORCE_MJX_HIGH_RATIO_MIN
+        and replay_ratio > FORCE_REPLAY_NEAR_BASELINE_RATIO_MAX
+    ):
+        return "shared_force_high"
+    if replay_ratio > FORCE_REPLAY_NEAR_BASELINE_RATIO_MAX:
+        return "replay_force_high"
+    return "force_ratio_nominal"
+
+
+def _classification_counts(
+    rows: list[dict[str, Any]],
+    field: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(field)
+        if not isinstance(value, str):
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _ratio(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or denominator == 0.0:
+        return None
+    return numerator / denominator
 
 
 def _timing_values(rows: list[dict[str, Any]], name: str) -> list[float]:
@@ -1672,8 +3315,16 @@ def _classify_report(
         for result in motion_results.values()
     ):
         return "quality_regression"
-    target_results = realtime_results if target == TARGET_4090_REALTIME else speed_results
-    if any(not result.get("passed") for result in target_results.values()):
+    target_results = (
+        (speed_results, realtime_results)
+        if target == TARGET_4090_REALTIME
+        else (speed_results,)
+    )
+    if any(
+        not result.get("passed")
+        for result_group in target_results
+        for result in result_group.values()
+    ):
         return "speed_regression"
     return "invalid_benchmark"
 
@@ -1788,6 +3439,8 @@ def _replay_provenance_failures(
 
         if mpc.get("replay_mode") != "shared_execute_backend":
             failures.append("replay_mode")
+        if mpc.get("saved_command_replay_source") != "window_command_chunks":
+            failures.append("replay_window_command_source")
         if row.get("metrics_method") != "replay_command":
             failures.append("replay_metrics_provenance")
 
@@ -1933,6 +3586,7 @@ def _has_invalid_benchmark_failure(
         "mjx_jit_warmup_enabled",
         "mjx_jit_warmup_wall_time",
         "mjx_metrics_provenance",
+        "mjx_dynamic_execute_trace",
         "mjx_physics_scan_enabled",
         "mjx_physics_step_count",
         "mjx_runtime_visible_devices",
@@ -1964,6 +3618,7 @@ def _has_invalid_benchmark_failure(
         "replay_saved_command",
         "replay_saved_command_hash",
         "replay_saved_command_source",
+        "replay_window_command_source",
         "replay_rollout_ref_indices",
         "replay_single_visible_gpu",
         "returncode",
@@ -2239,6 +3894,10 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "metrics_device": payload.get("device"),
         "metrics_checkpoint": payload.get("checkpoint"),
         "metrics_max_steps": payload.get("max_steps"),
+        "collision_profile": mpc.get(
+            "collision_profile",
+            payload.get("collision_profile"),
+        ),
         "mpc_accepted": mpc.get("accepted") is True,
         "accepted_windows": -1 if accepted_windows is None else accepted_windows,
         "mpc_used_baseline_fallback": _strict_json_bool(
@@ -2248,7 +3907,156 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "compile_init_wall_time_sec": mpc.get("compile_init_wall_time_sec"),
         "jit_warmup_enabled": mpc.get("jit_warmup_enabled"),
         "jit_warmup_wall_time_sec": mpc.get("jit_warmup_wall_time_sec"),
+        "optimizer_result_sync_wall_time_sec": mpc.get(
+            "optimizer_result_sync_wall_time_sec"
+        ),
         "physics_scan_enabled": mpc.get("physics_scan_enabled"),
+        "mjx_impl": mpc.get("mjx_impl"),
+        "mjx_model_impl": mpc.get("mjx_model_impl"),
+        "mjx_model_options": mpc.get("mjx_model_options"),
+        "mjx_warp_naconmax": mpc.get("mjx_warp_naconmax"),
+        "mjx_warp_njmax": mpc.get("mjx_warp_njmax"),
+        "rollout_source": mpc.get("rollout_source"),
+        "rollout_dynamic_execute_trace": mpc.get("rollout_dynamic_execute_trace"),
+        "execute_trace_chunks": mpc.get("execute_trace_chunks"),
+        "execute_trace_source_counts": mpc.get("execute_trace_source_counts"),
+        "strip_live_mjx_data_between_windows": mpc.get(
+            "strip_live_mjx_data_between_windows"
+        ),
+        "score_only_optimizer": mpc.get("score_only_optimizer"),
+        "contact_force_mode": mpc.get("contact_force_mode"),
+        "contact_force_first_row_diagnostics": mpc.get(
+            "contact_force_first_row_diagnostics"
+        ),
+        "current_controls_selected_windows": mpc.get(
+            "current_controls_selected_windows"
+        ),
+        "noop_accepted_windows": mpc.get("noop_accepted_windows"),
+        "zero_delta_noop_iteration_sum": mpc.get("zero_delta_noop_iteration_sum"),
+        "zero_delta_noop_windows": mpc.get("zero_delta_noop_windows"),
+        "zero_delta_noop_accepted_windows": mpc.get(
+            "zero_delta_noop_accepted_windows"
+        ),
+        "score_threshold_noop_iteration_sum": mpc.get(
+            "score_threshold_noop_iteration_sum"
+        ),
+        "score_threshold_noop_windows": mpc.get("score_threshold_noop_windows"),
+        "score_threshold_noop_accepted_windows": mpc.get(
+            "score_threshold_noop_accepted_windows"
+        ),
+        "top_score_gap_noop_iteration_sum": mpc.get(
+            "top_score_gap_noop_iteration_sum"
+        ),
+        "top_score_gap_noop_windows": mpc.get("top_score_gap_noop_windows"),
+        "top_score_gap_noop_accepted_windows": mpc.get(
+            "top_score_gap_noop_accepted_windows"
+        ),
+        "control_delta_guard_noop_iteration_sum": mpc.get(
+            "control_delta_guard_noop_iteration_sum"
+        ),
+        "control_delta_guard_noop_windows": mpc.get(
+            "control_delta_guard_noop_windows"
+        ),
+        "control_delta_guard_noop_accepted_windows": mpc.get(
+            "control_delta_guard_noop_accepted_windows"
+        ),
+        "noop_candidate_iteration_sum": mpc.get("noop_candidate_iteration_sum"),
+        "noop_candidate_windows": mpc.get("noop_candidate_windows"),
+        "noop_candidate_accepted_windows": mpc.get(
+            "noop_candidate_accepted_windows"
+        ),
+        "accepted_iteration_sum": mpc.get("accepted_iteration_sum"),
+        "iteration_accepted_window_counts": mpc.get(
+            "iteration_accepted_window_counts"
+        ),
+        "iteration_current_selected_window_counts": mpc.get(
+            "iteration_current_selected_window_counts"
+        ),
+        "iteration_noop_window_counts": mpc.get("iteration_noop_window_counts"),
+        "iteration_zero_delta_noop_window_counts": mpc.get(
+            "iteration_zero_delta_noop_window_counts"
+        ),
+        "iteration_score_threshold_noop_window_counts": mpc.get(
+            "iteration_score_threshold_noop_window_counts"
+        ),
+        "iteration_control_delta_guard_noop_window_counts": mpc.get(
+            "iteration_control_delta_guard_noop_window_counts"
+        ),
+        "iteration_noop_candidate_window_counts": mpc.get(
+            "iteration_noop_candidate_window_counts"
+        ),
+        "top_score_gap_min": mpc.get("top_score_gap_min"),
+        "top_score_gap_mean": mpc.get("top_score_gap_mean"),
+        "top_score_gap_max": mpc.get("top_score_gap_max"),
+        "top_score_gap_windows": mpc.get("top_score_gap_windows"),
+        "iteration_top_score_gap_mins": mpc.get("iteration_top_score_gap_mins"),
+        "iteration_top_score_gap_means": mpc.get("iteration_top_score_gap_means"),
+        "sample_count": mpc.get("sample_count"),
+        "optimizer_iterations": mpc.get("optimizer_iterations"),
+        "planning_horizon_steps": mpc.get("planning_horizon_steps"),
+        "control_steps": mpc.get("control_steps"),
+        "knot_count": mpc.get("knot_count"),
+        "temperature": mpc.get("temperature"),
+        "elite_frac": mpc.get("elite_frac"),
+        "root_pos_sigma": mpc.get("root_pos_sigma"),
+        "root_rot_sigma": mpc.get("root_rot_sigma"),
+        "joint_sigma": mpc.get("joint_sigma"),
+        "first_ctrl_noise_scale": mpc.get("first_ctrl_noise_scale"),
+        "last_ctrl_noise_scale": mpc.get("last_ctrl_noise_scale"),
+        "final_noise_scale": mpc.get("final_noise_scale"),
+        "sigma_decay": mpc.get("sigma_decay"),
+        "mjx_min_score_improvement": mpc.get("mjx_min_score_improvement"),
+        "mjx_min_top_score_gap": mpc.get("mjx_min_top_score_gap"),
+        "mjx_cem_update_min_top_score_gap": mpc.get(
+            "mjx_cem_update_min_top_score_gap"
+        ),
+        "mjx_max_control_delta": mpc.get("mjx_max_control_delta"),
+        "candidate_rank_diagnostics_top_k": mpc.get(
+            "candidate_rank_diagnostics_top_k",
+            mpc.get("mjx_candidate_rank_diagnostics_top_k"),
+        ),
+        "candidate_rank_diagnostics_windows": mpc.get(
+            "candidate_rank_diagnostics_windows"
+        ),
+        "mjx_candidate_rescore_diagnostics": mpc.get(
+            "mjx_candidate_rescore_diagnostics"
+        ),
+        "candidate_rescore_diagnostics_windows": mpc.get(
+            "candidate_rescore_diagnostics_windows"
+        ),
+        "candidate_rescore_score_delta_max": mpc.get(
+            "candidate_rescore_score_delta_max"
+        ),
+        "candidate_rescore_score_delta_mean": mpc.get(
+            "candidate_rescore_score_delta_mean"
+        ),
+        "candidate_rescore_top1_changed_iteration_sum": mpc.get(
+            "candidate_rescore_top1_changed_iteration_sum"
+        ),
+        "candidate_rescore_selection_top_k": mpc.get(
+            "candidate_rescore_selection_top_k",
+            mpc.get("mjx_candidate_rescore_selection_top_k"),
+        ),
+        "candidate_rescore_selection_windows": mpc.get(
+            "candidate_rescore_selection_windows"
+        ),
+        "candidate_rescore_selection_score_delta_max": mpc.get(
+            "candidate_rescore_selection_score_delta_max"
+        ),
+        "candidate_rescore_selection_score_delta_mean": mpc.get(
+            "candidate_rescore_selection_score_delta_mean"
+        ),
+        "candidate_rescore_selection_changed_iteration_sum": mpc.get(
+            "candidate_rescore_selection_changed_iteration_sum"
+        ),
+        "candidate_score_component_diagnostics_top_k": mpc.get(
+            "candidate_score_component_diagnostics_top_k",
+            mpc.get("mjx_candidate_score_component_diagnostics_top_k"),
+        ),
+        "use_warm_start": mpc.get("use_warm_start"),
+        "use_guided_candidate": mpc.get("use_guided_candidate"),
+        "guided_candidate_period": mpc.get("guided_candidate_period"),
+        "guided_candidate_windows": mpc.get("guided_candidate_windows"),
         "physics_step_count_min": mpc.get("physics_step_count_min"),
         "physics_step_count_max": mpc.get("physics_step_count_max"),
         "physics_step_count_windows": mpc.get("physics_step_count_windows"),
@@ -2265,6 +4073,46 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "contact_pair_count": mpc.get("contact_pair_count"),
         "active_contact_count": mpc.get("active_contact_count"),
     }
+
+
+def _attach_single_row_speed_evidence(
+    row: dict[str, Any],
+    baseline_rows: list[dict[str, Any]],
+    *,
+    min_speedup: float,
+    min_realtime_factor: float,
+) -> dict[str, Any]:
+    row = dict(row)
+    motion = row.get("motion")
+    seed = _safe_int(row.get("seed"))
+    mjx_time = _timing_value(row, "steady_state_wall_time_sec")
+    baseline_time = None
+    if isinstance(motion, str) and seed in SEEDS:
+        for baseline_row in baseline_rows:
+            if baseline_row.get("motion_name") != motion:
+                continue
+            if _safe_int(baseline_row.get("seed")) != seed:
+                continue
+            candidate = _timing_value(baseline_row, "steady_state_wall_time_sec")
+            if _valid_timing(candidate):
+                baseline_time = float(candidate)
+                break
+    if baseline_time is not None:
+        row["same_seed_baseline_steady_state_wall_time_sec"] = baseline_time
+        target_time = baseline_time / float(min_speedup)
+        row["same_seed_target_steady_state_wall_time_sec"] = target_time
+        if _valid_timing(mjx_time):
+            mjx_time = float(mjx_time)
+            speedup = baseline_time / mjx_time
+            row["same_seed_speedup"] = speedup
+            row["same_seed_speedup_passed"] = speedup >= float(min_speedup)
+            row["same_seed_speedup_shortfall_sec"] = max(0.0, mjx_time - target_time)
+    duration = _positive_float(row.get("evaluated_motion_duration_sec"))
+    if duration is not None and _valid_timing(mjx_time):
+        realtime_factor = duration / float(mjx_time)
+        row["realtime_factor"] = realtime_factor
+        row["realtime_passed"] = realtime_factor >= float(min_realtime_factor)
+    return row
 
 
 def _strict_json_bool(value: Any) -> bool | None:
@@ -2329,6 +4177,64 @@ def _mjx_contact_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...
         ):
             failures.append("mjx_contact_diagnostics")
     return _unique(failures)
+
+
+def _mjx_dynamic_trace_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in rows:
+        if row.get("rollout_source") != "dynamic_execute_trace":
+            failures.append("mjx_dynamic_execute_trace")
+        if row.get("rollout_dynamic_execute_trace") is not True:
+            failures.append("mjx_dynamic_execute_trace")
+        chunks = _safe_int(row.get("execute_trace_chunks"))
+        windows = _safe_int(row.get("accepted_windows"))
+        if chunks is None or chunks <= 0:
+            failures.append("mjx_dynamic_execute_trace")
+        if chunks is not None and windows is not None and chunks != windows:
+            failures.append("mjx_dynamic_execute_trace")
+        if _row_value(row, "mjx_impl") == "warp":
+            counts = _execute_trace_source_counts(row)
+            if counts is None:
+                failures.append("mjx_dynamic_execute_trace")
+            elif any(
+                source != "rollout_tracer" and int(count) > 0
+                for source, count in counts.items()
+            ):
+                failures.append("mjx_dynamic_execute_trace")
+            elif (
+                windows is not None
+                and int(counts.get("rollout_tracer", 0)) != int(windows)
+            ):
+                failures.append("mjx_dynamic_execute_trace")
+    return _unique(failures)
+
+
+def _execute_trace_source_counts(row: dict[str, Any]) -> dict[str, int] | None:
+    counts = _row_value(row, "execute_trace_source_counts")
+    if isinstance(counts, dict):
+        normalized: dict[str, int] = {}
+        for source, value in counts.items():
+            parsed = _safe_int(value)
+            if parsed is None or parsed < 0:
+                return None
+            normalized[str(source)] = parsed
+        return normalized
+    mpc = row.get("mpc", {})
+    history = mpc.get("history") if isinstance(mpc, dict) else None
+    if not isinstance(history, list):
+        history = row.get("history")
+    if not isinstance(history, list):
+        return None
+    normalized = {}
+    for info in history:
+        if not isinstance(info, dict):
+            continue
+        source = info.get("execute_trace_source")
+        if source is None:
+            continue
+        source_name = str(source)
+        normalized[source_name] = normalized.get(source_name, 0) + 1
+    return normalized if normalized else None
 
 
 def _baseline_artifact_evidence_failures(rows: list[dict[str, Any]]) -> tuple[str, ...]:
@@ -2550,7 +4456,16 @@ def _valid_rollout_npz(path: Path, *, num_steps: int) -> bool:
         with np.load(path) as data:
             if "dt" not in data.files or np.asarray(data["dt"]).shape not in {(), (1,)}:
                 return False
-            return _npz_has_shapes(data, required_shapes)
+            if not _npz_has_shapes(data, required_shapes):
+                return False
+            ref_indices = np.asarray(data["ref_indices"]).reshape(-1)
+            expected_refs = np.concatenate(
+                (
+                    np.array([0], dtype=ref_indices.dtype),
+                    np.arange(frames - 1, dtype=ref_indices.dtype),
+                )
+            )
+            return bool(np.array_equal(ref_indices, expected_refs))
     except Exception:
         return False
 
@@ -2572,9 +4487,58 @@ def _valid_command_npz(path: Path, *, num_steps: int) -> bool:
     }
     try:
         with np.load(path) as data:
-            return _npz_has_shapes(data, required_shapes)
+            return _npz_has_shapes(data, required_shapes) and _valid_window_command_chunks(
+                data,
+                num_steps=int(num_steps),
+            )
     except Exception:
         return False
+
+
+def _valid_window_command_chunks(
+    data: np.lib.npyio.NpzFile,
+    *,
+    num_steps: int,
+) -> bool:
+    bodies = len(MUJOCO_BODY_NAMES)
+    metadata = ("window_starts", "window_execute_steps", "window_horizons")
+    if any(name not in data.files for name in metadata):
+        return False
+    starts = np.asarray(data["window_starts"])
+    execute_steps = np.asarray(data["window_execute_steps"])
+    horizons = np.asarray(data["window_horizons"])
+    if starts.ndim != 1 or execute_steps.shape != starts.shape or horizons.shape != starts.shape:
+        return False
+    if starts.shape[0] < 1:
+        return False
+    starts = starts.astype(np.int64, copy=False)
+    execute_steps = execute_steps.astype(np.int64, copy=False)
+    horizons = horizons.astype(np.int64, copy=False)
+    if int(starts[0]) != 0:
+        return False
+    if np.any(execute_steps < 1) or np.any(horizons < execute_steps):
+        return False
+    expected_starts = np.concatenate(
+        [np.array([0], dtype=np.int64), np.cumsum(execute_steps[:-1])]
+    )
+    if not np.array_equal(starts, expected_starts):
+        return False
+    if int(starts[-1] + execute_steps[-1]) != int(num_steps):
+        return False
+    max_horizon = int(horizons.max())
+    required = {
+        "window_command_joint_pos": (starts.shape[0], max_horizon, 1, ACTION_DIM),
+        "window_command_joint_vel": (starts.shape[0], max_horizon, 1, ACTION_DIM),
+        "window_command_body_pos_w": (starts.shape[0], max_horizon, 1, bodies, 3),
+        "window_command_body_quat_w": (starts.shape[0], max_horizon, 1, bodies, 4),
+        "window_command_body_lin_vel_w": (starts.shape[0], max_horizon, 1, bodies, 3),
+        "window_command_body_ang_vel_w": (starts.shape[0], max_horizon, 1, bodies, 3),
+        "window_command_qpos_chunks": (starts.shape[0], max_horizon, 1, QPOS_DIM),
+        "window_command_qvel_chunks": (starts.shape[0], max_horizon, 1, QVEL_DIM),
+    }
+    if "window_command_schema_version" not in data.files:
+        return False
+    return _npz_has_shapes(data, required)
 
 
 def _rollout_matches_command_npz(rollout_path: Path, command_path: Path) -> bool:
@@ -2796,6 +4760,80 @@ def _row_evidence_failures(
     missing = set(SEEDS) - seen
     if missing:
         failures.append("seed")
+    return _unique(failures)
+
+
+def _skip_report_row_evidence_failures(
+    mjx_rows: list[dict[str, Any]],
+    replay_rows: list[dict[str, Any]],
+    *,
+    required_gpu_name_fragment: str,
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    for row in mjx_rows:
+        failures.extend(
+            _single_row_evidence_failures(
+                row,
+                artifact_fields=REQUIRED_ARTIFACT_FIELDS,
+                timing_failure="mjx_steady_state_wall_time",
+            )
+        )
+        if row.get("mpc_accepted") is not True:
+            failures.append("mpc_accepted")
+        if _safe_int(row.get("accepted_windows")) != 40:
+            failures.append("accepted_windows")
+        if row.get("mpc_used_baseline_fallback") is not False:
+            failures.append("baseline_fallback")
+        failures.extend(_mjx_dynamic_trace_evidence_failures([row]))
+        if row.get("same_seed_speedup_passed") is False:
+            failures.append("same_seed_speedup")
+        elif "same_seed_speedup_passed" not in row:
+            failures.append("same_seed_speedup")
+    failures.extend(
+        _mjx_runtime_evidence_failures(
+            mjx_rows,
+            required_gpu_name_fragment=required_gpu_name_fragment,
+        )
+    )
+    for row in replay_rows:
+        failures.extend(
+            _single_row_evidence_failures(
+                row,
+                artifact_fields=("metrics_json", "rollout_npz"),
+                timing_failure="replay_steady_state_wall_time",
+                timing_fields=("command_wall_time_sec", "steady_state_wall_time_sec"),
+            )
+        )
+    failures.extend(
+        _runtime_evidence_failures(
+            replay_rows,
+            prefix="replay",
+            required_gpu_name_fragment=required_gpu_name_fragment,
+        )
+    )
+    return _unique(failures)
+
+
+def _single_row_evidence_failures(
+    row: dict[str, Any],
+    *,
+    artifact_fields: tuple[str, ...],
+    timing_failure: str,
+    timing_fields: tuple[str, ...] = ("steady_state_wall_time_sec",),
+) -> tuple[str, ...]:
+    failures: list[str] = []
+    if row.get("status") != "ok":
+        failures.append("status")
+    if row.get("returncode") != 0:
+        failures.append("returncode")
+    if _safe_int(row.get("num_steps")) != 800:
+        failures.append("num_steps")
+    artifacts = row.get("artifacts", {})
+    for key in artifact_fields:
+        if not isinstance(artifacts, dict) or not artifacts.get(key):
+            failures.append(key)
+    if not any(_valid_timing(_timing_value(row, field)) for field in timing_fields):
+        failures.append(timing_failure)
     return _unique(failures)
 
 

@@ -6,7 +6,7 @@ import json
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal
+from typing import Any, Callable, Literal
 
 import mujoco
 import torch
@@ -27,6 +27,10 @@ from spider.tasks.g1_wbc.math_utils import (
 from spider.tasks.g1_wbc.metrics import compute_rollout_scores
 from spider.tasks.g1_wbc.motion import G1CommandBatch, G1Motion
 from spider.tasks.g1_wbc.policy import WbcActor
+from spider.tasks.g1_wbc.result_types import (
+    G1WbcExecutedCommandChunk,
+    G1WbcWindowReplayState,
+)
 from spider.tasks.g1_wbc.rollout import (
     RolloutResult,
     WbcRolloutConfig,
@@ -182,6 +186,7 @@ class G1WbcMpcResult:
     final_baseline_score: float = 0.0
     num_windows: int = 0
     accepted_windows: int = 0
+    executed_command_chunks: list[G1WbcExecutedCommandChunk] = field(default_factory=list)
 
 
 @dataclass
@@ -308,6 +313,8 @@ def optimize_mpc_command(
     actor: WbcActor,
     rollout_config: WbcRolloutConfig,
     mpc_config: G1WbcMpcConfig,
+    *,
+    diagnostic_window_hook: Callable[[dict[str, Any]], None] | None = None,
 ) -> G1WbcMpcResult:
     """Optimize and execute a refined command with receding-horizon MPC."""
 
@@ -366,6 +373,7 @@ def optimize_mpc_command(
     floor_contact_indicator: list[torch.Tensor] = []
     floor_contact_force: list[torch.Tensor] = []
     ref_indices: list[torch.Tensor] = []
+    executed_command_chunks: list[G1WbcExecutedCommandChunk] = []
 
     current_qpos = motion.qpos()[0].detach().clone()
     current_qvel = motion.qvel()[0].detach().clone()
@@ -413,6 +421,22 @@ def optimize_mpc_command(
             final_config,
             preserve_template_first=window_result.best_is_template,
         )
+        executed_command_chunks.append(
+            G1WbcExecutedCommandChunk(
+                start=sim_step,
+                execute_steps=execute_steps,
+                horizon_steps=window_horizon,
+                command=window_command,
+                replay_state=G1WbcWindowReplayState(
+                    initial_qpos=current_qpos.detach().clone(),
+                    initial_qvel=current_qvel.detach().clone(),
+                    initial_last_action=_clone_diagnostic_value(current_last_action),
+                    initial_history_state=_clone_diagnostic_value(
+                        current_history_state
+                    ),
+                ),
+            )
+        )
         window_rollout = run_command_rollout(
             window_command,
             actor,
@@ -423,6 +447,31 @@ def optimize_mpc_command(
             initial_history_state=current_history_state,
             ref_start=sim_step,
         )
+        if diagnostic_window_hook is not None:
+            diagnostic_window_hook(
+                {
+                    "window_index": int(window_index),
+                    "start": int(sim_step),
+                    "horizon": int(window_horizon),
+                    "execute_steps": int(execute_steps),
+                    "command": window_command,
+                    "initial_qpos": current_qpos.detach().clone(),
+                    "initial_qvel": current_qvel.detach().clone(),
+                    "initial_last_action": _clone_diagnostic_value(
+                        current_last_action
+                    ),
+                    "initial_history_state": _clone_diagnostic_value(
+                        current_history_state
+                    ),
+                    "rollout": window_rollout,
+                    "final_last_action": _clone_diagnostic_value(
+                        window_rollout.final_last_action
+                    ),
+                    "final_history_state": _clone_diagnostic_value(
+                        window_rollout.final_history_state
+                    ),
+                }
+            )
 
         if sim_step == 0:
             qpos_trace.append(window_rollout.qpos[0, 0].detach().clone())
@@ -551,6 +600,18 @@ def optimize_mpc_command(
         rollout = baseline_rollout
         final_command = baseline_command
         refined_qpos = base_qpos
+        executed_command_chunks = [
+            G1WbcExecutedCommandChunk(
+                start=0,
+                execute_steps=total_steps,
+                horizon_steps=total_steps,
+                command=baseline_command,
+                replay_state=G1WbcWindowReplayState(
+                    initial_qpos=motion.qpos()[0].detach().clone(),
+                    initial_qvel=motion.qvel()[0].detach().clone(),
+                ),
+            )
+        ]
     else:
         final_command = command_batch_from_qpos_trajectory(
             motion,
@@ -570,7 +631,20 @@ def optimize_mpc_command(
         final_baseline_score=baseline_score,
         num_windows=window_index,
         accepted_windows=accepted_windows,
+        executed_command_chunks=executed_command_chunks,
     )
+
+
+def _clone_diagnostic_value(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.detach().clone()
+    if isinstance(value, dict):
+        return {key: _clone_diagnostic_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_clone_diagnostic_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_diagnostic_value(item) for item in value)
+    return value
 
 
 def _optimize_mpc_window(

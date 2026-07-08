@@ -97,6 +97,7 @@ def compute_rollout_metrics(
     contact_switch = _switch_rate(sim_contact_eval)
     ref_contact_switch = _switch_rate(ref_contact_eval)
     contact_force = rollout.contact_force[1:]
+    contact_force_first_row = _contact_force_first_row(rollout)[1:]
     contact_force_excess = _contact_force_excess(contact_force)
     contact_force_delta = _diff_norm(contact_force) / _contact_force_scale()
     floor_contact = _floor_contact_indicator(rollout)[1:]
@@ -142,6 +143,11 @@ def compute_rollout_metrics(
             contact_force, sim_contact_eval
         ),
         "contact_force_peak": _max(contact_force),
+        "contact_force_first_row_active_mean": _active_force_mean(
+            contact_force_first_row,
+            sim_contact_eval,
+        ),
+        "contact_force_first_row_peak": _max(contact_force_first_row),
         "contact_force_excess_mean": _mean(contact_force_excess),
         "contact_force_delta_mean": _mean(contact_force_delta),
         "bad_floor_contact_rate": _mean(bad_floor_contact),
@@ -164,6 +170,14 @@ def compute_rollout_metrics(
         + 0.05 * float(metrics["control_delta_mean"])
     )
     metrics["score"] = score
+    metrics["contact_force_sum_to_first_row_active_ratio"] = _ratio_or_zero(
+        float(metrics["contact_force_active_mean"]),
+        float(metrics["contact_force_first_row_active_mean"]),
+    )
+    metrics["contact_force_sum_to_first_row_peak_ratio"] = _ratio_or_zero(
+        float(metrics["contact_force_peak"]),
+        float(metrics["contact_force_first_row_peak"]),
+    )
     metrics["success"] = (
         float(metrics["root_pos_error_mean"]) < thresholds.root_pos_mean
         and float(metrics["root_rot_error_mean"]) < thresholds.root_rot_mean
@@ -325,6 +339,13 @@ def _floor_contact_force(rollout: RolloutResult) -> torch.Tensor:
     return torch.cat([rollout.contact_force, other], dim=-1)
 
 
+def _contact_force_first_row(rollout: RolloutResult) -> torch.Tensor:
+    contact_force_first_row = getattr(rollout, "contact_force_first_row", None)
+    if contact_force_first_row is not None:
+        return contact_force_first_row
+    return rollout.contact_force
+
+
 def _local_body_errors(
     body_pos: torch.Tensor,
     body_quat: torch.Tensor,
@@ -380,6 +401,12 @@ def _contact_force_scale() -> float:
 
 def _contact_force_excess(force: torch.Tensor) -> torch.Tensor:
     return torch.relu(force - _contact_force_scale()) / _contact_force_scale()
+
+
+def _ratio_or_zero(numerator: float, denominator: float) -> float:
+    if denominator == 0.0:
+        return 0.0
+    return float(numerator) / float(denominator)
 
 
 def _mean(value: torch.Tensor) -> float:
