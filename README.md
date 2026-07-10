@@ -76,192 +76,49 @@ This code base provides the following pipeline from human video to robot actions
 ## Features
 
 - First general **physics-based** retargeting pipeline for both dexterous hand and humanoid robot.
-- Supports 9+ robots and 6+ datasets out of the box.
-- Seemless integration with RL training and data augmentation for BC pipeline.
-- Native support for multiple simulators (Mujoco Wrap, Genesis) and multiple downstream training pipelines (HDMI, DexMachina).
-- Sim2real ready.
+- Supports multiple robot and dataset adapters through explicit configuration.
+- Integration points for RL training and BC data augmentation.
+- Maintained MuJoCo Warp workflow with optional Genesis, HDMI, and IsaacGym adapters.
+- Robot-specific trajectory export for downstream deployment pipelines.
 
 ![](figs/embodiment_support.png)
 
 ## Quickstart
 
-Clone example datasets:
+Install the locked environment and clone the example data:
 
 ```bash
-sudo apt install git-lfs
+uv sync
 git lfs install
 git clone https://huggingface.co/datasets/retarget/retarget_example example_datasets
 ```
 
-### (Option 1) Quickstart with uv:
-
-Create env and install (make sure `uv` uses Python 3.12, which is what the project targets):
+Run the maintained fast MJWP path on a preprocessed reference task:
 
 ```bash
-uv sync
+uv run examples/run_mjwp_fast.py \
+  +override=gigahand_fast \
+  task=p36-tea \
+  embodiment_type=bimanual \
+  data_id=0 \
+  robot_type=xhand
 ```
 
-If you already have the example datasets cloned, you can skip the preprocessing step where we convert the human data to robot kinematic trajectories.
-Pick one of the three reference tasks below — each picks the right
-``+override=…`` Hydra config and the right ``task`` / ``embodiment_type``
-for that dataset:
-
-```bash
-uv run examples/run_mjwp_fast.py +override=gigahand_fast    task=p36-tea          embodiment_type=bimanual data_id=0 robot_type=xhand
-uv run examples/run_mjwp_fast.py +override=arcticv2_fast    task=s01-box_use_01   embodiment_type=bimanual data_id=0 robot_type=xhand
-uv run examples/run_mjwp_fast.py +override=oakinkv2_fast    task=pick_spoon_bowl  embodiment_type=right    data_id=0 robot_type=xhand
-
-# To use the original (slower) config from the paper, add the _origin
-# suffix to the override (gigahand only ships _origin currently):
-uv run examples/run_mjwp.py +override=gigahand_origin task=p36-tea embodiment_type=bimanual
-```
-
-> Note: ``oakinkv2`` is the recommended OakInk pipeline. It loads directly
-> from the official OakInk-v2 raw data, crops each clip to a short window
-> centered on the grasp moment (default: 1.5s pre-grasp + 2.5s post-grasp),
-> and uses the maniptrans-derived right-hand object as the manipulation
-> target. The legacy ``oakink`` pipeline (which consumes the
-> already-baked maniptrans pickles starting after the grasp) is still
-> available via ``+override=oakink``, but for new work prefer ``oakinkv2``.
-
-> Note: ``arcticv2`` reads Arctic raw_seqs and clips to a 4 s window
-> centered on the object's motion onset (default 2 s pre / 2 s post). Only
-> the object's bottom part is kept (rigid). Tasks are named
-> ``<subject>-<sequence>``, e.g. ``s01-box_use_01``,
-> ``s01-ketchup_use_01``, ``s01-laptop_use_01`` — see ``ARCTIC_OBJECTS`` in
-> ``spider/process_datasets/arcticv2.py`` for the supported objects.
-
-For full workflow, please refer to the [Workflow](#workflow) section.
-
-### (Option 2) Quickstart with conda:
-
-```bash
-conda create -n spider python=3.12
-conda activate spider
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-python -m pip install --no-deps -e .
-```
-
-Run MJWP on a processed trial:
-
-```bash
-python examples/run_mjwp.py
-```
+See [Getting Started](docs/guide/quick-start.md) for other reference tasks,
+headless execution, and output locations.
 
 ## Workflow
 
-SPIDER is designed to support multiple workflows depending on your simulator of choice and downstream tasks.
-- Native Mujoco Wrap (MJWP) is the default workflow and supports dexterous hand and humanoid robot retargeting.
-- We also support [Genesis](https://genesis.github.io/) simulator with [DexMachina](https://github.com/MandiZhao/dexmachina), workflow is useful for further training a policy with RL for dexterous hand.
-- [HDMI](https://github.com/lecar-lab/hdmi) workflow supports humanoid robot retargeting + RL workflow with humanoid-object interaction tasks. It use [MjLab](https://github.com/mujocolab/mjlab) as its backend simulator.
-- [ManipTrans](https://github.com/ManipTrans/ManipTrans) workflow supports dexterous hand retargeting with IsaacGym.
+| Workflow | Support level | Documentation |
+| --- | --- | --- |
+| MuJoCo Warp (MJWP) | Maintained default | [MJWP workflow](docs/workflows/workflow-mjwp.md) |
+| DexMachina (Genesis) | Optional, best effort | [Optional backends](docs/workflows/optional-backends.md#dexmachina-genesis) |
+| HDMI (MjLab) | Optional, best effort | [Optional backends](docs/workflows/optional-backends.md#hdmi-mjlab) |
+| ManipTrans (IsaacGym) | Optional, best effort | [Optional backends](docs/workflows/optional-backends.md#maniptrans-isaacgym) |
 
-### Native Mujoco Wrap Workflow
-
-Please refer to [Native Mujoco Wrap workflow](docs/workflows/workflow-mjwp.md) for details.
-
-- supports dexterous hand and humanoid robot retargeting
-
-The pipeline is the same for every dataset:
-``process_datasets → decompose(_fast) → [detect_contact] → generate_xml →
-ik(_fast) → run_mjwp(_fast) → [read_to_robot]``. Only step 1 (the dataset
-processor) is dataset-specific. Below, one canonical task per dataset.
-
-```bash
-TASK=p36-tea
-HAND_TYPE=bimanual
-DATA_ID=0
-ROBOT_TYPE=xhand
-DATASET_NAME=gigahand
-
-# raw data lives under ${dataset_dir}/raw/gigahand/
-
-# 1. read raw dataset → unified NPZ schema
-# Gigahand — bimanual tea-pot pour (p36-tea)
-uv run examples/run_mjwp.py +override=gigahand \
-    task=p36-tea embodiment_type=bimanual data_id=0 robot_type=xhand
-
-# Arctic-v2 — bimanual box pick (s01/box_use_01)
-uv run examples/run_mjwp.py +override=arcticv2 \
-    task=s01-box_use_01 embodiment_type=bimanual data_id=0 robot_type=xhand
-
-# OakInk-v2 — right-hand spoon pick (pick_spoon_bowl)
-uv run examples/run_mjwp.py +override=oakinkv2 \
-    task=pick_spoon_bowl embodiment_type=right data_id=0 robot_type=xhand
-
-# 2. decompose object
-# default uses CoACD (accurate but slow); decompose_fast.py is a heuristic alternative
-uv run spider/preprocess/decompose.py     --task=${TASK} --dataset-name=${DATASET_NAME} --data-id=${DATA_ID} --embodiment-type=${HAND_TYPE}
-
-# 3. (optional) detect contact
-uv run spider/preprocess/detect_contact.py --task=${TASK} --dataset-name=${DATASET_NAME} --data-id=${DATA_ID} --embodiment-type=${HAND_TYPE}
-
-# 4. generate scene XML
-uv run spider/preprocess/generate_xml.py   --task=${TASK} --dataset-name=${DATASET_NAME} --data-id=${DATA_ID} --embodiment-type=${HAND_TYPE} --robot-type=${ROBOT_TYPE}
-
-# 5. kinematic retargeting (mink-based fast IK; ik.py is the slower paper version)
-uv run spider/preprocess/ik_fast.py        --task=${TASK} --dataset-name=${DATASET_NAME} --data-id=${DATA_ID} --embodiment-type=${HAND_TYPE} --robot-type=${ROBOT_TYPE}
-
-# 6. physics retargeting
-uv run examples/run_mjwp.py      +override=${DATASET_NAME}      task=${TASK} data_id=${DATA_ID} robot_type=${ROBOT_TYPE} embodiment_type=${HAND_TYPE}
-# faster, sampling-based variant:
-uv run examples/run_mjwp_fast.py +override=${DATASET_NAME}_fast task=${TASK} data_id=${DATA_ID} robot_type=${ROBOT_TYPE} embodiment_type=${HAND_TYPE}
-
-# 7. (optional) export for robot deployment
-uv run spider/postprocess/read_to_robot.py --task=${TASK} --dataset-name=${DATASET_NAME} --data-id=${DATA_ID} --robot-type=${ROBOT_TYPE} --embodiment-type=${HAND_TYPE}
-```
-
-> Headless rendering: ``ik_fast.py`` and ``run_mjwp_fast.py`` save MP4
-> previews via ``mujoco.Renderer``. On a machine without a display, prefix
-> the command with ``MUJOCO_GL=egl`` (or ``osmesa``) — otherwise GLFW
-> fails to init and the run aborts before saving.
-
-### DexMachina Workflow
-
-Please refer to [DexMachina workflow](docs/workflows/workflow-dexmachina.md) for details.
-
-```bash
-# install dexmachina conda environment following their official instructions: https://mandizhao.github.io/dexmachina-docs/0_install.html
-conda activate dexmachina
-# note: install spider only without mujoco warp since we only use the optimization part
-pip install --ignore-requires-python --no-deps -e .
-# run retargeting
-python examples/run_dexmachina.py
-```
-
-### HDMI Workflow
-
-Please refer to [HDMI workflow](docs/workflows/workflow-hdmi.md) for details.
-
-```bash
-# install HDMI uv environment following their official instructions:
-# go to hdmi folder, install SPIDER with
-uv pip install --no-deps -e ../spider
-```
-
-### ManipTrans Workflow
-
-Please refer to [ManipTrans workflow](docs/workflows/workflow-maniptrans.md) for details.
-
-```bash
-# install maniptrans conda environment following their official instructions: https://github.com/ManipTrans/ManipTrans
-conda activate maniptrans
-# note: install spider only without mujoco warp since we only use the optimization part
-pip install --ignore-requires-python --no-deps -e .
-# run retargeting
-python examples/run_maniptrans.py
-```
-
-## Remote Development
-
-```bash
-# start rerun server
-uv run rerun --serve-web --port 9876
-
-# run SPIDER only with rerun viewer
-uv run examples/run_mjwp.py viewer="rerun"
-```
+The complete maintained pipeline is documented once in the MJWP workflow.
+Configuration, data contracts, viewers, and development guides are available in
+the [documentation site](https://facebookresearch.github.io/spider/).
 
 ## License
 

@@ -4,8 +4,7 @@ const guideSidebar = [
   {
     text: 'Guide',
     items: [
-      { text: 'Quick Start', link: '/guide/quick-start' },
-      { text: 'Installation', link: '/guide/installation' },
+      { text: 'Getting Started', link: '/guide/quick-start' },
     ],
   },
 ];
@@ -14,10 +13,8 @@ const usageSidebar = [
   {
     text: 'Usage',
     items: [
-      { text: 'Data Structure', link: '/usage/data-structure' },
-      { text: 'Parameter Tuning', link: '/usage/parameter-tuning' },
-      { text: 'Viewers', link: '/usage/viewers' },
-      { text: 'Deployment', link: '/usage/deployment' },
+      { text: 'Data and Outputs', link: '/usage/data-structure' },
+      { text: 'Configuration and Tuning', link: '/usage/parameter-tuning' },
     ],
   },
 ];
@@ -27,8 +24,7 @@ const workflowsSidebar = [
     text: 'Workflows',
     items: [
       { text: 'MuJoCo Warp (MJWP)', link: '/workflows/workflow-mjwp' },
-      { text: 'HDMI', link: '/workflows/workflow-hdmi' },
-      { text: 'DexMachina', link: '/workflows/workflow-dexmachina' },
+      { text: 'Optional Backends', link: '/workflows/optional-backends' },
     ],
   },
 ];
@@ -37,8 +33,8 @@ const developmentSidebar = [
   {
     text: 'Development',
     items: [
-      { text: 'Add a Robot', link: '/development/add-robot' },
       { text: 'Add a Dataset', link: '/development/add-dataset' },
+      { text: 'Add a Robot', link: '/development/add-robot' },
       { text: 'Add a Simulator', link: '/development/add-simulator' },
     ],
   },
@@ -55,7 +51,7 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/quick-start' },
       { text: 'Usage', link: '/usage/data-structure' },
       { text: 'Workflows', link: '/workflows/workflow-mjwp' },
-      { text: 'Development', link: '/development/add-robot' },
+      { text: 'Development', link: '/development/add-dataset' },
       { text: 'GitHub', link: 'https://github.com/facebookresearch/spider' },
     ],
     sidebar: {

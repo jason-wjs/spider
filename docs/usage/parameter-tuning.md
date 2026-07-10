@@ -1,266 +1,114 @@
-# Parameter Tuning
+# Configuration and Tuning
 
-This guide helps you tune SPIDER parameters for optimal performance on your tasks.
+SPIDER uses Hydra for entrypoint configuration and a `Config` dataclass for the
+processed runtime state. Tune from a dataset/backend override instead of copying
+defaults into a new command.
 
-## Overview
+## Configuration Precedence
 
-Like reinforcement learning, different motion characteristics require different parameter settings. Start with defaults and iteratively refine based on results.
+For `run_mjwp.py` and `run_mjwp_fast.py`, values are resolved in this order:
 
-## Control Parameters
+1. `examples/config/default.yaml`
+2. a selected file in `examples/config/override/`
+3. explicit CLI overrides
+4. derived fields computed by `spider.config.process_config`
 
-### Simulation Timestep (`sim_dt`)
-
-**Default**: `0.01` (100 Hz)
-
-The fundamental simulation timestep. Smaller values increase accuracy but slow down simulation. Start from a smaller one and gradually increase for faster simulation.
-
-::: warning
-All other timing parameters must be divisible by `sim_dt`
-:::
-
-### Control Interval (`ctrl_dt`)
-
-**Default**: `0.4s` (2.5 Hz)
-
-How frequently the controller updates. Affects:
-- Optimization speed (larger = fewer optimizations)
-- Responsiveness (smaller = more reactive)
-
-**Tuning guidelines:**
-- **Agile motions**: `0.05-0.2s`
-- **Smooth motions**: `0.2-0.4s`
-
-### Planning Horizon (`horizon`)
-
-**Default**: `1.6s`
-
-**Most important parameter**. How far ahead the optimizer looks.
-
-**Impact:**
-- ✅ Larger horizon: Better global plan, handles complex motions
-- ❌ Larger horizon: Slower optimization, requires more samples
-- ✅ Smaller horizon: Faster optimization
-- ❌ Smaller horizon: Myopic behavior, may fail on complex tasks
-
-**Tuning strategy:**
-1. Start large (2.0s) for complex/unknown tasks
-2. Gradually decrease until performance degrades
-3. Monitor planned trajectories in Rerun viewer
+For example:
 
 ```bash
-# Complex manipulation
-uv run examples/run_mjwp.py horizon=2.0
-
-# Simple tracking
-uv run examples/run_mjwp.py horizon=1.0
+uv run examples/run_mjwp_fast.py \
+  +override=gigahand_fast \
+  task=p36-tea \
+  data_id=0 \
+  num_samples=512
 ```
 
-::: tip Visual Debugging
-Use Rerun viewer to see the planned trajectory (blue/red traces). If the plan looks good but execution fails, the horizon might be too short.
-:::
+The YAML files are the source of truth for defaults. The dataclass also contains
+fallback values for programmatic callers, so copying numbers from the class can
+produce a different CLI experiment.
 
-### Knot Spacing (`knot_dt`)
+## Timing Parameters
 
-**Default**: `0.4s`
+| Parameter | Meaning | Main trade-off |
+| --- | --- | --- |
+| `sim_dt` | Physics timestep | Accuracy and simulator cost |
+| `ctrl_dt` | Time executed before replanning | Responsiveness and number of optimizer calls |
+| `horizon` | Look-ahead duration | Planning context, memory, and rollout work |
+| `knot_dt` | Control parameter spacing | Search dimension and command flexibility |
+| `ref_dt` | Input trajectory timestep | Reference interpolation |
 
-Temporal resolution of control parameterization. Actions are interpolated between knot points.
+`horizon`, `ctrl_dt`, and `knot_dt` must be divisible by `sim_dt`.
+Longer horizons create more simulated steps; smaller control intervals invoke
+the optimizer more often.
 
-**Purpose**: Reduces search space by smoothing actions.
+## Optimizer Parameters
 
-**Guidelines:**
-- **Agile motions** (jumping, quick grasps): `0.1-0.2s`
-- **Smooth motions** (walking, pouring): `0.2-0.4s`
+| Parameter | Meaning | Main trade-off |
+| --- | --- | --- |
+| `num_samples` | Parallel candidates | Exploration versus GPU memory and compute |
+| `max_num_iterations` | Updates per control window | Optimization depth versus latency |
+| `temperature` | Sample-weight softness | Concentration versus robustness |
+| `improvement_threshold` | Early-stop gate | Runtime versus additional refinement |
+| `first_ctrl_noise_scale` / `last_ctrl_noise_scale` | Noise across the horizon | Local versus broad exploration |
+| `final_noise_scale` | Iteration annealing target | Late-stage precision |
+
+Samples, horizon steps, and iterations multiply the amount of rollout work.
+A configuration that is fast at one experiment shape may be slow or out of
+memory at another.
+
+## Tuning Order
+
+1. Start from the override matching the dataset and entrypoint.
+2. Verify the unmodified configuration completes and produces plausible motion.
+3. Establish quality with tracking, contact, smoothness, and visual checks.
+4. Change one major work dimension at a time: samples, horizon, or iterations.
+5. Adjust noise and reward weights only after identifying the failing behavior.
+6. Repeat important comparisons across seeds or independent processes.
+
+Do not promote a configuration from aggregate reward or one attractive rollout.
+Backend throughput and end-to-end optimizer time are different measurements.
+
+## Runtime Reporting
+
+The MJWP entrypoints print a realtime rate computed as simulated control time
+divided by optimizer wall time. Task-specific runners may persist the related
+`realtime_factor` field. Use the metric already produced by the runner, report
+compile/warmup separately, and compare configurations on the same hardware and
+input surface.
+
+## Viewers
+
+Viewer selection is a string, and combinations are supported:
 
 ```bash
-# Fine control for agile task
-uv run examples/run_mjwp.py knot_dt=0.1
+# Native local viewer
+uv run examples/run_mjwp.py viewer=mujoco
 
-# Smooth interpolation
-uv run examples/run_mjwp.py knot_dt=0.3
+# Rerun logging without the native MuJoCo window
+uv run examples/run_mjwp.py viewer=rerun
+
+# Combined local and Rerun views
+uv run examples/run_mjwp.py viewer=mujoco-rerun
+
+# Viser web view
+uv run examples/run_mjwp.py viewer=viser
 ```
 
-## Sampling Parameters
+`show_viewer=false` disables interactive viewers. `save_video`, `save_rerun`,
+and `save_viser` control saved artifacts. `rerun_spawn` controls whether SPIDER
+spawns a local Rerun process; follow Rerun's current upstream documentation for
+remote server and client commands.
 
-### Number of Samples (`num_samples`)
+On a headless machine, use `MUJOCO_GL=egl` when rendering is enabled. Disable
+video as well as the viewer when no rendering output is needed.
 
-**Default**: `1024`
+## Common Failure Patterns
 
-Number of parallel trajectories to evaluate.
-
-**Impact:**
-- ✅ More samples: Better exploration, more robust
-- ❌ More samples: Higher memory usage, slower per-iteration
-- Scales linearly with GPU memory and compute
-
-**Tuning:** try it out on your GPU and pick up the largest number that doesn't cause significant slow down.
-
-### Temperature (`temperature`)
-
-**Default**: `0.1`
-
-Softmax temperature for sample weighting.
-
-**Impact:**
-- **Lower** (0.01-0.05): Sharper distribution, more optimal but can be unstable
-- **Higher** (0.2-0.5): Smoother distribution, more stable but less optimal
-
-**Tuning strategy:**
-1. Start at `0.1`
-2. If motion is shaky/unstable, increase to `0.15-0.2`
-3. If motion is stable, decrease to `0.05-0.08` for better quality
-
-Generally, this parameter is less important.
-
-```bash
-# Stable but less optimal
-uv run examples/run_mjwp.py temperature=0.2
-
-# Optimal but may be shaky
-uv run examples/run_mjwp.py temperature=0.05
-```
-
-::: tip Monitoring
-Check the `ctrl` panel in rerun viewer. If the action is shaky, increase the temperature.
-:::
-
-### Max Iterations (`max_num_iterations`)
-
-**Default**: `32`
-
-Maximum optimization iterations per control step.
-
-**Tuning:**
-1. Run with default and monitor `improvement` in Rerun
-2. If `improvement` plateaus early (< 10 iters), decrease
-3. If `improvement` is still high at end, increase
-
-```bash
-# Quick convergence
-uv run examples/run_mjwp.py max_num_iterations=8
-
-# Thorough optimization
-uv run examples/run_mjwp.py max_num_iterations=64
-```
-
-### Early Stopping (`improvement_threshold`)
-
-**Default**: `0.01`
-
-Stop optimization if improvement falls below threshold.
-
-**Usage:**
-- Start at `0` (disabled) to see full convergence
-- Gradually increase for speed: `0.01` → `0.02` → `0.05`
-
-```bash
-# No early stopping
-uv run examples/run_mjwp.py improvement_threshold=0.0
-
-# Aggressive early stopping
-uv run examples/run_mjwp.py improvement_threshold=0.05
-```
-
-## Noise Scheduling
-
-### Control Noise Scales
-
-These control exploration throughout the horizon:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `first_ctrl_noise_scale` | `0.5` | Noise at start of horizon |
-| `last_ctrl_noise_scale` | `1.0` | Noise at end of horizon |
-| `final_noise_scale` | `0.1` | Global annealing factor |
-
-**Tuning:**
-- Motion is stable? Decrease `first_ctrl_noise_scale` to `0.01-0.1`
-- Need more exploration? Increase `last_ctrl_noise_scale` to `0.1-1.0`
-- High precision task? Decrease `final_noise_scale` to `0.05`
-
-### Component-Specific Scales
-
-For dexterous hands, noise is applied differently to each component:
-
-| Parameter | Default | Purpose |
-|-----------|---------|---------|
-| `joint_noise_scale` | `0.3` | Robot joint angles |
-| `pos_noise_scale` | `0.01` | Hand base position |
-| `rot_noise_scale` | `0.03` | Hand base rotation |
-
-**Tuning guidelines:**
-- Base is stable? Decrease `pos_noise_scale` and `rot_noise_scale`
-- Finger control needs more exploration? Increase `joint_noise_scale`
-
-```bash
-# Stable base, explore fingers
-uv run examples/run_mjwp.py \
-  pos_noise_scale=0.005 \
-  rot_noise_scale=0.01 \
-  joint_noise_scale=0.5
-```
-
-## Reward Scaling
-
-Balance different tracking objectives:
-
-### Position vs Rotation
-
-```yaml
-pos_rew_scale: 1.0     # End-effector position
-rot_rew_scale: 0.3     # End-effector rotation
-```
-
-**Tuning:**
-- Task requires precise orientation (e.g., key insertion)? Increase `rot_rew_scale`
-- Position more important? Keep `rot_rew_scale` low
-
-### Joint Tracking
-
-```yaml
-joint_rew_scale: 0.003
-```
-
-Lower weight since joint tracking is less critical than end-effector pose.
-
-**Tuning:**
-- Specific joint configuration needed? Increase to `0.01-0.03`
-- Only care about end-effector? Keep very low (`0.001-0.003`)
-
-### Velocity Regularization
-
-```yaml
-vel_rew_scale: 0.0001
-```
-
-Penalizes large velocities to smooth motion.
-
-**Best practices:**
-- ✅ Adding velocity tracking helps reduce latency
-- ❌ Don't make it too large (causes sluggish motion)
-
-```bash
-# Reduce tracking latency
-uv run examples/run_mjwp.py vel_rew_scale=0.001
-
-# Disable velocity penalty
-uv run examples/run_mjwp.py vel_rew_scale=0.0
-```
-
-## Common Issues
-
-### Motion is Unstable/Shaky
-
-**Symptoms**: Robot vibrates, erratic movements, or fails to complete the task
-
-**Solutions:**
-1. Iecrease `num_samples` (most effective)
-2. Check if `horizon` is too short
-3. Increase `knot_dt` for smoother actions or decrease it for more reactive motion
-
-### Optimization Too Slow
-
-**Symptoms**: RTR (realtime rate) < 0.1
-
-**Solutions:**
-1. Reduce `horizon` (most effective)
-2. Increase `ctrl_dt` (also effective, make sure it doesn't cause instability)
+- **Out of memory:** reduce samples or horizon first; inspect the complete
+  experiment shape rather than assuming a backend change removes scaling.
+- **Slow optimization:** separate compile/warmup from steady state, then measure
+  optimizer calls and control duration.
+- **Jitter or unstable motion:** inspect control spacing, noise, contact, and
+  smoothness together; more samples alone may not fix the mechanism.
+- **Good metrics but poor replay:** verify that the scene, commands, reference,
+  and replay path come from the same artifact set.

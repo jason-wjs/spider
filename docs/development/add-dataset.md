@@ -1,173 +1,103 @@
-# Add New Dataset
+# Add a Dataset
 
-This guide explains how to add a new dataset to SPIDER for retargeting human motion data to robots.
+A dataset processor converts source-specific motion and mesh data into SPIDER's
+common keypoint and task-metadata artifacts. Raw source layouts are intentionally
+not standardized; each upstream dataset has a different API and coordinate
+system.
 
-## Overview
+## Start from the Closest Processor
 
-Adding a new dataset involves:
-1. Preparing raw data in standardized format
-2. Creating a dataset processor script
-3. Extracting hand kinematics and object poses
-4. Converting meshes to MuJoCo-compatible format
-5. Testing the integration
+Use an existing processor with similar source data:
 
-## Dataset Requirements
+| Source type | Example |
+| --- | --- |
+| MANO and object poses | `spider/process_datasets/oakinkv2.py` |
+| Bimanual hand-object sequences | `spider/process_datasets/arcticv2.py` |
+| GigaHands recordings | `spider/process_datasets/gigahand.py` |
+| Humanoid motion | `spider/process_datasets/gmr.py` |
 
-Your dataset should include:
-- **Hand motion data**: Either MANO parameters or joint angles
-- **Object information**: 3D meshes and 6D poses (position + orientation)
-- **Temporal alignment**: Synchronized hand and object trajectories
+Create `spider/process_datasets/<dataset_name>.py` with a CLI that accepts at
+least the identity fields needed by the source: dataset root, task, embodiment,
+and trial ID.
 
-Supported formats:
-- MANO parameters (shape, pose)
-- Direct joint angles
-- Wrist poses (position + rotation)
-- Object 6D poses
+## Required Outputs
 
-## Data File Structure
-
-SPIDER uses a standardized directory structure:
-
-```
-example_datasets/
-├── raw/                          # Raw data from original dataset
-│   └── my_dataset/
-│       ├── task_name_01.pkl      # Raw motion capture data
-│       ├── task_name_02.pkl
-│       └── meshes/               # Object meshes
-│           ├── cup.obj
-│           └── spoon.obj
-│
-└── processed/                    # Processed data for SPIDER
-    └── my_dataset/
-        ├── dataset_summary.json  # Dataset metadata
-        ├── assets/               # Shared assets
-        │   ├── objects/          # Object meshes
-        │   │   └── cup/
-        │   │       ├── convex/   # Convex decomposition
-        │   │       │   ├── 0.obj
-        │   │       │   ├── 1.obj
-        │   │       │   └── ...
-        │   │       └── visual.obj
-        │   └── robots/           # Robot models
-        │       └── allegro/
-        │           ├── left.xml
-        │           └── right.xml
-        └── mano/                 # Processed MANO data
-            └── bimanual/
-                └── task_name/
-                    └── 0/
-                        ├── trajectory_keypoint.npz
-                        └── info.json
-```
-
-## Step 1: Prepare Raw Data
-
-Place your raw data in the appropriate directory:
-
-```bash
-mkdir -p example_datasets/raw/my_dataset
-# Copy your raw data files here
-```
-
-### Raw Data Format
-
-Your raw data file (`.pkl` or `.npz`) should contain:
+For a hand dataset, resolve the intermediate directory with
+`get_processed_data_dir` using `robot_type="mano"`:
 
 ```python
-{
-    # Hand data (one of the following):
-    'mano_pose': [...],           # [T, 48] MANO pose parameters
-    'mano_shape': [...],          # [10] or [T, 10] MANO shape parameters
-    # OR
-    'qpos_finger_left': [...],    # [T, n_joints] Left finger joints
-    'qpos_finger_right': [...],   # [T, n_joints] Right finger joints
-    'qpos_wrist_left': [...],     # [T, 7] Left wrist pose (xyz + quat)
-    'qpos_wrist_right': [...],    # [T, 7] Right wrist pose (xyz + quat)
+from spider.io import get_processed_data_dir
 
-    # Object data:
-    'object_pose_left': [...],    # [T, 7] Object pose (xyz + quat) for left hand
-    'object_pose_right': [...],   # [T, 7] Object pose (xyz + quat) for right hand
-    'object_name_left': 'cup',    # Object identifier
-    'object_name_right': 'spoon',
-
-    # Metadata:
-    'fps': 30.0,                  # Frame rate
-    'task_name': 'pick_cup',      # Task identifier
-}
+output_dir = get_processed_data_dir(
+    dataset_dir=dataset_dir,
+    dataset_name="my_dataset",
+    robot_type="mano",
+    embodiment_type=embodiment_type,
+    task=task,
+    data_id=data_id,
+)
 ```
 
-## Step 2: Create Dataset Processor
+Write `trajectory_keypoints.npz`. The maintained hand IK paths expect the
+following arrays for the applicable sides:
 
-Create a processor script at `spider/process_datasets/my_dataset.py`:
-
-## Step 3: Handle Object Meshes
-
-Convert Meshes to OBJ Format
-
-Ensure meshes are in MuJoCo-compatible OBJ format:
-
-```python
-def convert_mesh_to_obj(input_mesh: str, output_mesh: str):
-    """
-    Convert mesh to MuJoCo-compatible OBJ format.
-
-    Supports various input formats (STL, PLY, glb, etc.)
-    """
-    import trimesh
-
-    # Load mesh
-    mesh = trimesh.load(input_mesh)
-
-    # Ensure single mesh (merge if needed)
-    if isinstance(mesh, trimesh.Scene):
-        mesh = mesh.dump(concatenate=True)
-
-    # Export as OBJ
-    mesh.export(output_mesh)
-
-    print(f"Converted {input_mesh} to {output_mesh}")
+```text
+qpos_wrist_{right,left}: [T, 7]
+qpos_finger_{right,left}: [T, num_fingertips, 7]
+qpos_obj_{right,left}: [T, 7]
 ```
 
-Place Meshes in Assets
+Seven-element poses use position followed by a MuJoCo-order quaternion
+`[x, y, z, qw, qx, qy, qz]`. For a missing side, follow the closest existing
+processor's zero-filled convention so downstream indexing stays stable.
 
-Place meshes in assets folder, for example, for cup:
+At task level, write `task_info.json` with at least:
+
+- `dataset_name`, `task`, `embodiment_type`, and `data_id`
+- `ref_dt`
+- object mesh references needed by decomposition and scene generation
+- provenance required to reproduce cropping, alignment, and coordinate changes
+
+Object visual meshes belong under:
+
+```text
+{dataset_dir}/processed/{dataset_name}/assets/objects/{object_name}/visual.obj
+```
+
+Record paths relative to `dataset_dir` when existing processors do so.
+
+## Coordinate and Timing Contract
+
+- Convert positions to the MuJoCo world frame used by the generated scene.
+- Store quaternions in `wxyz` order and normalize them.
+- Preserve the source frame rate through `ref_dt`; do not silently assume 50 Hz.
+- Document frame cropping, global rotation, translation offsets, and object mesh
+  transforms in `task_info.json`.
+- Ensure the first frame is physically compatible with the generated floor and
+  object placement.
+
+## Validate the Processor
+
+Run one short trial, then inspect paths, keys, shapes, finite values, and
+quaternion norms:
 
 ```bash
-mkdir -p example_datasets/processed/my_dataset/assets/objects/cup
-cp example_datasets/raw/my_dataset/meshes/cup.obj example_datasets/processed/my_dataset/assets/objects/cup/visual.obj
-```
-
-## Step 4: Test Your Dataset Processor
-
-Run Processor
-
-```bash
-# Process a single sample
 uv run spider/process_datasets/my_dataset.py \
-  --task=pick_cup \
-  --embodiment-type=bimanual \
-  --data-id=0
+  --task example_task \
+  --embodiment-type right \
+  --data-id 0
+
+uv run python -c "import numpy as np; d=np.load('example_datasets/processed/my_dataset/mano/right/example_task/0/trajectory_keypoints.npz'); print({k: d[k].shape for k in d.files})"
 ```
 
-### Verify Output
+Then execute the shared stages in order:
 
-Check that the output files exist and have correct format.
+1. `spider/preprocess/decompose_fast.py` or the optional CoACD-based
+   `spider/preprocess/decompose.py`
+2. optional `spider/preprocess/detect_contact.py`
+3. `spider/preprocess/generate_xml.py`
+4. `spider/preprocess/ik_fast.py`
+5. a short MJWP run
 
-```python
-import numpy as np
-
-# Load processed data
-data = np.load('example_datasets/processed/my_dataset/mano/bimanual/pick_cup/0/trajectory_keypoint.npz')
-
-print("Keys:", list(data.keys()))
-print("qpos_finger shape:", data['qpos_finger'].shape)
-print("qpos_wrist shape:", data['qpos_wrist'].shape)
-```
-
-## Resources
-
-- [OakInk Dataset](https://oakink.net/)
-- [GigaHand Dataset](https://gigahands.github.io/)
-- [Hot3D Dataset](https://github.com/facebookresearch/hot3d)
-- [MANO Hand Model](https://mano.is.tue.mpg.de/)
+Successful processor execution alone is insufficient; the generated scene and
+IK trajectory must agree with the source motion visually and numerically.

@@ -23,15 +23,15 @@ features:
 
   - icon: ⚡
     title: Fast Simulation
-    details: GPU-accelerated batched simulation with MuJoCo Warp achieving 10-20x speedup over sequential execution
+    details: GPU-accelerated batched simulation with MuJoCo Warp
 
   - icon: 📊
     title: Rich Datasets, Robots and Simulators
-    details: Works with 6+ datasets out of the box including GigaHand, Hot3D, OakInk, and more. Supports 9+ robot embodiments including dexterous hands (Allegro, Inspire, Xhand) and humanoid robots (G1, H1, T1). Supports multiple simulators including MuJoCo Warp, Genesis, and HDMI.
+    details: Dataset, robot, and simulator adapters for dexterous-hand and humanoid workflows
 
   - icon: 🔄
     title: Sim2Real Ready
-    details: Optimized trajectories can be directly deployed to real-world robots with minimal adjustments
+    details: Trajectory export tools for robot-specific deployment pipelines
 ---
 
 ## Quick Example
@@ -41,9 +41,8 @@ features:
 git clone https://huggingface.co/datasets/retarget/retarget_example example_datasets
 
 # Install with uv
-uv sync --python 3.12
-pip install --ignore-requires-python --no-deps -e .
+uv sync
 
-# Run retargeting
-uv run examples/run_mjwp.py
+# Run a reference task
+uv run examples/run_mjwp_fast.py +override=gigahand_fast task=p36-tea data_id=0
 ```
