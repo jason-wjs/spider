@@ -265,6 +265,9 @@ def main() -> None:
                 contact_force_first_row_diagnostics=bool(
                     args.mjx_contact_force_first_row_diagnostics
                 ),
+                contact_force_top_row_diagnostics=bool(
+                    args.mjx_contact_force_top_row_diagnostics
+                ),
             )
         elif args.mpc_optimizer == "legacy":
             legacy_config = _build_mpc_config(args)
@@ -662,6 +665,15 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--mjx-contact-force-top-row-diagnostics",
+        action="store_true",
+        help=(
+            "Diagnostic: materialize top MJX-Warp floor-contact row summaries "
+            "in artifact traces while keeping the optimizer scorer on the "
+            "default light physics path."
+        ),
+    )
+    parser.add_argument(
         "--mjx-contact-force-mode",
         choices=("sum_rows", "first_row"),
         default="sum_rows",
@@ -915,6 +927,10 @@ def _validate_backend_args(args: argparse.Namespace) -> None:
     if args.mjx_contact_force_first_row_diagnostics and args.mpc_backend != "mjx":
         raise ValueError(
             "--mjx-contact-force-first-row-diagnostics requires --mpc-backend mjx."
+        )
+    if args.mjx_contact_force_top_row_diagnostics and args.mpc_backend != "mjx":
+        raise ValueError(
+            "--mjx-contact-force-top-row-diagnostics requires --mpc-backend mjx."
         )
     if args.mjx_contact_force_mode != "sum_rows" and args.mpc_backend != "mjx":
         raise ValueError("--mjx-contact-force-mode requires --mpc-backend mjx.")
@@ -1401,6 +1417,15 @@ def _save_rollout(path: Path, rollout: RolloutResult) -> None:
     if floor_contact_force_peak_source is not None:
         arrays["floor_contact_force_peak_source"] = _cpu_np(
             floor_contact_force_peak_source
+        )
+    floor_contact_force_top_rows = getattr(
+        rollout,
+        "floor_contact_force_top_rows",
+        None,
+    )
+    if floor_contact_force_top_rows is not None:
+        arrays["floor_contact_force_top_rows"] = _cpu_np(
+            floor_contact_force_top_rows
         )
     np.savez_compressed(path, **arrays)
 

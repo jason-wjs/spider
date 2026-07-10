@@ -376,6 +376,7 @@ def _warp_floor_contact_summary(
     *,
     contact_groups: FootContactGeomGroups,
     include_peak_source: bool = False,
+    include_top_rows: bool = False,
     jnp,
 ) -> dict[str, object]:
     geom = jnp.asarray(impl.contact__geom)
@@ -458,6 +459,44 @@ def _warp_floor_contact_summary(
                 ),
             ]
         )
+    if include_top_rows:
+        summary["floor_contact_force_top_rows"] = jnp.asarray(
+            [
+                _warp_contact_force_top_rows(
+                    geom,
+                    active,
+                    has_floor,
+                    left,
+                    normal_force,
+                    first_row_force,
+                    world_id=world_id,
+                    impl=impl,
+                    jnp=jnp,
+                ),
+                _warp_contact_force_top_rows(
+                    geom,
+                    active,
+                    has_floor,
+                    right,
+                    normal_force,
+                    first_row_force,
+                    world_id=world_id,
+                    impl=impl,
+                    jnp=jnp,
+                ),
+                _warp_contact_force_top_rows(
+                    geom,
+                    active,
+                    has_floor,
+                    other,
+                    normal_force,
+                    first_row_force,
+                    world_id=world_id,
+                    impl=impl,
+                    jnp=jnp,
+                ),
+            ]
+        )
     return summary
 
 
@@ -511,6 +550,7 @@ def make_mjx_physics_step_fn(
     decimation: int = DECIMATION,
     contact_force_mode: str = "sum_rows",
     contact_force_first_row_diagnostics: bool = False,
+    contact_force_top_row_diagnostics: bool = False,
 ):
     """Create a batched MJX physics step function for rollout scoring."""
 
@@ -527,6 +567,7 @@ def make_mjx_physics_step_fn(
     if contact_force_mode not in {"sum_rows", "first_row"}:
         raise ValueError("contact_force_mode must be 'sum_rows' or 'first_row'")
     contact_force_first_row_diagnostics = bool(contact_force_first_row_diagnostics)
+    contact_force_top_row_diagnostics = bool(contact_force_top_row_diagnostics)
     if decimation < 0:
         raise ValueError("decimation must be non-negative")
 
@@ -613,12 +654,14 @@ def make_mjx_physics_step_fn(
                 or contact_force_first_row_diagnostics
             )
             floor_contact_force_peak_source = None
+            floor_contact_force_top_rows = None
             if _is_warp_data_impl(data_impl):
                 contact_summary = _warp_floor_contact_summary(
                     data_impl,
                     world_id,
                     contact_groups=contact_groups,
                     include_peak_source=contact_force_first_row_diagnostics,
+                    include_top_rows=contact_force_top_row_diagnostics,
                     jnp=jnp,
                 )
                 floor_contact = contact_summary["floor_contact"]
@@ -630,6 +673,9 @@ def make_mjx_physics_step_fn(
                     ]
                 floor_contact_force_peak_source = contact_summary.get(
                     "floor_contact_force_peak_source"
+                )
+                floor_contact_force_top_rows = contact_summary.get(
+                    "floor_contact_force_top_rows"
                 )
             else:
                 floor_contact = floor_contact_indicator_from_contact(
@@ -688,6 +734,11 @@ def make_mjx_physics_step_fn(
                 if floor_contact_force_peak_source is not None:
                     score_state["floor_contact_force_peak_source"] = (
                         floor_contact_force_peak_source
+                    )
+            if contact_force_top_row_diagnostics:
+                if floor_contact_force_top_rows is not None:
+                    score_state["floor_contact_force_top_rows"] = (
+                        floor_contact_force_top_rows
                     )
             score_state["contact"] = score_state["floor_contact"][:2]
             score_state["contact_force"] = score_state["floor_contact_force"][:2]
@@ -1167,6 +1218,124 @@ def _warp_contact_force_peak_source_row(
             first_efc_value,
         ]
     )
+
+
+def _warp_contact_force_top_rows(
+    geom,
+    active,
+    has_floor,
+    group,
+    normal_force,
+    first_row_force,
+    *,
+    world_id,
+    impl,
+    jnp,
+):
+    mask = active & has_floor & group
+    masked_force = jnp.where(mask, normal_force, 0.0)
+    group_sum_force = jnp.sum(masked_force)
+    active_row_count = jnp.sum(mask)
+    ids = jnp.arange(int(geom.shape[0]))
+    selected_force = masked_force
+    rows = []
+    for _ in range(4):
+        row_id = jnp.argmax(selected_force)
+        peak_force = selected_force[row_id]
+        present = peak_force > 0.0
+        rows.append(
+            _warp_contact_force_top_row_value(
+                row_id,
+                present,
+                geom,
+                normal_force,
+                first_row_force,
+                group_sum_force,
+                active_row_count,
+                world_id=world_id,
+                impl=impl,
+                jnp=jnp,
+            )
+        )
+        selected_force = jnp.where(ids == row_id, 0.0, selected_force)
+    return jnp.asarray(rows)
+
+
+def _warp_contact_force_top_row_value(
+    row_id,
+    present,
+    geom,
+    normal_force,
+    first_row_force,
+    group_sum_force,
+    active_row_count,
+    *,
+    world_id,
+    impl,
+    jnp,
+):
+    nacon = jnp.asarray(impl.nacon)
+    nacon0 = nacon[0] if len(nacon.shape) > 0 else nacon
+    dim = jnp.asarray(impl.contact__dim).astype("int32")
+    dist = jnp.asarray(impl.contact__dist)
+    margin = jnp.asarray(impl.contact__includemargin)
+    efc_rows = _warp_contact_efc_rows4(impl, jnp=jnp)
+    efc_values = efc_rows[row_id]
+    force_values = _warp_contact_efc_row_forces4(
+        impl,
+        efc_values,
+        world_id=world_id,
+        jnp=jnp,
+    )
+    row_value = jnp.where(present, row_id, -1)
+    geom0 = jnp.where(present, geom[row_id, 0], -1)
+    geom1 = jnp.where(present, geom[row_id, 1], -1)
+    return jnp.asarray(
+        [
+            row_value,
+            world_id,
+            nacon0,
+            jnp.where(present, 1.0, 0.0),
+            geom0,
+            geom1,
+            jnp.where(present, dist[row_id], 0.0),
+            jnp.where(present, margin[row_id], 0.0),
+            jnp.where(present, dim[row_id], 0),
+            jnp.where(present, efc_values[0], -1),
+            jnp.where(present, efc_values[1], -1),
+            jnp.where(present, efc_values[2], -1),
+            jnp.where(present, efc_values[3], -1),
+            jnp.where(present, force_values[0], 0.0),
+            jnp.where(present, force_values[1], 0.0),
+            jnp.where(present, force_values[2], 0.0),
+            jnp.where(present, force_values[3], 0.0),
+            jnp.where(present, first_row_force[row_id], 0.0),
+            jnp.where(present, normal_force[row_id], 0.0),
+            jnp.where(present, group_sum_force, 0.0),
+            jnp.where(present, active_row_count, 0.0),
+        ]
+    )
+
+
+def _warp_contact_efc_rows4(impl, *, jnp):
+    efc_address = jnp.asarray(impl.contact__efc_address).astype("int32")
+    if len(efc_address.shape) == 2:
+        return efc_address[:, :4]
+    dim = jnp.asarray(impl.contact__dim).astype("int32")
+    offsets = jnp.arange(4)
+    rows = efc_address[:, None] + offsets[None, :]
+    valid = (efc_address[:, None] >= 0) & (
+        offsets[None, :] < _contact_solver_row_count(dim, jnp=jnp)[:, None]
+    )
+    return jnp.where(valid, rows, -1)
+
+
+def _warp_contact_efc_row_forces4(impl, efc_rows, *, world_id, jnp):
+    efc_force = jnp.asarray(impl.efc__force)
+    if len(efc_force.shape) == 2:
+        efc_force = efc_force[world_id]
+    clipped = jnp.clip(efc_rows, 0, int(efc_force.shape[0]) - 1)
+    return jnp.where(efc_rows >= 0, efc_force[clipped], 0.0)
 
 
 def _contact_solver_row_count(dim, *, jnp):

@@ -57,6 +57,7 @@ def build_mjx_rollout_components(
     score_only_output_rescore_diagnostics: bool = False,
     contact_force_mode: str = "sum_rows",
     contact_force_first_row_diagnostics: bool = False,
+    contact_force_top_row_diagnostics: bool = False,
 ) -> MjxRolloutComponents:
     """Build explicit MJX rollout scorer/reference components."""
 
@@ -83,9 +84,17 @@ def build_mjx_rollout_components(
                 default_joint_pos=default_pos,
                 action_scale=scale,
                 contact_force_mode=contact_force_mode,
-                contact_force_first_row_diagnostics=True,
+                contact_force_first_row_diagnostics=bool(
+                    contact_force_first_row_diagnostics
+                ),
+                contact_force_top_row_diagnostics=bool(
+                    contact_force_top_row_diagnostics
+                ),
             )
-            if bool(contact_force_first_row_diagnostics)
+            if (
+                bool(contact_force_first_row_diagnostics)
+                or bool(contact_force_top_row_diagnostics)
+            )
             else physics_step_fn
         )
     if command_reference_fn is None:

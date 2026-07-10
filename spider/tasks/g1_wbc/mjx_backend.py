@@ -76,6 +76,7 @@ def run_g1_wbc_mjx_mpc(
     score_only_output_rescore_diagnostics: bool = False,
     contact_force_mode: str = "sum_rows",
     contact_force_first_row_diagnostics: bool = False,
+    contact_force_top_row_diagnostics: bool = False,
 ):
     """Run the MJX full-rollout backend or fail before touching Warp state."""
 
@@ -109,6 +110,9 @@ def run_g1_wbc_mjx_mpc(
                 contact_force_mode=contact_force_mode,
                 contact_force_first_row_diagnostics=(
                     contact_force_first_row_diagnostics
+                ),
+                contact_force_top_row_diagnostics=(
+                    contact_force_top_row_diagnostics
                 ),
                 **_guided_component_kwargs(spider_config),
             )
@@ -812,6 +816,9 @@ def run_g1_wbc_mjx_mpc(
             "contact_force_first_row_diagnostics": bool(
                 contact_force_first_row_diagnostics
             ),
+            "contact_force_top_row_diagnostics": bool(
+                contact_force_top_row_diagnostics
+            ),
             "used_baseline_fallback": False,
             "accepted_windows": accepted_windows,
             "num_windows": len(infos),
@@ -1071,6 +1078,7 @@ def _default_rollout_components(
     score_only_output_rescore_diagnostics: bool = False,
     contact_force_mode: str = "sum_rows",
     contact_force_first_row_diagnostics: bool = False,
+    contact_force_top_row_diagnostics: bool = False,
 ):
     from spider.tasks.g1_wbc.mjx_components import build_mjx_rollout_components
 
@@ -1092,6 +1100,7 @@ def _default_rollout_components(
         ),
         contact_force_mode=contact_force_mode,
         contact_force_first_row_diagnostics=contact_force_first_row_diagnostics,
+        contact_force_top_row_diagnostics=contact_force_top_row_diagnostics,
     )
 
 
@@ -2717,6 +2726,7 @@ _ROLLOUT_OPTIONAL_FRAME_TRACE_FIELDS = (
     "contact_force_first_row",
     "floor_contact_force_first_row",
     "floor_contact_force_peak_source",
+    "floor_contact_force_top_rows",
 )
 
 _ROLLOUT_STEP_TRACE_FIELDS = ("actions", "controls")
@@ -2897,6 +2907,15 @@ def _rollout_from_execute_traces(
             kwargs["floor_contact_force_peak_source"] = (
                 floor_contact_force_peak_source
             )
+    if optional_frame_available["floor_contact_force_top_rows"]:
+        floor_contact_force_top_rows = torch.cat(
+            optional_frame_values["floor_contact_force_top_rows"],
+            dim=0,
+        )
+        if _has_valid_floor_contact_force_top_rows(
+            floor_contact_force_top_rows
+        ):
+            kwargs["floor_contact_force_top_rows"] = floor_contact_force_top_rows
     return RolloutResult(
         qpos=torch.cat(frame_values["qpos"], dim=0),
         qvel=torch.cat(frame_values["qvel"], dim=0),
@@ -2927,6 +2946,12 @@ def _trace_tensor(value, *, device: torch.device) -> torch.Tensor:
 
 def _has_valid_floor_contact_force_peak_source(value: torch.Tensor) -> bool:
     if value.ndim < 4 or int(value.shape[-1]) < 1:
+        return False
+    return bool(torch.any(value[..., 0] >= 0).item())
+
+
+def _has_valid_floor_contact_force_top_rows(value: torch.Tensor) -> bool:
+    if value.ndim < 5 or int(value.shape[-1]) < 1:
         return False
     return bool(torch.any(value[..., 0] >= 0).item())
 

@@ -387,6 +387,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--mjx-contact-force-top-row-diagnostics",
+        action="store_true",
+        help=(
+            "Diagnostic: ask the MJX artifact trace to materialize top "
+            "MJX-Warp floor-contact row summaries. This is off by default "
+            "for formal speed runs."
+        ),
+    )
+    parser.add_argument(
         "--mjx-contact-force-mode",
         choices=("sum_rows", "first_row"),
         default="sum_rows",
@@ -895,6 +904,7 @@ def build_acceptance_plan(
                 bool(args.mjx_score_only_rescore_diagnostics),
                 bool(args.mjx_score_only_output_rescore_diagnostics),
                 bool(args.mjx_contact_force_first_row_diagnostics),
+                bool(args.mjx_contact_force_top_row_diagnostics),
                 str(args.mjx_contact_force_mode),
                 float(args.mjx_contact_force_active_weight),
                 args.mjx_contact_force_delta_weight,
@@ -1664,6 +1674,13 @@ def _mjx_metrics_provenance_matches(
         if observed_first_row_diagnostics is not True:
             return False
     elif observed_first_row_diagnostics not in {False, None}:
+        return False
+    expected_top_row_diagnostics = "--mjx-contact-force-top-row-diagnostics" in argv
+    observed_top_row_diagnostics = mpc.get("contact_force_top_row_diagnostics")
+    if expected_top_row_diagnostics:
+        if observed_top_row_diagnostics is not True:
+            return False
+    elif observed_top_row_diagnostics not in {False, None}:
         return False
     expected_contact_force_mode = _argv_value(argv, "--mjx-contact-force-mode")
     expected_contact_force_mode_value = (
@@ -2526,6 +2543,7 @@ def _mjx_argv_from_baseline_row(
     mjx_score_only_rescore_diagnostics: bool,
     mjx_score_only_output_rescore_diagnostics: bool,
     mjx_contact_force_first_row_diagnostics: bool,
+    mjx_contact_force_top_row_diagnostics: bool,
     mjx_contact_force_mode: str,
     mjx_contact_force_active_weight: float,
     mjx_contact_force_delta_weight: float | None,
@@ -2635,6 +2653,9 @@ def _mjx_argv_from_baseline_row(
     argv = _drop_flag(argv, "--mjx-contact-force-first-row-diagnostics")
     if bool(mjx_contact_force_first_row_diagnostics):
         argv.append("--mjx-contact-force-first-row-diagnostics")
+    argv = _drop_flag(argv, "--mjx-contact-force-top-row-diagnostics")
+    if bool(mjx_contact_force_top_row_diagnostics):
+        argv.append("--mjx-contact-force-top-row-diagnostics")
     argv = _drop_arg_with_value(argv, "--mjx-contact-force-mode")
     if str(mjx_contact_force_mode) != "sum_rows":
         argv = _set_arg(
@@ -2724,6 +2745,7 @@ def _replay_argv_from_mjx(
     argv = _drop_flag(argv, "--mjx-score-only-rescore-diagnostics")
     argv = _drop_flag(argv, "--mjx-score-only-output-rescore-diagnostics")
     argv = _drop_flag(argv, "--mjx-contact-force-first-row-diagnostics")
+    argv = _drop_flag(argv, "--mjx-contact-force-top-row-diagnostics")
     argv = _drop_arg_with_value(argv, "--mjx-contact-force-mode")
     argv = _drop_arg_with_value(argv, "--mjx-contact-force-active-weight")
     argv = _drop_arg_with_value(argv, "--mjx-contact-force-delta-weight")
@@ -3927,6 +3949,9 @@ def _row_from_metrics(metrics_path: Path) -> dict[str, Any]:
         "contact_force_mode": mpc.get("contact_force_mode"),
         "contact_force_first_row_diagnostics": mpc.get(
             "contact_force_first_row_diagnostics"
+        ),
+        "contact_force_top_row_diagnostics": mpc.get(
+            "contact_force_top_row_diagnostics"
         ),
         "current_controls_selected_windows": mpc.get(
             "current_controls_selected_windows"

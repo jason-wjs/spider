@@ -768,6 +768,119 @@ class MjxRealPhysicsTest(unittest.TestCase):
             np.array([2.0, 31.0, 3.0, 10.0, 1.0, 10.0, 3.0, 1.0]),
         )
 
+    def test_warp_floor_contact_summary_reports_top_rows(self) -> None:
+        impl = _warp_contact_impl_fixture()
+        contact_groups = FootContactGeomGroups(
+            floor_geom_ids=(3,),
+            left_foot_geom_ids=(11,),
+            right_foot_geom_ids=(25,),
+            other_robot_geom_ids=(31,),
+        )
+
+        summary = _warp_floor_contact_summary(
+            impl,
+            0,
+            contact_groups=contact_groups,
+            include_top_rows=True,
+            jnp=_NumpyJnp,
+        )
+
+        top_rows = summary["floor_contact_force_top_rows"]
+        self.assertEqual(top_rows.shape, (3, 4, 21))
+        # Columns: row_id, worldid, nacon0, active, geom0, geom1, dist,
+        # margin, dim, efc0..efc3, force0..force3, first_row_force,
+        # normal_sum_force, group_sum_force, active_row_count.
+        np.testing.assert_allclose(
+            top_rows[0, 0],
+            np.array(
+                [
+                    0.0,
+                    0.0,
+                    3.0,
+                    1.0,
+                    3.0,
+                    11.0,
+                    -0.001,
+                    0.0,
+                    1.0,
+                    0.0,
+                    -1.0,
+                    -1.0,
+                    -1.0,
+                    5.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    5.0,
+                    5.0,
+                    5.0,
+                    1.0,
+                ],
+                dtype=np.float32,
+            ),
+            atol=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            top_rows[1, 0],
+            np.array(
+                [
+                    -1.0,
+                    0.0,
+                    3.0,
+                    0.0,
+                    -1.0,
+                    -1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    -1.0,
+                    -1.0,
+                    -1.0,
+                    -1.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+                dtype=np.float32,
+            ),
+            atol=1.0e-6,
+        )
+        np.testing.assert_allclose(
+            top_rows[2, 0],
+            np.array(
+                [
+                    2.0,
+                    0.0,
+                    3.0,
+                    1.0,
+                    31.0,
+                    3.0,
+                    -0.003,
+                    0.0,
+                    3.0,
+                    1.0,
+                    2.0,
+                    3.0,
+                    4.0,
+                    1.0,
+                    2.0,
+                    3.0,
+                    4.0,
+                    1.0,
+                    10.0,
+                    10.0,
+                    1.0,
+                ],
+                dtype=np.float32,
+            ),
+            atol=1.0e-6,
+        )
+
     def test_command_reference_fn_returns_command_body_kinematics(self) -> None:
         bundle = SimpleNamespace(
             mjx_model={"body_count": 3},

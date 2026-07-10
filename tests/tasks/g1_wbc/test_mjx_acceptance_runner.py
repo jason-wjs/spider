@@ -593,6 +593,36 @@ class MjxAcceptanceRunnerTest(unittest.TestCase):
                 item.replay_argv,
             )
 
+    def test_build_acceptance_plan_can_enable_contact_force_top_row_diagnostic(
+        self,
+    ) -> None:
+        runner = load_runner()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            manifest_path = _baseline_manifest(root)
+            args = runner.parse_args(
+                [
+                    "--baseline-manifest",
+                    str(manifest_path),
+                    "--output-dir",
+                    str(root / "acceptance"),
+                    "--mjx-contact-force-top-row-diagnostics",
+                ]
+            )
+            manifest = json.loads(manifest_path.read_text())
+
+            plan = runner.build_acceptance_plan(args, manifest)
+
+        for item in plan:
+            self.assertIn(
+                "--mjx-contact-force-top-row-diagnostics",
+                item.mjx_argv,
+            )
+            self.assertNotIn(
+                "--mjx-contact-force-top-row-diagnostics",
+                item.replay_argv,
+            )
+
     def test_build_acceptance_plan_can_set_contact_force_mode(self) -> None:
         runner = load_runner()
         with tempfile.TemporaryDirectory() as tmp_dir:

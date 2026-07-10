@@ -135,6 +135,7 @@ class RolloutResult:
     contact_force_first_row: torch.Tensor | None = None
     floor_contact_force_first_row: torch.Tensor | None = None
     floor_contact_force_peak_source: torch.Tensor | None = None
+    floor_contact_force_top_rows: torch.Tensor | None = None
     dt: float = POLICY_DT
     final_last_action: torch.Tensor | None = None
     final_history_state: dict | None = None

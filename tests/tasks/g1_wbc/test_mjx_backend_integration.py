@@ -1204,6 +1204,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
             self.assertEqual(kwargs["guided_joint_gain"], 0.5)
             self.assertEqual(kwargs["contact_force_mode"], "sum_rows")
             self.assertFalse(kwargs["contact_force_first_row_diagnostics"])
+            self.assertFalse(kwargs["contact_force_top_row_diagnostics"])
             return SimpleNamespace(
                 rollout_scorer=rollout_scorer,
                 rollout_reference_factory=rollout_reference_factory,
@@ -1255,6 +1256,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertEqual(result.metadata["physics_step_count_windows"], 40)
         self.assertEqual(result.metadata["contact_force_mode"], "sum_rows")
         self.assertFalse(result.metadata["contact_force_first_row_diagnostics"])
+        self.assertFalse(result.metadata["contact_force_top_row_diagnostics"])
 
     def test_mjx_backend_rejects_malformed_fake_rollout(self) -> None:
         with self.assertRaisesRegex(ValueError, "rollout.qvel"):
@@ -1634,6 +1636,11 @@ class MjxBackendIntegrationTest(unittest.TestCase):
                     8.5 + start,
                     dtype=np.float32,
                 ),
+                "floor_contact_force_top_rows": np.full(
+                    (frames, 1, 3, 4, 21),
+                    9.5 + start,
+                    dtype=np.float32,
+                ),
                 "final_robot_state": {
                     "qpos": qpos[-1],
                     "qvel": qvel[-1],
@@ -1689,6 +1696,7 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(rollout.contact_force_first_row)
         self.assertIsNotNone(rollout.floor_contact_force_first_row)
         self.assertIsNotNone(rollout.floor_contact_force_peak_source)
+        self.assertIsNotNone(rollout.floor_contact_force_top_rows)
         torch.testing.assert_close(
             rollout.contact_force_first_row[:3],
             torch.full((3, 1, 2), 1.5),
@@ -1704,6 +1712,14 @@ class MjxBackendIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(
             rollout.floor_contact_force_peak_source[3:],
             torch.full((2, 1, 3, 8), 10.5),
+        )
+        torch.testing.assert_close(
+            rollout.floor_contact_force_top_rows[:3],
+            torch.full((3, 1, 3, 4, 21), 9.5),
+        )
+        torch.testing.assert_close(
+            rollout.floor_contact_force_top_rows[3:],
+            torch.full((2, 1, 3, 4, 21), 11.5),
         )
         torch.testing.assert_close(rollout.controls[2:], torch.full((2, 1, ACTION_DIM), 2.7))
         torch.testing.assert_close(rollout.contact_indicator[1:, :, 0], torch.ones(4, 1))

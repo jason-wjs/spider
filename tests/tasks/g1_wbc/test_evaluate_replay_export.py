@@ -55,6 +55,38 @@ class EvaluateReplayExportTest(unittest.TestCase):
                     rollout.floor_contact_force_peak_source.numpy(),
                 )
 
+    def test_save_rollout_preserves_floor_contact_force_top_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "rollout.npz"
+            rollout = RolloutResult(
+                qpos=torch.zeros(3, 1, 36),
+                qvel=torch.zeros(3, 1, 35),
+                body_pos_w=torch.zeros(3, 1, 30, 3),
+                body_quat_w=torch.zeros(3, 1, 30, 4),
+                body_lin_vel_w=torch.zeros(3, 1, 30, 3),
+                body_ang_vel_w=torch.zeros(3, 1, 30, 3),
+                actions=torch.zeros(2, 1, 29),
+                controls=torch.zeros(2, 1, 29),
+                contact_indicator=torch.zeros(3, 1, 2),
+                contact_force=torch.zeros(3, 1, 2),
+                floor_contact_indicator=torch.zeros(3, 1, 3),
+                floor_contact_force=torch.zeros(3, 1, 3),
+                floor_contact_force_top_rows=torch.arange(
+                    3 * 1 * 3 * 4 * 21,
+                    dtype=torch.float32,
+                ).reshape(3, 1, 3, 4, 21),
+                ref_indices=torch.arange(3).reshape(3, 1),
+            )
+
+            evaluate._save_rollout(path, rollout)
+
+            with np.load(path) as data:
+                self.assertIn("floor_contact_force_top_rows", data.files)
+                np.testing.assert_allclose(
+                    data["floor_contact_force_top_rows"],
+                    rollout.floor_contact_force_top_rows.numpy(),
+                )
+
     def test_jsonable_infos_preserves_nested_iteration_scalars(self) -> None:
         class FakeScalar:
             def __init__(self, value):

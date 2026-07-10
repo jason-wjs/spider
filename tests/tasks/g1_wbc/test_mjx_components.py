@@ -577,6 +577,82 @@ class MjxComponentsTest(unittest.TestCase):
         self.assertTrue(guided_tracer["record_trace"])
         self.assertIsNone(guided_tracer["command_reference_fn"])
 
+    def test_build_components_keeps_top_rows_out_of_primary_scorer(self) -> None:
+        created_physics: list[object] = []
+        captured: dict[str, object] = {"tracers": []}
+
+        def fake_make_mjx_physics_step_fn(**kwargs):
+            include_top_rows = bool(
+                kwargs.get("contact_force_top_row_diagnostics", False)
+            )
+
+            def physics_step_fn(
+                model_bundle,
+                robot_state,
+                command_qpos,
+                action,
+                step_index,
+                *,
+                runtime,
+            ):
+                raise AssertionError("not called in component wiring test")
+
+            physics_step_fn.include_top_rows = include_top_rows
+            created_physics.append(physics_step_fn)
+            return physics_step_fn
+
+        def fake_make_rollout_scorer(**kwargs):
+            captured["scorer_physics_step_fn"] = kwargs["physics_step_fn"]
+
+            def scorer(samples, reference, actor_params, model_bundle):
+                del samples, reference, actor_params, model_bundle
+                return {"score": np.zeros((1,), dtype=np.float32)}
+
+            return scorer
+
+        def fake_make_rollout_tracer(**kwargs):
+            captured["tracers"].append(
+                {
+                    "physics_step_fn": kwargs["physics_step_fn"],
+                    "record_trace": kwargs.get("record_trace", True),
+                }
+            )
+
+            def tracer(samples, reference, actor_params, model_bundle):
+                del samples, reference, actor_params, model_bundle
+                return {}
+
+            return tracer
+
+        with (
+            mock.patch(
+                "spider.tasks.g1_wbc.mjx_components.make_mjx_physics_step_fn",
+                side_effect=fake_make_mjx_physics_step_fn,
+            ),
+            mock.patch(
+                "spider.tasks.g1_wbc.mjx_rollout.make_rollout_scorer",
+                side_effect=fake_make_rollout_scorer,
+            ),
+            mock.patch(
+                "spider.tasks.g1_wbc.mjx_rollout.make_rollout_tracer",
+                side_effect=fake_make_rollout_tracer,
+            ),
+        ):
+            components = build_mjx_rollout_components(
+                runtime=_Runtime(),
+                contact_force_top_row_diagnostics=True,
+            )
+
+        self.assertTrue(callable(components.rollout_scorer))
+        self.assertEqual(len(created_physics), 2)
+        self.assertFalse(captured["scorer_physics_step_fn"].include_top_rows)
+        rollout_tracer, state_advancer, guided_tracer = captured["tracers"]
+        self.assertTrue(rollout_tracer["physics_step_fn"].include_top_rows)
+        self.assertTrue(rollout_tracer["record_trace"])
+        self.assertFalse(state_advancer["physics_step_fn"].include_top_rows)
+        self.assertFalse(state_advancer["record_trace"])
+        self.assertFalse(guided_tracer["physics_step_fn"].include_top_rows)
+
     def test_reference_factory_attaches_generated_guided_controls(self) -> None:
         def physics_step_fn(
             model_bundle,

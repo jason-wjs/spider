@@ -1169,6 +1169,11 @@ def _score_rollout_step(
             sample_count,
             jnp=jnp,
         )
+        floor_contact_force_top_rows = _ensure_floor_contact_force_top_rows(
+            step_state,
+            sample_count,
+            jnp=jnp,
+        )
         result["trace"] = {
             **_robot_state_trace(robot_state, sample_count, jnp=jnp),
             "actions": action,
@@ -1180,6 +1185,7 @@ def _score_rollout_step(
             "floor_contact_force": floor_contact_force,
             "floor_contact_force_first_row": floor_contact_force_first_row,
             "floor_contact_force_peak_source": floor_contact_force_peak_source,
+            "floor_contact_force_top_rows": floor_contact_force_top_rows,
         }
     return result
 
@@ -1310,6 +1316,11 @@ def _rollout_trace_step(
             sample_count,
             jnp=jnp,
         )
+        floor_contact_force_top_rows = _ensure_floor_contact_force_top_rows(
+            _physics_score_state,
+            sample_count,
+            jnp=jnp,
+        )
         result["trace"] = {
             **_robot_state_trace(robot_state, sample_count, jnp=jnp),
             "actions": action,
@@ -1321,6 +1332,7 @@ def _rollout_trace_step(
             "floor_contact_force": floor_contact_force,
             "floor_contact_force_first_row": floor_contact_force_first_row,
             "floor_contact_force_peak_source": floor_contact_force_peak_source,
+            "floor_contact_force_top_rows": floor_contact_force_top_rows,
         }
     return result
 
@@ -1339,6 +1351,7 @@ _FRAME_TRACE_FIELDS = (
     "floor_contact_force",
     "floor_contact_force_first_row",
     "floor_contact_force_peak_source",
+    "floor_contact_force_top_rows",
 )
 
 _STEP_TRACE_FIELDS = ("actions", "controls")
@@ -1382,6 +1395,9 @@ def _initial_rollout_trace(
     trace["floor_contact_force_first_row"] = [floor_contact_force]
     trace["floor_contact_force_peak_source"] = [
         _empty_floor_contact_force_peak_source(sample_count, jnp=jnp)
+    ]
+    trace["floor_contact_force_top_rows"] = [
+        _empty_floor_contact_force_top_rows(sample_count, jnp=jnp)
     ]
     trace["actions"] = []
     trace["controls"] = []
@@ -1533,6 +1549,21 @@ def _ensure_floor_contact_force_peak_source(
     return _empty_floor_contact_force_peak_source(sample_count, jnp=jnp)
 
 
+def _ensure_floor_contact_force_top_rows(
+    step_state: Mapping[str, object],
+    sample_count: int,
+    *,
+    jnp,
+):
+    if "floor_contact_force_top_rows" in step_state:
+        return _ensure_batch(
+            jnp.asarray(step_state["floor_contact_force_top_rows"]),
+            sample_count,
+            jnp=jnp,
+        )
+    return _empty_floor_contact_force_top_rows(sample_count, jnp=jnp)
+
+
 def _empty_floor_contact_force_peak_source(sample_count: int, *, jnp):
     value = jnp.zeros((int(sample_count), 3, 8))
     if hasattr(value, "at"):
@@ -1545,6 +1576,27 @@ def _empty_floor_contact_force_peak_source(sample_count: int, *, jnp):
     value[..., 1] = -1.0
     value[..., 2] = -1.0
     value[..., 7] = -1.0
+    return value
+
+
+def _empty_floor_contact_force_top_rows(sample_count: int, *, jnp):
+    value = jnp.zeros((int(sample_count), 3, 4, 21))
+    if hasattr(value, "at"):
+        value = value.at[..., 0].set(-1.0)
+        value = value.at[..., 4].set(-1.0)
+        value = value.at[..., 5].set(-1.0)
+        value = value.at[..., 9].set(-1.0)
+        value = value.at[..., 10].set(-1.0)
+        value = value.at[..., 11].set(-1.0)
+        return value.at[..., 12].set(-1.0)
+    value = value.copy()
+    value[..., 0] = -1.0
+    value[..., 4] = -1.0
+    value[..., 5] = -1.0
+    value[..., 9] = -1.0
+    value[..., 10] = -1.0
+    value[..., 11] = -1.0
+    value[..., 12] = -1.0
     return value
 
 
