@@ -29,8 +29,8 @@ evidence validity
 ```
 
 Speed never compensates for failed quality, provenance, repeatability, or
-replay. Historical context is in [HISTORY.md](../../HISTORY.md); the previous
-non-normative contract is [archived here](criteria_legacy_20260710.md).
+replay. Historical context is in [HISTORY.md](../../HISTORY.md); superseded
+contracts and diagnostics are available from Git history.
 
 ## Frozen Evaluation Surface
 

@@ -18,7 +18,6 @@ PLAN_PATH = (
     / "plans"
     / "2026-07-02-g1-wbc-mjx-full-rollout-plan.md"
 )
-LEGACY_DOC_PATH = DOC_PATH.with_name("criteria_legacy_20260710.md")
 
 
 class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
@@ -65,17 +64,14 @@ class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
             ">= 12x",
             "/data_team/",
             "/tmp/",
+            "criteria_legacy",
         )
         for term in forbidden_terms:
             with self.subTest(term=term):
                 self.assertNotIn(term, body)
 
-    def test_legacy_criteria_is_preserved_as_non_normative(self) -> None:
-        body = LEGACY_DOC_PATH.read_text()
-
-        self.assertIn("NON-NORMATIVE ARCHIVE", body)
-        self.assertIn("# G1 WBC MJX Full-Rollout Final Acceptance Criteria", body)
-        self.assertIn("## H100 Speed Gate", body)
+        task_files = sorted(path.name for path in DOC_PATH.parent.iterdir())
+        self.assertEqual(task_files, ["criteria.md"])
 
     def test_gpu_verification_plan_uses_wbc_mlp_stage0_checkpoint(self) -> None:
         body = PLAN_PATH.read_text()
