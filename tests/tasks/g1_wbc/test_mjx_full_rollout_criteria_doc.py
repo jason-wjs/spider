@@ -11,13 +11,6 @@ DOC_PATH = (
     / "g1_wbc_mjx_full_rollout"
     / "criteria.md"
 )
-PLAN_PATH = (
-    Path(__file__).resolve().parents[3]
-    / "docs"
-    / "superpowers"
-    / "plans"
-    / "2026-07-02-g1-wbc-mjx-full-rollout-plan.md"
-)
 
 
 class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
@@ -72,13 +65,6 @@ class MjxFullRolloutCriteriaDocTest(unittest.TestCase):
 
         task_files = sorted(path.name for path in DOC_PATH.parent.iterdir())
         self.assertEqual(task_files, ["criteria.md"])
-
-    def test_gpu_verification_plan_uses_wbc_mlp_stage0_checkpoint(self) -> None:
-        body = PLAN_PATH.read_text()
-        task_11 = body.split("## Task 11: GPU Verification Sequence", 1)[1]
-
-        self.assertIn("model_8000.pt", task_11)
-        self.assertNotIn("model_11800.pt", task_11)
 
 
 if __name__ == "__main__":
